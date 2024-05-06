@@ -1,0 +1,6 @@
+defaults:
+    - base
+
+num_examples: 35
+test_interval: 5
+test_set_size: 30

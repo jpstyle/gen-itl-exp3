@@ -1,0 +1,24 @@
+hydra:
+    run:
+        dir: "outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}-${randid:}"
+
+defaults:
+    - vision: base
+    - lang: base
+    - exp: base
+
+paths:
+    root_dir: "${hydra:runtime.cwd}"
+    data_dir: "${paths.root_dir}/datasets"
+    assets_dir: "${paths.root_dir}/assets"
+    outputs_dir: "${hydra:runtime.output_dir}"
+    cache_dir: "${paths.outputs_dir}/cache"
+    build_dir: "${paths.root_dir}/unity/Builds"
+
+agent:
+    strat_generic: "semOnly"        # Options: "semOnly", "semNeg", "semNegScal"
+    strat_assent: "doNotLearn"      # Options: "doNotLearn", "alwaysLearn", "threshold"
+    test_mode: false
+        # For measuring agent performance; disable learning & model saving if true
+
+seed: 42
