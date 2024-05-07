@@ -26,6 +26,10 @@ public class DialogueAgent : Agent
     // Stores queue of ground-truth mask info requests received from the backend
     public readonly Queue<string> gtMaskRequests = new();
 
+    // Stores currently active calibration image request received from the backend
+    [HideInInspector]
+    public int calibrationImageRequest = -1;
+
     // Communication side channel to Python backend for requesting decisions
     protected string channelUuid;
     protected MessageSideChannel backendMsgChannel;
@@ -82,9 +86,9 @@ public class DialogueAgent : Agent
         {
             // Trying to consult backend for requesting decision only when needed, in order
             // to minimize communication of visual observation data
-            if (incomingMsgBuffer.Count == 0) return;
+            if (incomingMsgBuffer.Count == 0 && calibrationImageRequest == -1) return;
 
-            // Unprocessed incoming messages exist; process and consult backend
+            // If unprocessed incoming messages exist, process and consult backend
             while (incomingMsgBuffer.Count > 0)
             {
                 // Fetch single message record from queue
@@ -126,6 +130,58 @@ public class DialogueAgent : Agent
                 );
             }
 
+            // Handle any valid calibration image request by changing (camera) pose and
+            // requesting decision (automatically sending visual observation)
+            if (calibrationImageRequest is >= 0 and < 18)
+            {
+                // Hard-coding pose changes per request int id here...
+                var rem3 = calibrationImageRequest % 3;
+                var quot9 = calibrationImageRequest / 9;
+                var quot3Rem3 = calibrationImageRequest / 3 % 3;
+                var tx = quot3Rem3 switch
+                {
+                    0 => -0.2f,
+                    1 => 0f,
+                    _ => 0.2f
+                };
+                var tz = quot9 == 0 ? -0.25f : -0.15f;
+                var rx = quot9 == 0 ? 45f : 60f;
+                var ry = (quot3Rem3, quot9, rem3) switch
+                {
+                    (0, 0, 0) => 0f,
+                    (0, 0, 1) => 15f,
+                    (0, 0, 2) => 30f,
+                    (0, 1, 0) => 15f,
+                    (0, 1, 1) => 22.5f,
+                    (0, 1, 2) => 30f,
+                    (1, 0, 0) => -15f,
+                    (1, 0, 1) => 0f,
+                    (1, 0, 2) => 15f,
+                    (1, 1, 0) => -10f,
+                    (1, 1, 1) => 0f,
+                    (1, 1, 2) => 10f,
+                    (2, 0, 0) => -30f,
+                    (2, 0, 1) => -15f,
+                    (2, 0, 2) => 0f,
+                    (2, 1, 0) => -30f,
+                    (2, 1, 1) => -22.5f,
+                    _ => -15f
+                };
+
+                // Set agent (x,z)-translation
+                transform.position = new Vector3(tx, 0.85f, tz);
+                // Set agent camera (x,y)-rotation
+                _cameraSensor.Camera.transform.eulerAngles = new Vector3(rx, ry, 0f);
+            }
+            else if (calibrationImageRequest == 18)
+            {
+                // Ensure default pose at the end of calibration image request signal
+                // Set agent (x,z)-translation
+                transform.position = new Vector3(0f, 0.85f, -0.25f);
+                // Set agent camera (x,y)-rotation
+                _cameraSensor.Camera.transform.eulerAngles = new Vector3(45f, 0f, 0f);
+            }
+
             // Now wait for decision
             RequestDecision();
         }
@@ -160,7 +216,7 @@ public class DialogueAgent : Agent
         if (masksNeeded)
         {
             yield return StartCoroutine(CaptureAnnotations());
-            
+
             // If any ground-truth mask requests are pending, handle them here by
             // sending info to backend
             if (gtMaskRequests.Count > 0)

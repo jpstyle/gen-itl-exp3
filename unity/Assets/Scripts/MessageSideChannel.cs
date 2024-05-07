@@ -44,11 +44,22 @@ public class MessageSideChannel : SideChannel
 
         // Handle system requests from backend (only concerns ground-truth masks info
         // requests currently)
-        if (speaker == "System" && utterance.StartsWith("GT mask request: "))
+        if (speaker == "System")
         {
-            var requests = utterance.Replace("GT mask request: ", "");
-            foreach (var req in requests.Split(", "))
-                _listeningAgent.gtMaskRequests.Enqueue(req);
+            // Handle any calibration image requests
+            if (utterance.StartsWith("Calibration image request: "))
+            {
+                var request = utterance.Replace("Calibration image request: ", "");
+                _listeningAgent.calibrationImageRequest = Convert.ToInt32(request);
+            }
+
+            // Handle any ground-truth masks info requests
+            if (utterance.StartsWith("GT mask request: "))
+            {
+                var requests = utterance.Replace("GT mask request: ", "");
+                foreach (var req in requests.Split(", "))
+                    _listeningAgent.gtMaskRequests.Enqueue(req);
+            }
         }
 
         // Put processed message data into incoming buffer

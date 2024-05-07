@@ -1,4 +1,4 @@
-FROM python:3.10.8
+FROM python:3.10.14
 
 SHELL ["/bin/bash", "-c"]
 
@@ -12,7 +12,6 @@ COPY python/itl/symbolic_reasoning/requirements.txt itl/symbolic_reasoning/
 COPY python/itl/practical_reasoning/requirements.txt itl/practical_reasoning/
 COPY python/itl/lpmln/requirements.txt itl/lpmln/
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir --upgrade protobuf==3.20
 RUN pip install --no-cache-dir gdown
 
 # Some graphics related libraries needed

@@ -2,7 +2,6 @@
 # arg1: Name of the container
 # arg2: CUDA device index to use
 # arg3: Docker volume to mount
-# arg4: Path to dotenv file containing environment variables (wandb secret, etc.)
 # Remaining args: Command to run with the container
 
 # Needed to expose Nvidia GPUs to Vulkan renderer
@@ -23,14 +22,12 @@ done
 # Uncomment to debug only with virtual display
 docker run -d --name $1 --gpus "device=$2" \
     --volume $3:/mnt/data_volume \
-    --volume $4:/home/nonroot/ns-arch-unity/.env \
     ${ICD_MOUNTS[@]} \
     jpstyle92/ns-arch-unity "${@:5}"
 
 # Uncomment to debug with local (linux) machine display
 # docker run -d --name $1 --gpus "device=$2" \
 #     --volume $3:/mnt/data_volume \
-#     --volume $4:/home/nonroot/ns-arch-unity/.env \
 #     --env DISPLAY=$DISPLAY --volume /tmp/.X11-unix:/tmp/.X11-unix \
 #     ${ICD_MOUNTS[@]} \
 #     jpstyle92/ns-arch-unity "${@:5}"

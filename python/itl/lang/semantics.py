@@ -4,7 +4,6 @@ from itertools import product
 from collections import defaultdict
 
 import inflect
-from delphin import ace, predicate
 
 
 class SemanticParser:

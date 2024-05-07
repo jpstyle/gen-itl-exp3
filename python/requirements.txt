@@ -6,4 +6,4 @@
 -r itl/lpmln/requirements.txt
 
 clingo
-mlagents==0.30.0
+mlagents==1.0.0

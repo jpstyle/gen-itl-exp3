@@ -8,7 +8,6 @@ import logging
 from collections import defaultdict
 
 import torch
-from pytorch_lightning.loggers import WandbLogger
 
 from .vision import VisionModule
 from .lang import LanguageModule
@@ -19,8 +18,6 @@ from .comp_actions import CompositeActions
 
 logger = logging.getLogger(__name__)
 
-
-WB_PREFIX = "wandb://"
 
 class ITLAgent:
 
@@ -123,24 +120,8 @@ class ITLAgent:
         as output of the vision module's training API)
         """
         # Resolve path to checkpoint
-        if ckpt_path.startswith(WB_PREFIX):
-            # Loading agent models stored in W&B; not implemented yet
-            raise NotImplementedError
-
-            # wb_entity = os.environ.get("WANDB_ENTITY")
-            # wb_project = os.environ.get("WANDB_PROJECT")
-            # wb_run_id = self.fs_model_path[len(WB_PREFIX):]
-
-            # local_ckpt_path = WandbLogger.download_artifact(
-            #     artifact=f"{wb_entity}/{wb_project}/model-{wb_run_id}:best_k",
-            #     save_dir=os.path.join(
-            #         self.cfg.paths.assets_dir, "vision_models", "wandb", wb_run_id
-            #     )
-            # )
-            # local_ckpt_path = os.path.join(local_ckpt_path, "model.ckpt")
-        else:
-            assert os.path.exists(ckpt_path)
-            local_ckpt_path = ckpt_path
+        assert os.path.exists(ckpt_path)
+        local_ckpt_path = ckpt_path
 
         # Load agent model checkpoint file
         try:

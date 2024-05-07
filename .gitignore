@@ -9,7 +9,6 @@ xsession.log
 ## Python
 __pycache__/
 .vscode/
-wandb/
 
 ## Unity
 /unity/[Ll]ibrary/

@@ -12,8 +12,6 @@
 **/__pycache__/
 **/.vscode/
 
-**/wandb/
-
 /.env
 
 ## Unity

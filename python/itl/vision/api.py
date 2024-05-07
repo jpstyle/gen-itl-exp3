@@ -10,22 +10,15 @@ from PIL import Image
 from itertools import product
 
 import torch
-import wandb
 import numpy as np
-import pytorch_lightning as pl
 from pycocotools import mask
-from dotenv import find_dotenv, load_dotenv
-from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 
-from .data import FewShotDataModule
 from .modeling import VisualSceneAnalyzer
 from .utils.visualize import visualize_sg_predictions
 
 logger = logging.getLogger(__name__)
 
 
-WB_PREFIX = "wandb://"
 DEF_CON = 0.6       # Default confidence value in absence of binary concept classifier
 
 class VisionModule:
@@ -51,12 +44,6 @@ class VisionModule:
 
         self.model = VisualSceneAnalyzer(self.cfg)
 
-        # Reading W&B config environment variables, if exists
-        try:
-            load_dotenv(find_dotenv(raise_error_if_not_found=True))
-        except OSError as e:
-            logger.warn(f"While reading dotenv: {e}")
-
         # If pre-trained vision model is specified, download and load weights
         if "fs_model" in self.cfg.vision.model:
             self.fs_model_path = self.cfg.vision.model.fs_model
@@ -73,37 +60,8 @@ class VisionModule:
         # W&B run id or local path to checkpoint file
         assert self.fs_model_path is not None
 
-        if self.fs_model_path.startswith(WB_PREFIX):
-            wb_entity = os.environ.get("WANDB_ENTITY")
-            wb_project = os.environ.get("WANDB_PROJECT")
-            wb_path = self.fs_model_path[len(WB_PREFIX):].split(":")
-
-            if len(wb_path) == 1:
-                wb_run_id = wb_path[0]
-                wb_alias = "best_k"
-            else:
-                assert len(wb_path) == 2
-                wb_run_id, wb_alias = wb_path
-
-            wb_full_path = f"{wb_entity}/{wb_project}/model-{wb_run_id}:{wb_alias}"
-            local_model_root_path = os.path.join(
-                self.cfg.paths.assets_dir, "vision_models", "wandb", wb_run_id
-            )
-            local_ckpt_path = os.path.join(local_model_root_path, f"model_{wb_alias}.ckpt")
-            if not os.path.exists(local_ckpt_path):
-                # Download if needed (remove current file if want to re-download)
-                local_ckpt_path = wandb.Api().artifact(wb_full_path).download(
-                    root=local_model_root_path
-                )
-                os.rename(
-                    os.path.join(local_ckpt_path, f"model.ckpt"),
-                    os.path.join(local_ckpt_path, f"model_{wb_alias}.ckpt")
-                )
-                local_ckpt_path = os.path.join(local_ckpt_path, f"model_{wb_alias}.ckpt")
-            logger.info(f"Loading few-shot component weights from {wb_full_path}")
-        else:
-            local_ckpt_path = self.fs_model_path
-            logger.info(f"Loading few-shot component weights from {local_ckpt_path}")
+        local_ckpt_path = self.fs_model_path
+        logger.info(f"Loading few-shot component weights from {local_ckpt_path}")
 
         ckpt = torch.load(local_ckpt_path)
         self.model.load_state_dict(ckpt["state_dict"], strict=False)
@@ -502,91 +460,6 @@ class VisionModule:
 
                 self.scene[oi]["pred_rel"][oj][0] = intersection_A / mask2_A
                 self.scene[oj]["pred_rel"][oi][0] = intersection_A / mask1_A
-
-    def train(self):
-        """
-        Training few-shot visual object detection & class/attribute classification
-        model with specified dataset. Uses a pre-trained Deformable DETR as feature
-        extraction backbone and learns lightweight MLP blocks (one each for class
-        and attribute prediction) for embedding raw feature vectors onto a metric
-        space where instances of the same concepts are placed closer. (Mostly likely
-        not called by end user.)
-        """
-        # Prepare DataModule from data config
-        dm = FewShotDataModule(self.cfg)
-
-        # Configure W&B logger
-        wb_kwargs = {
-            "project": os.environ.get("WANDB_PROJECT"),
-            "entity": os.environ.get("WANDB_ENTITY"),
-            "save_dir": self.cfg.paths.outputs_dir
-        }
-        # Whether to run offline
-        if self.cfg.vision.offline:
-            wb_kwargs["offline"] = True
-        else:
-            wb_kwargs["log_model"] = True
-        # Whether to resume training from previous few-shot components
-        if "fs_model" in self.cfg.vision.model:
-            if (self.cfg.vision.model.fs_model.startswith(WB_PREFIX) and
-                self.cfg.vision.optim.resume):
-                wb_path = self.cfg.vision.model.fs_model[len(WB_PREFIX):].split(":")
-                wb_kwargs["id"] = wb_path[0]
-                wb_kwargs["resume"] = "must"
-        wb_logger = WandbLogger(**wb_kwargs)
-
-        # Configure and run trainer
-        trainer = pl.Trainer(
-            accelerator="auto",
-            max_steps=self.cfg.vision.optim.max_steps,
-            # check_val_every_n_epoch=None,       # Iteration-based val
-            log_every_n_steps=self.cfg.vision.optim.log_interval,
-            val_check_interval=self.cfg.vision.optim.val_interval,
-            num_sanity_val_steps=0,
-            logger=wb_logger,
-            callbacks=[
-                ModelCheckpoint(
-                    monitor="val_loss",
-                    every_n_train_steps=self.cfg.vision.optim.val_interval,
-                    save_last=True
-                ),
-                LearningRateMonitor(logging_interval='step')
-            ]
-        )
-        # trainer.validate(self.model, datamodule=dm)
-        trainer.fit(self.model, datamodule=dm)
-
-    def evaluate(self):
-        """
-        Evaluate best model from a run on test dataset
-        """
-        # Prepare DataModule from data config
-        dm = FewShotDataModule(self.cfg)
-
-        if "fs_model" in self.cfg.vision.model:
-            if self.cfg.vision.model.fs_model.startswith(WB_PREFIX):
-                wb_path = self.cfg.vision.model.fs_model[len(WB_PREFIX):].split(":")
-
-                # Configure W&B logger
-                wb_kwargs = {
-                    "project": os.environ.get("WANDB_PROJECT"),
-                    "entity": os.environ.get("WANDB_ENTITY"),
-                    "save_dir": self.cfg.paths.outputs_dir,
-                    "id": wb_path[0],
-                    "resume": "must"
-                }
-                # Whether to run offline
-                if self.cfg.vision.offline:
-                    wb_kwargs["offline"] = True
-
-                logger = WandbLogger(**wb_kwargs)
-            else:
-                logger = False
-        else:
-            logger = False
-
-        trainer = pl.Trainer(accelerator="auto", logger=logger)
-        trainer.test(self.model, datamodule=dm)
 
     def add_concept(self, conc_type):
         """

@@ -1,8 +1,8 @@
 """
-Script for running interactive symbol grounding experiments. Each experiment run
-consists of the initial probing question from the (simulated) user and the ensuing
-series of reactions that differ based on the agent's belief states and dialogue
-participants' choice of dialogue strategies.
+Script for running 'learning assembly domain from demonstrations' experiments. Each
+experiment run consists of the initial assembly request from the (simulated) user
+and the ensuing series of interactions that differ based on the agent's belief states
+and dialogue participants' choice of dialogue strategies.
 
 Can be run in 'training mode' or 'test mode'. Different statistics are recorded
 for each mode. For the former, we track the cumulative regret curves across the
@@ -17,6 +17,7 @@ sys.path.insert(
     os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 )
 import uuid
+import random
 import logging
 import warnings
 warnings.filterwarnings("ignore")
@@ -25,7 +26,6 @@ from collections import defaultdict
 
 import hydra
 import numpy as np
-import pytorch_lightning as pl
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 from mlagents_envs.environment import UnityEnvironment
@@ -47,7 +47,8 @@ def main(cfg):
     print(OmegaConf.to_yaml(cfg, resolve=True))
 
     # Set seed
-    pl.seed_everything(cfg.seed)
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
 
     # Experiment tag
     exp_tag = "_".join([
@@ -209,10 +210,34 @@ def main(cfg):
     # Start communication with Unity
     env = UnityEnvironment(
         # Uncomment next line when running with Unity linux build
-        f"{cfg.paths.build_dir}/truck_domain.x86_64",
+        # f"{cfg.paths.build_dir}/truck_domain.x86_64",
         side_channels=[student_channel, teacher_channel, env_par_channel],
         timeout_wait=600, seed=cfg.seed
     )
+
+    # Camera calibration as needed
+    if True:
+        logger.info(f"Sys> Calibrating agent camera...")
+
+        # Request images (#=18) containing a checkerboard pattern in the view,
+        # used for camera calibration
+        calib_images = []
+        for i in range(18):
+            # Request image and wait
+            student_channel.send_string("System", f"Calibration image request: {i}", {})
+            env.step()
+
+            # Fetch image from response and append to list
+            b_name, b_spec = list(env.behavior_specs.items())[0]
+            assert b_name.startswith("StudentBehavior")
+            dec_steps, _ = env.get_steps(b_name)
+            vis_obs = (dec_steps[0].obs[0] * 255).astype(np.uint8).transpose(1,2,0)
+            vis_obs = Image.fromarray(vis_obs, mode="RGB")
+            calib_images.append(vis_obs)
+
+        # Send end-of-request signal
+        student_channel.send_string("System", "Calibration image request: 18", {})
+        env.step()
 
     for i in range(cfg.exp.num_episodes):
         logger.info(f"Sys> Episode {i+1})")

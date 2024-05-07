@@ -8,8 +8,8 @@ from collections import defaultdict
 import cv2
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-import pytorch_lightning as pl
 from tqdm import tqdm
 from omegaconf import OmegaConf
 from PIL import ImageFilter
@@ -27,7 +27,7 @@ from ..utils import flatten_cfg
 
 BLUR_RADIUS = 5                 # Gaussian blur kernel radius for background image
 
-class VisualSceneAnalyzer(pl.LightningModule):
+class VisualSceneAnalyzer(nn.Module):
     """
     Few-shot visual object detection (concept recognition & segmentation) model
     """
@@ -83,176 +83,8 @@ class VisualSceneAnalyzer(pl.LightningModule):
         #     else:
         #         self.to_train_prefixes = []
 
-        self.validation_step_outputs = defaultdict(list)
-        self.test_step_outputs = defaultdict(list)
-
-        flattened_cfg = flatten_cfg(OmegaConf.to_container(self.cfg, resolve=True))
-        self.save_hyperparameters(flattened_cfg)
-
         # For caching image embeddings for __forward__ inputs
         self.processed_img_cached = None
-
-    def training_step(self, batch, *_):
-        segm_only = self.cfg.vision.task == "rgb_segm_only"
-        losses, metrics = process_batch(self, batch, segm_only)
-
-        conc_type = batch[1]
-
-        # Log loss values per type
-        for name, val in losses.items():
-            self.log(f"train_loss_{name}_{conc_type}", val)
-
-        # Aggregate loss for the batch
-        total_loss = sum(
-            weight * losses[name] for name, weight in self.loss_weights.items()
-            if name in losses
-        )
-        self.log(f"train_loss_{conc_type}", total_loss)
-
-        # Log metric values per type
-        for name, val in metrics.items():
-            self.log(f"train_metric_{name}_{conc_type}", val)
-
-        return total_loss
-
-    def validation_step(self, batch, batch_idx, dataloader_idx):
-        segm_only = self.cfg.vision.task == "rgb_segm_only"
-        loss, metrics = process_batch(self, batch, segm_only)
-        pred = loss, metrics, batch[1]
-        self.validation_step_outputs[dataloader_idx].append(pred)
-        return pred
-
-    def on_validation_epoch_end(self):
-        outputs = list(self.validation_step_outputs.values())
-
-        avg_total_losses = []
-        for outputs_per_dataloader in outputs:
-            if len(outputs_per_dataloader) == 0:
-                continue
-
-            conc_type = outputs_per_dataloader[0][2]
-
-            # Log epoch average loss
-            avg_losses = defaultdict(list)
-            for loss_type in outputs_per_dataloader[0][0]:
-                for losses, _, _ in outputs_per_dataloader:
-                    avg_losses[loss_type].append(losses[loss_type])
-
-            for loss_type, vals in avg_losses.items():
-                avg_val = sum(vals) / len(vals)
-                avg_losses[loss_type] = avg_val
-                self.log(
-                    f"val_loss_{loss_type}_{conc_type}", avg_val,
-                    add_dataloader_idx=False
-                )
-
-            avg_total_loss = sum(
-                weight * avg_losses[name] for name, weight in self.loss_weights.items()
-                if name in avg_losses
-            )
-            self.log(
-                f"val_loss_{conc_type}", avg_total_loss.item(), add_dataloader_idx=False
-            )
-            avg_total_losses.append(avg_total_loss)
-
-            # Log epoch average metrics
-            avg_metrics = defaultdict(list)
-            for metric_type in outputs_per_dataloader[0][1]:
-                for _, metrics, _ in outputs_per_dataloader:
-                    avg_metrics[metric_type].append(metrics[metric_type])
-
-            for metric_type, vals in avg_metrics.items():
-                avg_val = sum(vals) / len(vals)
-                self.log(
-                    f"val_metric_{metric_type}_{conc_type}", avg_val,
-                    add_dataloader_idx=False
-                )
-
-        # Total validation loss
-        final_avg_loss = sum(avg_total_losses) / (len(avg_total_losses) / len(outputs))
-        self.log(f"val_loss", final_avg_loss, add_dataloader_idx=False)
-
-    def test_step(self, batch, dataloader_idx):
-        segm_only = self.cfg.vision.task == "rgb_segm_only"
-        _, metrics = process_batch(self, batch, segm_only)
-        pred = metrics, batch[1]
-        self.test_step_outputs[dataloader_idx].append(pred)
-        return pred
-    
-    def test_epoch_end(self):
-        outputs = list(self.test_step_outputs.values())
-
-        for outputs_per_dataloader in outputs:
-            if len(outputs_per_dataloader) == 0:
-                continue
-
-            conc_type = outputs_per_dataloader[0][1]
-
-            # Log epoch average metrics
-            avg_metrics = defaultdict(list)
-            for metric_type in outputs_per_dataloader[0][0]:
-                for metrics, _ in outputs_per_dataloader:
-                    avg_metrics[metric_type].append(metrics[metric_type])
-            
-            for metric_type, vals in avg_metrics.items():
-                avg_val = sum(vals) / len(vals)
-                self.log(
-                    f"test_{metric_type}_{conc_type}", avg_val, add_dataloader_idx=False
-                )
-
-    def configure_optimizers(self):
-        # Populate optimizer configs
-        optim_kwargs = {}
-        if "init_lr" in self.cfg.vision.optim:
-            optim_kwargs["lr"] = self.cfg.vision.optim.init_lr
-        if "beta1_1m" in self.cfg.vision.optim and "beta2_1m" in self.cfg.vision.optim:
-            optim_kwargs["betas"] = (
-                1-self.cfg.vision.optim.beta1_1m, 1-self.cfg.vision.optim.beta2_1m
-            )
-        if "eps" in self.cfg.vision.optim:
-            optim_kwargs["eps"] = self.cfg.vision.optim.eps
-
-        # Construct optimizer instance
-        optim = AdamW(self.parameters(), **optim_kwargs)
-
-        # Populate LR scheduler configs
-        sched_kwargs = {}
-        if "lr_scheduler_milestones" in self.cfg.vision.optim:
-            sched_kwargs["milestones"] = [
-                int(s * self.cfg.vision.optim.max_steps)
-                for s in self.cfg.vision.optim.lr_scheduler_milestones
-            ]
-        if "lr_scheduler_gamma" in self.cfg.vision.optim:
-            sched_kwargs["gamma"] = self.cfg.vision.optim.lr_scheduler_gamma
-
-        # Construct LR scheduler instance
-        Scheduler = getattr(
-            torch.optim.lr_scheduler, self.cfg.vision.optim.lr_scheduler
-        )
-        sched = Scheduler(optim, **sched_kwargs)
-
-        return {
-            "optimizer": optim,
-            "lr_scheduler": {
-                "scheduler": sched,
-                "interval": "step"
-            }
-        }
-
-    def on_save_checkpoint(self, checkpoint):
-        """
-        No need to save weights for pretrained components; del their weights to
-        leave params for the newly added components only
-        """
-        # state_dict_filtered = OrderedDict()
-        # for k, v in checkpoint["state_dict"].items():
-        #     if k.startswith("sam.vision_encoder."):
-        #         continue
-        #     if k.startswith("sam.prompt_encoder."):
-        #         continue
-        #     state_dict_filtered[k] = v
-        # checkpoint["state_dict"] = state_dict_filtered
-        pass
 
     def forward(self, image, masks=None, search_conds=None):
         """

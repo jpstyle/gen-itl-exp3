@@ -37,6 +37,9 @@ public class TeacherAgent : DialogueAgent
         // Fetch environment parameters received from python backend
         var envParams = Academy.Instance.EnvironmentParameters;
 
+        // Setup episode only if any environment parameters are provided
+        if (envParams.Keys().Count == 0) return;
+
         // Destroy any existing truck & bogus objects
         var existingTruck = GameObject.Find("truck");
         if (existingTruck is not null)
