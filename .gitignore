@@ -18,7 +18,6 @@ __pycache__/
 /unity/[Bb]uilds/
 /unity/[Ll]ogs/
 /unity/[Mm]emoryCaptures/
-/unity/[ProjectSettings]/
 /unity/[UserSettings]/
 
 # Some assets may be unnecessary for commits or sensitive (license issue, etc.)
