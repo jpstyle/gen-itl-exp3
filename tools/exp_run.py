@@ -23,8 +23,10 @@ import warnings
 warnings.filterwarnings("ignore")
 from PIL import Image
 from collections import defaultdict
+from itertools import product
 
 import hydra
+import cv2 as cv
 import numpy as np
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
@@ -216,13 +218,13 @@ def main(cfg):
     )
 
     # Camera calibration as needed
-    if False:
+    if True:
         logger.info(f"Sys> Calibrating agent camera...")
 
-        # Request images (#=18) containing a checkerboard pattern in the view,
+        # Request images (#=24) containing a checkerboard pattern in the view,
         # used for camera calibration
         calib_images = []
-        for i in range(18):
+        for i in range(24):
             # Request image and wait
             student_channel.send_string("System", f"Calibration image request: {i}", {})
             env.step()
@@ -232,12 +234,37 @@ def main(cfg):
             assert b_name.startswith("StudentBehavior")
             dec_steps, _ = env.get_steps(b_name)
             vis_obs = (dec_steps[0].obs[0] * 255).astype(np.uint8).transpose(1,2,0)
-            vis_obs = Image.fromarray(vis_obs, mode="RGB")
+            vis_obs = np.ascontiguousarray(vis_obs, dtype=np.uint8)
             calib_images.append(vis_obs)
+
+        # Real-world 3d coordinates of grid points
+        x_grid = [0.05 * (6-i) - 0.15 for i in range(7)]
+        y_grid = [0.05 * i + 0.875 for i in range(6)]
+        points_3d = [np.array([
+            [x_val, y_val, 0] for y_val, x_val in product(y_grid, x_grid)   # Row-major
+        ], dtype=np.float32)] * len(calib_images)
+
+        points_2d = []
+        refinement_criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        for img in calib_images:
+            # Find corners from image, then refine the 2d coordinates with grayscale version
+            gray = cv.cvtColor(img, cv.COLOR_RGB2GRAY)
+            found, corners = cv.findChessboardCorners(img, (7, 6), None)
+            if not found:
+                # Generally happens if the chessboard texture doesn't have 'border area'
+                raise ValueError("Calibration chessboard pattern not found")
+            corners = cv.cornerSubPix(gray, corners, (11, 11), (-1, -1), refinement_criteria)
+
+            points_2d.append(corners)
+
+        # Obtain camera calibration results
+        _, cam_K, distortion_coeffs, rotations, translations = cv.calibrateCamera(
+            points_3d, points_2d, gray.shape[::-1], None, None
+        )
 
     # Send end-of-request signal so that agent's default position is ensured and
     # chessboard pattern object is deactivated
-    student_channel.send_string("System", "Calibration image request: 18", {})
+    student_channel.send_string("System", "Calibration image request: 24", {})
     env.step()
 
     for i in range(cfg.exp.num_episodes):

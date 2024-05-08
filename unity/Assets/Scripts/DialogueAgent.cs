@@ -133,40 +133,46 @@ public class DialogueAgent : Agent
 
             // Handle any valid calibration image request by changing (camera) pose and
             // requesting decision (automatically sending visual observation)
-            if (calibrationImageRequest is >= 0 and < 18)
+            if (calibrationImageRequest is >= 0 and < 24)
             {
                 // Hard-coding pose changes per request int id here...
-                var rem3 = calibrationImageRequest % 3;
-                var quot9 = calibrationImageRequest / 9;
-                var quot3Rem3 = calibrationImageRequest / 3 % 3;
-                var tx = quot3Rem3 switch
+                var rem4 = calibrationImageRequest % 4;
+                var quot12 = calibrationImageRequest / 12;
+                var quot4Rem3 = calibrationImageRequest / 4 % 3;
+                var tx = quot4Rem3 switch
                 {
                     0 => -0.25f,
                     1 => 0f,
                     _ => 0.25f
                 };
-                var tz = quot9 == 0 ? -0.25f : -0.15f;
-                var rx = quot9 == 0 ? 45f : 60f;
-                var ry = (quot3Rem3, quot9, rem3) switch
+                var tz = quot12 == 0 ? -0.8f : -0.7f;
+                var rx = quot12 == 0 ? 15f : 30f;
+                var ry = (quot4Rem3, quot12, rem4) switch
                 {
-                    (0, 0, 0) => 15f,
-                    (0, 0, 1) => 30f,
-                    (0, 0, 2) => 45f,
-                    (0, 1, 0) => 15f,
-                    (0, 1, 1) => 30f,
-                    (0, 1, 2) => 45f,
+                    (0, 0, 0) => 10f,
+                    (0, 0, 1) => 20f,
+                    (0, 0, 2) => 30f,
+                    (0, 0, 3) => 40f,
+                    (0, 1, 0) => 5f,
+                    (0, 1, 1) => 15f,
+                    (0, 1, 2) => 25f,
+                    (0, 1, 3) => 35f,
                     (1, 0, 0) => -15f,
-                    (1, 0, 1) => 0f,
-                    (1, 0, 2) => 15f,
-                    (1, 1, 0) => -25f,
-                    (1, 1, 1) => 0f,
-                    (1, 1, 2) => 25f,
-                    (2, 0, 0) => -45f,
+                    (1, 0, 1) => -5f,
+                    (1, 0, 2) => 5f,
+                    (1, 0, 3) => 15f,
+                    (1, 1, 0) => -15f,
+                    (1, 1, 1) => -5f,
+                    (1, 1, 2) => 5f,
+                    (1, 1, 3) => 15f,
+                    (2, 0, 0) => -40f,
                     (2, 0, 1) => -30f,
-                    (2, 0, 2) => -15f,
-                    (2, 1, 0) => -45f,
-                    (2, 1, 1) => -30f,
-                    _ => -15f
+                    (2, 0, 2) => -20f,
+                    (2, 0, 3) => -10f,
+                    (2, 1, 0) => -35f,
+                    (2, 1, 1) => -25f,
+                    (2, 1, 2) => -15f,
+                    _ => -5f
                 };
 
                 // Set agent (x,z)-translation
@@ -174,7 +180,7 @@ public class DialogueAgent : Agent
                 // Set agent camera (x,y)-rotation
                 _cameraSensor.Camera.transform.eulerAngles = new Vector3(rx, ry, 0f);
             }
-            else if (calibrationImageRequest == 18)
+            else if (calibrationImageRequest == 24)
             {
                 // Deactivate chessboard pattern object
                 // ReSharper disable once Unity.PerformanceCriticalCodeInvocation
