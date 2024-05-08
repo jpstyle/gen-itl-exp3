@@ -22,7 +22,7 @@
 /unity/[Bb]uilds/
 /unity/[Ll]ogs/
 /unity/[Mm]emoryCaptures/
-/unity/[UserSettings]/
+/unity/[Uu]serSettings/
 
 # Some assets may be unnecessary for commits or sensitive (license issue, etc.)
 # /unity/[Aa]ssets/[Mm]odels/

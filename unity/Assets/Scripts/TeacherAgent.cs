@@ -112,7 +112,7 @@ public class TeacherAgent : DialogueAgent
             var newPart = Instantiate(sampledPart, partSlotTf);
             newPart.name = sampledPart.name;        // Not like 'necessary' but just coz
         }
-        // Need to update closest children after the replacements
+        // Need to update the closest children after the replacements
         truck.GetComponent<EnvEntity>().UpdateClosestChildren();
 
         // Color parts if applicable
@@ -149,10 +149,6 @@ public class TeacherAgent : DialogueAgent
 
         // Currently stored annotation info is now obsolete
         EnvEntity.annotationStorage.annotationsUpToDate = false;
-
-        // Clean dialogue history and add new episode header record
-        dialogueUI.ClearHistory();
-        dialogueUI.CommitUtterance("System", $"Start episode {Academy.Instance.EpisodeCount}");
     }
 
     public override void OnActionReceived(ActionBuffers actionBuffers)

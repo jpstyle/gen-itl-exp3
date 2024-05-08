@@ -216,7 +216,7 @@ def main(cfg):
     )
 
     # Camera calibration as needed
-    if True:
+    if False:
         logger.info(f"Sys> Calibrating agent camera...")
 
         # Request images (#=18) containing a checkerboard pattern in the view,
@@ -235,9 +235,10 @@ def main(cfg):
             vis_obs = Image.fromarray(vis_obs, mode="RGB")
             calib_images.append(vis_obs)
 
-        # Send end-of-request signal
-        student_channel.send_string("System", "Calibration image request: 18", {})
-        env.step()
+    # Send end-of-request signal so that agent's default position is ensured and
+    # chessboard pattern object is deactivated
+    student_channel.send_string("System", "Calibration image request: 18", {})
+    env.step()
 
     for i in range(cfg.exp.num_episodes):
         logger.info(f"Sys> Episode {i+1})")
@@ -259,7 +260,7 @@ def main(cfg):
         teacher_channel.send_string(
             "Teacher", opening_output[0]["utterance"], opening_output[0]["pointing"]
         )
-        logger.info(f"L> {TAB}{opening_output[0]['utterance']}")
+        logger.info(f"T> {TAB}{opening_output[0]['utterance']}")
 
         # Let the settings take effect and begin the episode
         env.reset()

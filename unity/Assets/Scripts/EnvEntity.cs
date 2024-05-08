@@ -68,18 +68,6 @@ public class EnvEntity : MonoBehaviour
                 "Associated gameObject of an EnvEntity must have a Labeling component"
             );
         uid = $"ent_{labeling.instanceId}";
-
-        // Register this EnvEntity to existing pointer UI controllers
-        var pointerUIs = FindObjectsByType<PointerUI>(FindObjectsSortMode.None);
-        foreach (var pUI in pointerUIs)
-            pUI.AddEnvEntity(this);
-    }
-
-    private void OnDestroy()
-    {
-        var pointerUIs = FindObjectsByType<PointerUI>(FindObjectsSortMode.None);
-        foreach (var pUI in pointerUIs)
-            pUI.DelEnvEntity(this);
     }
 
     private static List<EnvEntity> ClosestChildren(GameObject gObj)
@@ -285,7 +273,7 @@ public class EnvEntity : MonoBehaviour
     public static EnvEntity FindByMask(float[] msk, int displayId)
     {
         // Fetch EnvEntity with highest box-IoU on specified provided display (if exists).
-        // Ideally we would use mask-IoU but it takes too long and box-IoU is sufficiently
+        // Ideally we would use mask-IoU, but it takes too long and box-IoU is sufficiently
         // accurate for our use cases.
         EnvEntity refEnt = null;
         var maxIoU = 0f;
@@ -357,11 +345,6 @@ public class EnvEntity : MonoBehaviour
             bogusEnt.uid = $"ent_{newUid}";
             bogusEnt.masks = new Dictionary<int, Color32[]>();
             bogusEnt.boxes = new Dictionary<int, Rect>();
-
-            // Register the bogus to existing pointer UI controllers
-            var pointerUIs = FindObjectsByType<PointerUI>(FindObjectsSortMode.None);
-            foreach (var pUI in pointerUIs)
-                pUI.AddEnvEntity(bogusEnt);
 
             // Obtain & store mask and box
             var hotBit = new Color32(0, 0, 0, 255);

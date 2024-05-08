@@ -15,9 +15,8 @@ public class DialogueAgent : Agent
     // String identifier name for the dialogue participant agent
     public string dialogueParticipantID;
 
-    // Commit utterances through this dialogue UI
-    [HideInInspector]
-    public DialogueUI dialogueUI;
+    // Commit utterances through this dialogue channel
+    public DialogueChannel dialogueChannel;
 
     // Message communication buffer queues
     public readonly Queue<RecordData> incomingMsgBuffer = new();
@@ -63,6 +62,8 @@ public class DialogueAgent : Agent
 
         _behaviorType = GetComponent<BehaviorParameters>().BehaviorType;
         _nextTimeToAct = Time.time;
+
+        dialogueChannel.dialogueParticipants.Add(this);
     }
 
     public override void OnEpisodeBegin()
@@ -140,31 +141,31 @@ public class DialogueAgent : Agent
                 var quot3Rem3 = calibrationImageRequest / 3 % 3;
                 var tx = quot3Rem3 switch
                 {
-                    0 => -0.2f,
+                    0 => -0.25f,
                     1 => 0f,
-                    _ => 0.2f
+                    _ => 0.25f
                 };
                 var tz = quot9 == 0 ? -0.25f : -0.15f;
                 var rx = quot9 == 0 ? 45f : 60f;
                 var ry = (quot3Rem3, quot9, rem3) switch
                 {
-                    (0, 0, 0) => 0f,
-                    (0, 0, 1) => 15f,
-                    (0, 0, 2) => 30f,
+                    (0, 0, 0) => 15f,
+                    (0, 0, 1) => 30f,
+                    (0, 0, 2) => 45f,
                     (0, 1, 0) => 15f,
-                    (0, 1, 1) => 22.5f,
-                    (0, 1, 2) => 30f,
+                    (0, 1, 1) => 30f,
+                    (0, 1, 2) => 45f,
                     (1, 0, 0) => -15f,
                     (1, 0, 1) => 0f,
                     (1, 0, 2) => 15f,
-                    (1, 1, 0) => -10f,
+                    (1, 1, 0) => -25f,
                     (1, 1, 1) => 0f,
-                    (1, 1, 2) => 10f,
-                    (2, 0, 0) => -30f,
-                    (2, 0, 1) => -15f,
-                    (2, 0, 2) => 0f,
-                    (2, 1, 0) => -30f,
-                    (2, 1, 1) => -22.5f,
+                    (1, 1, 2) => 25f,
+                    (2, 0, 0) => -45f,
+                    (2, 0, 1) => -30f,
+                    (2, 0, 2) => -15f,
+                    (2, 1, 0) => -45f,
+                    (2, 1, 1) => -30f,
                     _ => -15f
                 };
 
@@ -175,11 +176,19 @@ public class DialogueAgent : Agent
             }
             else if (calibrationImageRequest == 18)
             {
+                // Deactivate chessboard pattern object
+                // ReSharper disable once Unity.PerformanceCriticalCodeInvocation
+                var chessboard = GameObject.Find("Chessboard");
+                chessboard.SetActive(false);
+
                 // Ensure default pose at the end of calibration image request signal
                 // Set agent (x,z)-translation
                 transform.position = new Vector3(0f, 0.85f, -0.25f);
                 // Set agent camera (x,y)-rotation
                 _cameraSensor.Camera.transform.eulerAngles = new Vector3(45f, 0f, 0f);
+
+                // Turn off request flag
+                calibrationImageRequest = -1;
             }
 
             // Now wait for decision
@@ -291,11 +300,11 @@ public class DialogueAgent : Agent
                     }
                 }
 
-                dialogueUI.CommitUtterance(dialogueParticipantID, utterance, demRefsResolved);
+                dialogueChannel.CommitUtterance(dialogueParticipantID, utterance, demRefsResolved);
             }
             else
                 // No demonstrative references to process and resolve
-                dialogueUI.CommitUtterance(dialogueParticipantID, utterance);
+                dialogueChannel.CommitUtterance(dialogueParticipantID, utterance);
         }
 
         // Reset flag on exit

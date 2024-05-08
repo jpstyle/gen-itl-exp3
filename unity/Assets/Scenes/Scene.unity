@@ -119,71 +119,6 @@ NavMeshSettings:
     debug:
       m_Flags: 0
   m_NavMeshData: {fileID: 0}
---- !u!1 &447426935
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 447426937}
-  - component: {fileID: 447426936}
-  - component: {fileID: 447426938}
-  m_Layer: 5
-  m_Name: Dialogue UI
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &447426936
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 447426935}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 19102, guid: 0000000000000000e000000000000000, type: 0}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  m_PanelSettings: {fileID: 11400000, guid: f13935bfa00af908e82c72b561881e7b, type: 2}
-  m_ParentUI: {fileID: 0}
-  sourceAsset: {fileID: 9197481963319205126, guid: 66c5ec8f6415486c7aa2c13843dde850, type: 3}
-  m_SortingOrder: 0
---- !u!4 &447426937
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 447426935}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &447426938
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 447426935}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: befe1611c97d761c0b2172d93b97943b, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  dialogueRecordTemplate: {fileID: 9197481963319205126, guid: e40d342abdb885255b8058acf72f07b2, type: 3}
-  dialogueParticipants:
-  - {fileID: 1679384387}
-  - {fileID: 1656585918}
 --- !u!1 &577963612
 GameObject:
   m_ObjectHideFlags: 0
@@ -311,7 +246,7 @@ AudioListener:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 586964771}
-  m_Enabled: 1
+  m_Enabled: 0
 --- !u!20 &586964774
 Camera:
   m_ObjectHideFlags: 0
@@ -922,68 +857,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 1656585917}
   m_LocalEulerAnglesHint: {x: -30, y: -15, z: -30}
---- !u!1 &745668896
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 745668898}
-  - component: {fileID: 745668897}
-  - component: {fileID: 745668899}
-  m_Layer: 5
-  m_Name: Pointer UI
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &745668897
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 745668896}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 19102, guid: 0000000000000000e000000000000000, type: 0}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  m_PanelSettings: {fileID: 11400000, guid: 6ed7e82f3ba3a013f8cd06f9649f895f, type: 2}
-  m_ParentUI: {fileID: 0}
-  sourceAsset: {fileID: 9197481963319205126, guid: 5056cd69ea074404599ddf954ebe7cb9, type: 3}
-  m_SortingOrder: 0
---- !u!4 &745668898
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 745668896}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!114 &745668899
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 745668896}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: a260b8cfc09d5305ba3afde6a794d6f3, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  dialogueUI: {fileID: 447426938}
 --- !u!1 &1425447816
 GameObject:
   m_ObjectHideFlags: 0
@@ -1307,7 +1180,7 @@ MonoBehaviour:
   hasUpgradedFromAgentParameters: 1
   MaxStep: 0
   dialogueParticipantID: Student
-  dialogueUI: {fileID: 0}
+  dialogueChannel: {fileID: 11400000, guid: d8c9fe8a3eb6388a78714da4906877db, type: 2}
   calibrationImageRequest: -1
   leftHand: {fileID: 1986956400}
   rightHand: {fileID: 724646795}
@@ -1467,7 +1340,7 @@ MonoBehaviour:
   hasUpgradedFromAgentParameters: 1
   MaxStep: 0
   dialogueParticipantID: Teacher
-  dialogueUI: {fileID: 0}
+  dialogueChannel: {fileID: 11400000, guid: d8c9fe8a3eb6388a78714da4906877db, type: 2}
   calibrationImageRequest: -1
   truckTypes:
   - {fileID: 5168060899807685673, guid: b3cb0b31f9d7dde948c6cc12a538432f, type: 3}
@@ -1837,8 +1710,6 @@ SceneRoots:
   m_ObjectHideFlags: 0
   m_Roots:
   - {fileID: 705507995}
-  - {fileID: 447426937}
-  - {fileID: 745668898}
   - {fileID: 1780952248}
   - {fileID: 1425447820}
   - {fileID: 1646569892}
