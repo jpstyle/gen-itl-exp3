@@ -218,7 +218,7 @@ def main(cfg):
     )
 
     # Camera calibration as needed
-    if True:
+    if cfg.vision.calibrate_camera:
         logger.info(f"Sys> Calibrating agent camera...")
 
         # Request images (#=24) containing a checkerboard pattern in the view,
@@ -258,9 +258,19 @@ def main(cfg):
             points_2d.append(corners)
 
         # Obtain camera calibration results
-        _, cam_K, distortion_coeffs, rotations, translations = cv.calibrateCamera(
+        _, cam_K, distortion_coeffs, _, _ = cv.calibrateCamera(
             points_3d, points_2d, gray.shape[::-1], None, None
         )
+    else:
+        # Skipping camera calibration step by using parameters obtained in advance...
+        cam_K = np.array([
+            [518.66, 0, 399.19],
+            [0, 518.66, 299.52],
+            [0, 0, 1]
+        ])
+        distortion_coeffs = np.array([
+            [0.00215, -0.00090, 0.00015, -0.00020, -0.00490]
+        ])
 
     # Send end-of-request signal so that agent's default position is ensured and
     # chessboard pattern object is deactivated

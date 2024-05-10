@@ -2,7 +2,4 @@ model:
     dino_model: "facebook/dinov2-small"
     sam_model: "facebook/sam-vit-base"
 
-data:
-    batch_size: 16
-    num_exs_per_conc: 8
-    num_loader_workers: 4
+calibrate_camera: true
