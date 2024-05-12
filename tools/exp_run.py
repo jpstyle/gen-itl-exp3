@@ -77,127 +77,28 @@ def main(cfg):
     student = ITLAgent(cfg)
     teacher = SimulatedTeacher(cfg)
 
-    # Concept repertoire:
-    #   "prior": Distinguishing whole trucks and parts; injecting the concepts as
-    #       prior concepts to be held by agents learning fine-grained truck types
-    #   "main": Distinguishing between fine-grained types of trucks, assuming
-    #       prior knowledge of whole truck & load part visual concepts (i.e., those
-    #       injected by "prior" repertoire)
-    repertoire = cfg.exp.concept_set
+    # Two types of task to teach/learn:
+    #   "build_truck_supertype": Learn how to build instances of the broad truck supertype,
+    #       where main learning targets are the types of constituent parts, valid assembly
+    #       pairs and contact points and the general desired 'assembly topology'
+    #   "build_truck_subtype": Learn how to build fine-grained subtypes of trucks, where
+    #       main learning targets are ontology rules (definitions and constraaints) that
+    #       need to be followed
+    target_task = cfg.exp.task
 
-    # Set up target concepts to teach in each episode as a list of tuples
-    teacher.target_concept_sets = {
+    # Set up target concepts to teach (hence parts to sample) in each episode
+    teacher.target_concepts = {
         # Each tuple contains concepts to be tested and taught in a single episode.
         # The first tuple entry instructs the Unity simulation environment the
-        # initialization parameters for the episode. The second entry provides a list
-        # of paths to the Unity gameObjects and string concept names.
-        "prior_supertypes": [
-            (
-                (("cabin_type", 0), ("load_type", 0)),
-                [(None, "truck"), (("cabin", "hemtt cabin"), "cabin"), (("load", "platform"), "load")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 0)),
-                [(None, "truck"), (("cabin", "quad cabin"), "cabin"), (("load", "platform"), "load")]
-            ),
-            (
-                (("cabin_type", 0), ("load_type", 1)),
-                [(None, "truck"), (("cabin", "hemtt cabin"), "cabin"), (("load", "dumper"), "load")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 1)),
-                [(None, "truck"), (("cabin", "quad cabin"), "cabin"), (("load", "dumper"), "load")]
-            ),
-            (
-                (("cabin_type", 0), ("load_type", 2)),
-                [(None, "truck"), (("cabin", "hemtt cabin"), "cabin"), (("load", "ladder"), "load")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 2)),
-                [(None, "truck"), (("cabin", "quad cabin"), "cabin"), (("load", "ladder"), "load")]
-            ),
-            (
-                (("cabin_type", 0), ("load_type", 3)),
-                [(None, "truck"), (("cabin", "hemtt cabin"), "cabin"), (("load", "rocket launcher"), "load")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 3)),
-                [(None, "truck"), (("cabin", "quad cabin"), "cabin"), (("load", "rocket launcher"), "load")]
-            )
-        ],
-        "prior_parts": [
-            (
-                (("cabin_type", 0), ("load_type", 0)),
-                [(("cabin", "hemtt cabin"), "hemtt cabin"), (("load", "platform"), "platform")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 0)),
-                [(("cabin", "quad cabin"), "quad cabin"), (("load", "platform"), "platform")]
-            ),
-            (
-                (("cabin_type", 0), ("load_type", 1)),
-                [(("cabin", "hemtt cabin"), "hemtt cabin"), (("load", "dumper"), "dumper")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 1)),
-                [(("cabin", "quad cabin"), "quad cabin"), (("load", "dumper"), "dumper")]
-            ),
-            (
-                (("cabin_type", 0), ("load_type", 2)),
-                [(("cabin", "hemtt cabin"), "hemtt cabin"), (("load", "ladder"), "ladder")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 2)),
-                [(("cabin", "quad cabin"), "quad cabin"), (("load", "ladder"), "ladder")]
-            ),
-            (
-                (("cabin_type", 0), ("load_type", 3)),
-                [(("cabin", "hemtt cabin"), "hemtt cabin"), (("load", "rocket launcher"), "rocket launcher")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 3)),
-                [(("cabin", "quad cabin"), "quad cabin"), (("load", "rocket launcher"), "rocket launcher")]
-            )
-        ],
-        "single_fourway": [
-            (
-                (("load_type", 0),),
-                [(None, "base truck")]
-            ),
-            (
-                (("load_type", 1),),
-                [(None, "dump truck")]
-            ),
-            (
-                (("load_type", 2),),
-                [(None, "fire truck")]
-            ),
-            (
-                (("load_type", 3),),
-                [(None, "missile truck")]
-            )
-        ],
-        "double_fiveway": [
-            (
-                (("cabin_type", 1), ("load_type", 0)),
-                [(None, "base truck")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 1)),
-                [(None, "dump truck")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 2)),
-                [(None, "fire truck")]
-            ),
-            (
-                (("cabin_type", 1), ("load_type", 3)),
-                [(None, "missile truck")]
-            ),
-            (
-                (("cabin_type", 0), ("load_type", 1)),
-                [(None, "container truck")]
-            )
+        # initialization parameters for the episode (unspecified elements will be
+        # randomly sampled). The second entry provides a list of paths to the Unity
+        # gameObjects and string concept names.
+        "build_truck_supertype": [((), "truck")],
+        "build_truck_subtype": [
+            ((("load_type", 0),), "base truck"),
+            ((("load_type", 1),), "dump truck"),
+            ((("load_type", 2),), "fire truck"),
+            ((("load_type", 3),), "missile truck")
         ]
     }
 
@@ -281,23 +182,26 @@ def main(cfg):
         logger.info(f"Sys> Episode {i+1})")
 
         # Obtain random initialization of each episode
-        shrink_domain = cfg.exp.domain_shift and i < cfg.exp.num_episodes / 2
-        random_inits = teacher.setup_episode(repertoire, shrink_domain=shrink_domain)
+        random_inits = teacher.setup_episode(target_task)
 
         # Send randomly initialized parameters to Unity
         for field, value in random_inits.items():
             env_par_channel.set_float_parameter(field, value)
-
-        # Request sending ground-truth mask info to teacher at the beginning
-        teacher_channel.send_string("System", "GT mask request: cabin, load", {})
-
-        # Send teacher's episode-initial output---thus user's episode-initial input
-        # (Comment out when testing in Heuristics mode)
-        opening_output = teacher.initiate_dialogue()
-        teacher_channel.send_string(
-            "Teacher", opening_output[0]["utterance"], opening_output[0]["pointing"]
+        # Don't add distractors for basic supertype learning, add for subtype learning
+        env_par_channel.set_float_parameter(
+            "_add_distractors", float(target_task == "build_truck_subtype")
         )
-        logger.info(f"T> {TAB}{opening_output[0]['utterance']}")
+
+        # # Request sending ground-truth mask info to teacher at the beginning
+        # teacher_channel.send_string("System", "GT mask request: cabin, load", {})
+
+        # # Send teacher's episode-initial output---thus user's episode-initial input
+        # # (Comment out when testing in Heuristics mode)
+        # opening_output = teacher.initiate_dialogue()
+        # teacher_channel.send_string(
+        #     "Teacher", opening_output[0]["utterance"], opening_output[0]["pointing"]
+        # )
+        # logger.info(f"T> {TAB}{opening_output[0]['utterance']}")
 
         # Let the settings take effect and begin the episode
         env.reset()

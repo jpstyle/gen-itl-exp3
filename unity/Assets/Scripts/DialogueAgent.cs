@@ -191,7 +191,7 @@ public class DialogueAgent : Agent
                 // Set agent (x,z)-translation
                 transform.position = new Vector3(0f, 0.85f, -0.25f);
                 // Set agent camera (x,y)-rotation
-                _cameraSensor.Camera.transform.eulerAngles = new Vector3(45f, 0f, 0f);
+                _cameraSensor.Camera.transform.eulerAngles = new Vector3(50f, 0f, 0f);
 
                 // Turn off request flag
                 calibrationImageRequest = -1;

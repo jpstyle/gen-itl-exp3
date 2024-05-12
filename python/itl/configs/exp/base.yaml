@@ -1,5 +1,4 @@
-concept_set: "single_fourway"
+task: "build_truck_supertype"
 num_episodes: 3000
 checkpoint_interval: 25       # Save model checkpoint every * episodes
-strat_feedback: "minHelp"     # Options: "minHelp", "medHelp", "maxHelpNoexpl", "maxHelpExpl", "maxHelpExpl2"
-domain_shift: false           # If true, introduce the last target concept midway
+strat_feedback: "minHelp"     # Options: "minHelp", "medHelp", "maxHelpNoexpl", "maxHelpExpl", "maxHelpExpl2

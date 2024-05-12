@@ -38,7 +38,7 @@ class SimulatedTeacher:
 
         # Load appropriate domain knowledge stored as yamls in assets dir
         self.domain_knowledge = {}
-        yml_path = f"{cfg.paths.assets_dir}/domain_knowledge/{cfg.exp.concept_set}.yaml"
+        yml_path = f"{cfg.paths.assets_dir}/domain_knowledge/truck_types.yaml"
         if os.path.exists(yml_path):
             with open(yml_path) as yml_f:
                 self.domain_knowledge.update(yaml.safe_load(yml_f))
@@ -59,22 +59,17 @@ class SimulatedTeacher:
             for part_type, part_subtype in info["parts"].items():
                 self.taxonomy_knowledge[part_subtype] = part_type
 
-    def setup_episode(self, concept_set, shrink_domain=False):
+    def setup_episode(self, target_task):
         """
         Preparation of a new interaction episode, comprising random initialization
         of the task for the episode and queueing of target concepts to teach
         """
-        target_concepts = self.target_concept_sets[concept_set]
-        self.concept_set = concept_set
+        target_concepts = self.target_concepts[target_task]
+        self.target_task = target_task
 
         # Random environment initialization before reset; currently, sample fine-grained
         # type of truck as distinguished by load type
-        if shrink_domain:
-            # Sample from target concept set except the last one
-            sampled_type = random.sample(range(len(target_concepts)-1), 1)[0]
-        else:
-            # Default: sample from whole target concept set
-            sampled_type = random.sample(range(len(target_concepts)), 1)[0]
+        sampled_type = random.sample(range(len(target_concepts)), 1)[0]
 
         # Initialize target concept queue and episode record
         self.current_queue = copy.deepcopy(target_concepts[sampled_type][1])
@@ -109,7 +104,7 @@ class SimulatedTeacher:
             )           # camelCase
             gameObject_handle = f"/truck/{part_type}/{part_type}_{part_subtype_cc}"
 
-        if self.concept_set == "prior_supertypes":
+        if self.target_task == "prior_supertypes":
             return [{
                 "utterance": "What is this?",
                 "pointing": { (8, 12): gameObject_handle }
