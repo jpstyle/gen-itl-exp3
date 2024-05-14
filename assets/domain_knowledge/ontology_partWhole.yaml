@@ -1,0 +1,93 @@
+# Encodes domain ontology knowledge regarding holonymy-meronymy hierarchies; here,
+# each holonym should list a complete list of its meronyms
+
+# Template)
+# {class_name}:
+#     parts:
+#         {class_name}: {# of instances}
+#         {class_name}: {# of instances}
+#         {class_name}: {# of instances}
+#         ...
+
+truck:
+    parts:
+        truck_front: 1
+        chassis_center: 1
+        truck_back : 1
+        bolt: 2
+
+truck_front:
+    parts:
+        chassis_front: 1
+        cabin: 1
+        front_left_fw_unit: 1
+        front_right_fw_unit: 1
+        bolt: 2
+
+truck_back:
+    parts:
+        chassis_back: 1
+        load: 1
+        back_left_fw_unit: 1
+        back_right_fw_unit: 1
+        bolt: 1
+
+normal_front_left_fw_unit:
+    parts:
+        normal_fl_fender: 1
+        normal_wheel: 1
+        bolt: 1
+
+normal_front_right_fw_unit:
+    parts:
+        normal_fr_fender: 1
+        normal_wheel: 1
+        bolt: 1
+
+normal_back_left_fw_unit:
+    parts:
+        normal_fl_fender: 1
+        normal_wheel: 1
+        bolt: 1
+
+normal_back_right_fw_unit:
+    parts:
+        normal_fr_fender: 1
+        normal_wheel: 1
+        bolt: 1
+
+large_front_left_fw_unit:
+    parts:
+        large_fl_fender: 1
+        large_wheel: 1
+        bolt: 1
+
+large_front_right_fw_unit:
+    parts:
+        large_fr_fender: 1
+        large_wheel: 1
+        bolt: 1
+
+large_back_left_fw_unit:
+    parts:
+        large_bl_fender: 1
+        large_wheel: 1
+        bolt: 1
+
+large_back_right_fw_unit:
+    parts:
+        large_br_fender: 1
+        large_wheel: 1
+        bolt: 1
+
+double_back_left_fw_unit:
+    parts:
+        double_bl_fender: 1
+        normal_wheel: 2
+        bolt: 2
+
+double_back_right_fw_unit:
+    parts:
+        double_br_fender: 1
+        normal_wheel: 2
+        bolt: 2

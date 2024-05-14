@@ -1,0 +1,65 @@
+# Encodes domain knowledge about constraints that each instance of trucks (supertype
+# and subtypes) and subassemblies should obey. Main learning targets.
+
+# Template)
+# {class_name}:         # <= Some subassembly/truck class; controls scope of applicability
+#     exists:           # <= Must have at least one instance of specified part(s)
+#         - [{part (tuple)}, {constraint specification}]
+#         - [{part (tuple)}, {constraint specification}]
+#         ...
+#     forall:           # <= All instances of part(s) must follow specification
+#         - [{part (tuple)}, {constraint specification}]
+#         - [{part (tuple)}, {constraint specification}]
+#         ...
+#               # Each specification element have positive/negative polarity, denoted by
+#                 resp. true & false
+#               # null specification denotes prohibition of existence (defined for forall-
+#                 constraints only)
+
+truck_front:
+    exists: []
+    forall:
+        - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+
+truck_back:
+    exists: []
+    forall:
+        - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+        - [["normal_fender", "double_fender"], null]
+
+fw_unit:
+    exists: []
+    forall:
+        - [["large_fender", "normal_wheel"], null]
+
+truck:
+    exists: []
+    forall:
+        - [["fender", "chassis_center"], [["_same_color", false, [0, 1]]]]
+        - [["normal_wheel", "large_wheel"], null]
+        - [["quad_cabin", "staircase_hemtt_chassis_center"], null]
+        - [["hemtt_cabin", "staircase_quad_chassis_center"], null]
+
+base_truck:
+    exists: []
+    forall:
+        - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+
+missile_truck:
+    exists:
+        - [["cabin"], [["green", true, [0]]]]
+    forall:
+        - [["colored_part"], [["red", false, [0]]]]
+        - [["wheel"], [["large_wheel", true, [0]]]]
+
+dump_truck:
+    exists:
+        - [["hemtt_cabin"], []]
+    forall:
+        - [["fender"], [["yellow", true, [0]]]]
+
+fire_truck:
+    exists:
+        - [["staircase_chassis_center"], []]
+    forall:
+        - [["colored_part"], [["red", true, [0]]]]

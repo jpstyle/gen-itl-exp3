@@ -1,9 +1,11 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using Unity.MLAgents;
 using Unity.MLAgents.Actuators;
 using Unity.MLAgents.SideChannels;
+using Random = UnityEngine.Random;
 
 public class TeacherAgent : DialogueAgent
 {
@@ -82,52 +84,19 @@ public class TeacherAgent : DialogueAgent
         foreach (var rb in FindObjectsByType<Rigidbody>(FindObjectsSortMode.None))
             rb.detectCollisions = false;
 
-        // Sample configs of parts that make up a valid truck
-        var cabinType = cabinTypes[
-            (int) envParams.GetWithDefault("cabin_type", Random.Range(0, cabinTypes.Count))
-        ];
-        var loadType = loadTypes[
-            (int) envParams.GetWithDefault("load_type", Random.Range(0, loadTypes.Count))
-        ];
-        var centerChassisType = centerChassisTypes[Random.Range(0, centerChassisTypes.Count)];
-        // We consider only three combinations of fenders & wheels for sampling; front-normal
-        // + back-normal, front-large + back-large, front-normal + back-double. Initialize
-        // wheels with appropriate and size and number.
-        var fenderWheelCombos = new List<(int, int, int, int, int, int, int)>
+        var typeIndices = new Dictionary<(string, int), int>();
+        var colorIndices = new Dictionary<(string, int), int>();
+        foreach (var key in envParams.Keys())
         {
-            // Fender-FL, Fender-FR, Fender-BL, Fender-BR, Wheel, NumWheels, NumBolts
-            (0, 0, 0, 0, 0, 4, 9),
-            (1, 1, 1, 1, 1, 4, 9),
-            (0, 0, 2, 2, 0, 6, 11),
-        };
-        var fenderWheelComboType = fenderWheelCombos[Random.Range(0, 3)];
+            var keyFields = key.Split("/");
+            var partSupertype = keyFields[0];
+            var descriptor = keyFields[1];
+            var identifier = Convert.ToInt32(keyFields[2]);
 
-        // Sample part colorings
-        var partColors = new Dictionary<string, Material>
-        {
-            ["cabin"] = colors[Random.Range(0, colors.Count)],
-            ["chassis_center"] = colors[Random.Range(0, colors.Count)],
-            ["fender_front_left"] = colors[Random.Range(0, colors.Count)],
-            ["fender_front_right"] = colors[Random.Range(0, colors.Count)],
-            ["fender_back_left"] = colors[Random.Range(0, colors.Count)],
-            ["fender_back_right"] = colors[Random.Range(0, colors.Count)],
-        };
-
-        // Certain combinations of load & center chassis collide and should be rejected
-        var combosToReject = new List<(string, string)>
-        {
-            ("load_dumper", "chassis_center_spares"),
-            ("load_dumper", "chassis_center_staircase_4seats"),
-            ("load_dumper", "chassis_center_staircase_oshkosh"),
-            ("load_rocketLauncher", "chassis_center_spares")
-        };
-        while (true)        // Rejection sampling
-        {
-            if (!combosToReject.Contains((loadType.name, centerChassisType.name)))
-                break;
-
-            loadType = loadTypes[(int) envParams.GetWithDefault("load_type", 0f)];
-            centerChassisType = centerChassisTypes[Random.Range(0, centerChassisTypes.Count)];
+            if (descriptor == "type")
+                typeIndices[(partSupertype, identifier)] = GetEnvParam(envParams, key);
+            else
+                colorIndices[(partSupertype, identifier)] = GetEnvParam(envParams, key);
         }
 
         // Create appropriate number of 'workspace partitions'; square areas that take up
@@ -152,85 +121,51 @@ public class TeacherAgent : DialogueAgent
         }
 
         // Instantiate sampled parts on sampled partitions on tabletop
-        InstantiateCabin(cabinType, partitions[0], partColors["cabin"]);
-        InstantiateLoad(loadType, partitions[1]);
+        InstantiateCabin(typeIndices[("cabin", 0)], partitions[0], colorIndices[("cabin", 0)]);
+        InstantiateLoad(typeIndices[("load", 0)], partitions[1]);
         InstantiateChassis(
-            new List<GameObject>{ frontChassisTypes[0], centerChassisType, backChassisTypes[0] },
-            partitions[2], partColors["chassis_center"]
+            new List<int>
+            {
+                typeIndices[("chassis_front", 0)],
+                typeIndices[("chassis_center", 0)],
+                typeIndices[("chassis_back", 0)]
+            },
+            partitions[2],
+            colorIndices[("chassis_center", 0)]
         );
         InstantiateFenders(
-            new List<GameObject>
+            new List<int>
             {
-                fenderFrontLeftTypes[fenderWheelComboType.Item1],
-                fenderFrontRightTypes[fenderWheelComboType.Item2],
-                fenderBackLeftTypes[fenderWheelComboType.Item3],
-                fenderBackRightTypes[fenderWheelComboType.Item4]
+                typeIndices[("fl_fender", 0)],
+                typeIndices[("fr_fender", 0)],
+                typeIndices[("bl_fender", 0)],
+                typeIndices[("br_fender", 0)]
             },
             partitions[3],
-            new List<Material>
+            new List<int>
             {
-                partColors["fender_front_left"],
-                partColors["fender_front_right"],
-                partColors["fender_back_left"],
-                partColors["fender_back_right"]
+                colorIndices[("fl_fender", 0)],
+                colorIndices[("fr_fender", 0)],
+                colorIndices[("bl_fender", 0)],
+                colorIndices[("br_fender", 0)]
             }
         );
         InstantiateWheels(
-            wheelTypes[fenderWheelComboType.Item5],
-            fenderWheelComboType.Item6,
+            typeIndices
+                .Where(x => x.Key.Item1 == "wheel")
+                .Select(x => x.Value).ToList(),
             partitions[4]
         );
-        InstantiateBolts(boltTypes[0], fenderWheelComboType.Item7, partitions[5]);
+        InstantiateBolts(typeIndices
+                .Where(x => x.Key.Item1 == "bolt")
+                .Select(x => x.Value).ToList(),
+            partitions[5]
+        );
 
-        // Instantiate selected truck type
-        // var truck = Instantiate(truckType);
-        // truck.name = "truck";
+        // Cleanup partitions now they're no longer needed
+        foreach (var partition in partitions) Destroy(partition);
 
-        // Replace truck part prefabs
-        // var sampledPartsWithHandles = new List<(string, GameObject)>
-        // {
-        //     ("cabin", cabinType), ("load", loadType), ("chassis_center", centerChassisType)
-        // };
-        // foreach (var (partType, sampledPart) in sampledPartsWithHandles)
-        // {
-            // var partSlotTf = truck.transform.Find(partType);
-            // foreach (Transform child in partSlotTf)
-            // {
-            //     var replacedGObj = child.gameObject;
-            //     replacedGObj.SetActive(false);         // Needed for UpdateClosestChildren below
-            //     Destroy(replacedGObj);
-            // }
-            // var newPart = Instantiate(sampledPart, partSlotTf);
-            // newPart.name = sampledPart.name;        // Not like 'necessary' but just coz
-        // }
-        // Need to update the closest children after the replacements
-        // truck.GetComponent<EnvEntity>().UpdateClosestChildren();
-
-        // Color parts if applicable
-        // foreach (Transform partSlotTf in truck.transform)
-        // {
-        //     var partType = partSlotTf.gameObject.name;
-        //     var matchingColorGroups =
-        //         partColorGroups.Where(kv => partType.StartsWith(kv.Key)).ToList();
-        //     if (matchingColorGroups.Count == 0) continue;
-        //
-        //     foreach (var mesh in partSlotTf.gameObject.GetComponentsInChildren<MeshRenderer>())
-        //     {
-        //         // Change material only if current one is Default one
-        //         if (mesh.material.name.StartsWith("Default"))
-        //             mesh.material = matchingColorGroups[0].Value;
-        //     }
-        // }
-
-        // Random initialization of truck pose
-        // truck.transform.position = new Vector3(
-        //     Random.Range(-0.25f, 0.25f), 0.85f, Random.Range(0.3f, 0.35f)
-        // );
-        // truck.transform.eulerAngles = new Vector3(
-        //     0f, Random.Range(0f, 359.9f), 0f
-        // );
-
-        // Fast-forward physics simulation until truck rests on the desktop
+        // Fast-forward physics simulation until generated objects rest on the desktop
         Physics.simulationMode = SimulationMode.Script;
         for (var i=0; i<2000; i++)
         {
@@ -265,18 +200,39 @@ public class TeacherAgent : DialogueAgent
         }
     }
 
+    protected override List<(string, List<string>)> SubtypeOrderings()
+    {
+        return new List<(string, List<string>)>
+        {
+            ("cabin", cabinTypes.Select(t => t.name).ToList()),
+            ("load", loadTypes.Select(t => t.name).ToList()),
+            ("chassis_front", frontChassisTypes.Select(t => t.name).ToList()),
+            ("chassis_center", centerChassisTypes.Select(t => t.name).ToList()),
+            ("chassis_back", backChassisTypes.Select(t => t.name).ToList()),
+            ("fl_fender", fenderFrontLeftTypes.Select(t => t.name).ToList()),
+            ("fr_fender", fenderFrontRightTypes.Select(t => t.name).ToList()),
+            ("bl_fender", fenderBackLeftTypes.Select(t => t.name).ToList()),
+            ("br_fender", fenderBackRightTypes.Select(t => t.name).ToList()),
+            ("wheel", wheelTypes.Select(t => t.name).ToList()),
+            ("bolt", boltTypes.Select(t => t.name).ToList()),
+            ("color", colors.Select(t => t.name.Replace("plastic_", "")).ToList())
+        };
+    }
+
     // Helper methods for initializing sampled parts on sampled locations
-    private static void InstantiateCabin(
-        GameObject cabinPrefab, GameObject partition, Material cabinColor
+    private void InstantiateCabin(
+        int typeIndex, GameObject partition, int colorIndex
     )
     {
         // Instantiate provided cabin type with generalized name
+        var cabinPrefab = cabinTypes[typeIndex];
         var cabin = Instantiate(cabinPrefab, partition.transform);
         cabin.name = "cabin";
 
         // Apply sampled color
         foreach (var mesh in cabin.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default")) mesh.material = cabinColor;
+            if (mesh.material.name.StartsWith("Default"))
+                mesh.material = colors[colorIndex];
 
         // Add RigidBody component for physical interaction with environment
         cabin.AddComponent<Rigidbody>();
@@ -291,9 +247,10 @@ public class TeacherAgent : DialogueAgent
         // Detach instantiated part from parent
         cabin.transform.parent = null;
     }
-    private static void InstantiateLoad(GameObject loadPrefab, GameObject partition)
+    private void InstantiateLoad(int typeIndex, GameObject partition)
     {
         // Instantiate provided load type with generalized name
+        var loadPrefab = loadTypes[typeIndex];
         var load = Instantiate(loadPrefab, partition.transform);
         load.name = "load";
 
@@ -310,21 +267,25 @@ public class TeacherAgent : DialogueAgent
         // Detach instantiated part from parent
         load.transform.parent = null;
     }
-    private static void InstantiateChassis(
-        List<GameObject> chassisPrefabs, GameObject partition, Material centerColor
+    private void InstantiateChassis(
+        List<int> typeIndices, GameObject partition, int centerColorIndex
     )
     {
         // Instantiate provided chassis types with generalized names
-        var chassisFront = Instantiate(chassisPrefabs[0], partition.transform);
-        var chassisCenter = Instantiate(chassisPrefabs[1], partition.transform);
-        var chassisBack = Instantiate(chassisPrefabs[2], partition.transform);
+        var frontPrefab = frontChassisTypes[typeIndices[0]];
+        var centerPrefab = centerChassisTypes[typeIndices[1]];
+        var backPrefab = backChassisTypes[typeIndices[2]];
+        var chassisFront = Instantiate(frontPrefab, partition.transform);
+        var chassisCenter = Instantiate(centerPrefab, partition.transform);
+        var chassisBack = Instantiate(backPrefab, partition.transform);
         chassisFront.name = "chassis_front";
         chassisCenter.name = "chassis_center";
         chassisBack.name = "chassis_back";
 
         // Apply sampled color to center chassis
         foreach (var mesh in chassisCenter.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default")) mesh.material = centerColor;
+            if (mesh.material.name.StartsWith("Default"))
+                mesh.material = colors[centerColorIndex];
 
         // Add RigidBody component for physical interaction with environment
         chassisFront.AddComponent<Rigidbody>();
@@ -345,29 +306,37 @@ public class TeacherAgent : DialogueAgent
         chassisCenter.transform.parent = null;
         chassisBack.transform.parent = null;
     }
-    private static void InstantiateFenders(
-        List<GameObject> fenderPrefabs, GameObject partition, List<Material> fenderColors
+    private void InstantiateFenders(
+        List<int> typeIndices, GameObject partition, List<int> colorIndices
     )
     {
         // Instantiate provided fender types with generalized names
-        var fenderFrontLeft = Instantiate(fenderPrefabs[0], partition.transform);
-        var fenderFrontRight = Instantiate(fenderPrefabs[1], partition.transform);
-        var fenderBackLeft = Instantiate(fenderPrefabs[2], partition.transform);
-        var fenderBackRight = Instantiate(fenderPrefabs[3], partition.transform);
-        fenderFrontLeft.name = "fender_front_left";
-        fenderFrontRight.name = "fender_front_right";
-        fenderBackLeft.name = "fender_back_left";
-        fenderBackRight.name = "fender_back_right";
+        var frontLeftPrefab = fenderFrontLeftTypes[typeIndices[0]];
+        var frontRightPrefab = fenderFrontRightTypes[typeIndices[1]];
+        var backLeftPrefab = fenderBackLeftTypes[typeIndices[2]];
+        var backRightPrefab = fenderBackRightTypes[typeIndices[3]];
+        var fenderFrontLeft = Instantiate(frontLeftPrefab, partition.transform);
+        var fenderFrontRight = Instantiate(frontRightPrefab, partition.transform);
+        var fenderBackLeft = Instantiate(backLeftPrefab, partition.transform);
+        var fenderBackRight = Instantiate(backRightPrefab, partition.transform);
+        fenderFrontLeft.name = "fl_fender";
+        fenderFrontRight.name = "fr_fender";
+        fenderBackLeft.name = "bl_fender";
+        fenderBackRight.name = "br_fender";
 
         // Apply sampled color to each fender
         foreach (var mesh in fenderFrontLeft.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default")) mesh.material = fenderColors[0];
+            if (mesh.material.name.StartsWith("Default"))
+                mesh.material = colors[colorIndices[0]];
         foreach (var mesh in fenderFrontRight.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default")) mesh.material = fenderColors[1];
+            if (mesh.material.name.StartsWith("Default"))
+                mesh.material = colors[colorIndices[1]];
         foreach (var mesh in fenderBackLeft.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default")) mesh.material = fenderColors[2];
+            if (mesh.material.name.StartsWith("Default"))
+                mesh.material = colors[colorIndices[2]];
         foreach (var mesh in fenderBackRight.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default")) mesh.material = fenderColors[3];
+            if (mesh.material.name.StartsWith("Default"))
+                mesh.material = colors[colorIndices[3]];
 
         // Add RigidBody component for physical interaction with environment
         fenderFrontLeft.AddComponent<Rigidbody>();
@@ -414,7 +383,7 @@ public class TeacherAgent : DialogueAgent
         fenderBackLeft.transform.parent = null;
         fenderBackRight.transform.parent = null;
     }
-    private static void InstantiateWheels(GameObject wheelPrefab, int wheelNum, GameObject partition)
+    private void InstantiateWheels(List<int> typeIndices, GameObject partition)
     {
         // Valid (x,z)-positions to sample from
         var xzPositions = new List<(float, float)>
@@ -427,9 +396,10 @@ public class TeacherAgent : DialogueAgent
         Shuffle(randomIndices);
 
         var generatedWheels = new List<GameObject>();
-        for (var i = 0; i < wheelNum; i++)
+        for (var i = 0; i < typeIndices.Count; i++)
         {
             // Instantiate provided wheel type with generalized name
+            var wheelPrefab = wheelTypes[typeIndices[i]];
             var wheel = Instantiate(wheelPrefab, partition.transform);
             wheel.name = $"wheel_{i}";
 
@@ -455,7 +425,7 @@ public class TeacherAgent : DialogueAgent
         // Detach instantiated parts from parent
         foreach (var wheel in generatedWheels) wheel.transform.parent = null;
     }
-    private static void InstantiateBolts(GameObject boltPrefab, int boltNum, GameObject partition)
+    private void InstantiateBolts(List<int> typeIndices, GameObject partition)
     {
         // Valid (x,z)-positions to sample from
         var xzPositions = new List<(float, float)>
@@ -468,9 +438,10 @@ public class TeacherAgent : DialogueAgent
         Shuffle(randomIndices);
 
         var generatedBolts = new List<GameObject>();
-        for (var i = 0; i < boltNum; i++)
+        for (var i = 0; i < typeIndices.Count; i++)
         {
             // Instantiate provided wheel type with generalized name
+            var boltPrefab = boltTypes[typeIndices[i]];
             var bolt = Instantiate(boltPrefab, partition.transform);
             bolt.name = $"bolt_{i}";
 
@@ -485,7 +456,7 @@ public class TeacherAgent : DialogueAgent
             bolt.transform.eulerAngles = new Vector3(
                 (Random.Range(0, 2) * 2 - 1) * 90f, 0f, Random.Range(-10f, 10f)
             );
-            
+
             generatedBolts.Add(bolt);
         }
 
@@ -507,5 +478,11 @@ public class TeacherAgent : DialogueAgent
             toShuffle[i] = toShuffle[randomIndex];
             toShuffle[randomIndex] = temp;
         }
+    }
+    
+    // Environment parameter fetching logic is a bit lengthy to repeat, make shortcut
+    private static int GetEnvParam(EnvironmentParameters envParams, string key)
+    {
+        return (int) envParams.GetWithDefault(key, 0f);
     }
 }

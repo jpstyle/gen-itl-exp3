@@ -29,6 +29,9 @@ public class DialogueAgent : Agent
     [HideInInspector]
     public int calibrationImageRequest = -1;
 
+    // Stores whether any part subtype ordering info request is received from the backend
+    public bool subtypeOrderingRequest;     // false by default
+    
     // Communication side channel to Python backend for requesting decisions
     protected string channelUuid;
     protected MessageSideChannel backendMsgChannel;
@@ -87,7 +90,11 @@ public class DialogueAgent : Agent
         {
             // Trying to consult backend for requesting decision only when needed, in order
             // to minimize communication of visual observation data
-            if (incomingMsgBuffer.Count == 0 && calibrationImageRequest == -1) return;
+            var hasToDo = false;
+            hasToDo |= incomingMsgBuffer.Count > 0;
+            hasToDo |= calibrationImageRequest != -1;
+            hasToDo |= subtypeOrderingRequest;
+            if (!hasToDo) return;
 
             // If unprocessed incoming messages exist, process and consult backend
             while (incomingMsgBuffer.Count > 0)
@@ -195,6 +202,29 @@ public class DialogueAgent : Agent
 
                 // Turn off request flag
                 calibrationImageRequest = -1;
+            }
+
+            // If any part subtype ordering info requests are pending, handle them here by
+            // sending info to backend
+            if (subtypeOrderingRequest)
+            {
+                var responseString = "Subtype orderings response: ";
+                var orderingInfo = SubtypeOrderings();
+
+                var responseSubstrings = new List<string>();
+                foreach (var (supertype, subtypes) in orderingInfo)
+                {
+                    var substring = $"{supertype} - "; 
+                    substring += string.Join(", ", subtypes.ToArray());
+                    responseSubstrings.Add(substring);
+                }
+                responseString += string.Join(" // ", responseSubstrings.ToArray());
+
+                var emptyDemRefs = new Dictionary<(int, int), EntityRef>();
+                backendMsgChannel.SendMessageToBackend(
+                    "System", responseString, emptyDemRefs
+                );
+                subtypeOrderingRequest = false;    // Reset flag
             }
 
             // Now wait for decision
@@ -342,6 +372,13 @@ public class DialogueAgent : Agent
 
         // Reset flag on exit
         _maskCapturing = false;
+    }
+
+    // To be overridden in children classes; for packing & communicating information re.
+    // ordering of concept subtypes as specified in current Unity scene
+    protected virtual List<(string, List<string>)> SubtypeOrderings()
+    {
+        return new List<(string, List<string>)>();
     }
 
     private static float ContainsColor(Color32 color, Color32[] colorSet)

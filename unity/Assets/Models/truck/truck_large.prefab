@@ -125,7 +125,7 @@ GameObject:
   m_Component:
   - component: {fileID: 4301531720644391341}
   m_Layer: 0
-  m_Name: fender_front_left
+  m_Name: fl_fender
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -253,7 +253,7 @@ GameObject:
   m_Component:
   - component: {fileID: 2254300174532950330}
   m_Layer: 0
-  m_Name: fender_back_right
+  m_Name: br_fender
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -381,7 +381,7 @@ GameObject:
   m_Component:
   - component: {fileID: 2645146913437286622}
   m_Layer: 0
-  m_Name: fender_back_left
+  m_Name: bl_fender
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -605,7 +605,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1787106491251151012}
   m_Layer: 0
-  m_Name: fender_front_right
+  m_Name: fr_fender
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -909,7 +909,7 @@ PrefabInstance:
     - target: {fileID: 2778262593457678370, guid: db0b40214ced5f2469105789823aee6a,
         type: 3}
       propertyPath: m_Name
-      value: load_platform
+      value: platform
       objectReference: {fileID: 0}
     - target: {fileID: 3298200319426343576, guid: db0b40214ced5f2469105789823aee6a,
         type: 3}
@@ -1146,7 +1146,7 @@ PrefabInstance:
     - target: {fileID: 8237363132131006318, guid: 658b5e0d2a057a6dd815a4bb5402f765,
         type: 3}
       propertyPath: m_Name
-      value: fender_large_front_left
+      value: large_fl_fender
       objectReference: {fileID: 0}
     - target: {fileID: 8726619884108189140, guid: 658b5e0d2a057a6dd815a4bb5402f765,
         type: 3}
@@ -1438,7 +1438,7 @@ PrefabInstance:
     - target: {fileID: 7725139351544732425, guid: e3a86a163829ecfa282b8488a3b6d435,
         type: 3}
       propertyPath: m_Name
-      value: fender_large_back_right
+      value: large_br_fender
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
@@ -1462,7 +1462,7 @@ PrefabInstance:
     - target: {fileID: 1160839608747289549, guid: 9b3dad1687e4c691cb6b0f91f016021f,
         type: 3}
       propertyPath: m_Name
-      value: fender_large_back_left
+      value: large_bl_fender
       objectReference: {fileID: 0}
     - target: {fileID: 1970309262653895031, guid: 9b3dad1687e4c691cb6b0f91f016021f,
         type: 3}
@@ -1541,7 +1541,7 @@ PrefabInstance:
     - target: {fileID: 3643924395729457005, guid: 7dd4ce9295a872beab08f5b5484ec43c,
         type: 3}
       propertyPath: m_Name
-      value: fender_large_front_right
+      value: large_fr_fender
       objectReference: {fileID: 0}
     - target: {fileID: 4168645791845832151, guid: 7dd4ce9295a872beab08f5b5484ec43c,
         type: 3}
@@ -2094,7 +2094,7 @@ PrefabInstance:
     - target: {fileID: 529572093487759519, guid: 006d10dbcd78f3490840087a3dbc7a6b,
         type: 3}
       propertyPath: m_Name
-      value: cabin_4seats
+      value: quad_cabin
       objectReference: {fileID: 0}
     - target: {fileID: 869964042523646501, guid: 006d10dbcd78f3490840087a3dbc7a6b,
         type: 3}
@@ -2544,7 +2544,7 @@ PrefabInstance:
     - target: {fileID: 3057356756438121794, guid: f801c812d11786af9bad16bbf39c49ba,
         type: 3}
       propertyPath: m_Name
-      value: chassis_center_flat
+      value: flat_chassis_center
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects: []

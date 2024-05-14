@@ -1,0 +1,157 @@
+# Encodes domain ontology knowledge regarding hypernymy-hyponymy hierarchies. The list of
+# subtypes for each entry need not be exhaustive nor mutually exclusive.
+# Note that we need to track whether the subtypes are proper or quasi-hyponyms of their
+# hypernyms (encoded by `relation_type` field) for proper treatment of NL expressions
+# involving them.
+
+# Template)
+# {class_name}:
+#     relation_type: {'proper' or 'quasi'}
+#     subtypes:
+#         - {class_name}
+#         - {class_name}
+#         - {class_name}
+#         ...
+
+colored_part:
+    relation_type: proper
+    subtypes:
+        - cabin
+        - chassis_center
+        - fender
+
+cabin:
+    relation_type: proper
+    subtypes:
+        - quad_cabin
+        - hemtt_cabin
+
+load:
+    relation_type: proper
+    subtypes:
+        - platform
+        - dumper
+        - ladder
+        - rocket_launcher
+
+chassis_center:
+    relation_type: proper
+    subtypes:
+        - flat_chassis_center
+        - spares_chassis_center
+        - staircase_quad_chassis_center
+        - staircase_hemtt_chassis_center
+
+staircase_chassis_center:
+    relation_type: proper
+    subtypes:
+        - staircase_quad_chassis_center
+        - staircase_hemtt_chassis_center
+
+fender:
+    relation_type: proper
+    subtypes:
+        - normal_fender
+        - large_fender
+        - double_fender
+        - fl_fender
+        - fr_fender
+        - bl_fender
+        - br_fender
+
+normal_fender:
+    relation_type: proper
+    subtypes:
+        - normal_fl_fender
+        - normal_fr_fender
+        - normal_bl_fender
+        - normal_br_fender
+
+large_fender:
+    relation_type: proper
+    subtypes:
+        - large_fl_fender
+        - large_fr_fender
+        - large_bl_fender
+        - large_br_fender
+
+double_fender:
+    relation_type: proper
+    subtypes:
+        - double_bl_fender
+        - double_br_fender
+
+fl_fender:
+    relation_type: proper
+    subtypes:
+        - normal_fl_fender
+        - large_fl_fender
+
+fr_fender:
+    relation_type: proper
+    subtypes:
+        - normal_fr_fender
+        - large_fr_fender
+
+bl_fender:
+    relation_type: proper
+    subtypes:
+        - normal_bl_fender
+        - large_bl_fender
+        - double_bl_fender
+
+br_fender:
+    relation_type: proper
+    subtypes:
+        - normal_br_fender
+        - large_br_fender
+        - double_br_fender
+
+wheel:
+    relation_type: proper
+    subtypes:
+        - normal_wheel
+        - large_wheel
+
+fw_unit:
+    relation_type: proper
+    subtypes:
+        - front_left_fw_unit
+        - front_right_fw_unit
+        - back_left_fw_unit
+        - back_right_fw_unit
+
+front_left_fw_unit:
+    relation_type: proper
+    subtypes:
+        - normal_front_left_fw_unit
+        - large_front_left_fw_unit
+
+front_right_fw_unit:
+    relation_type: proper
+    subtypes:
+        - normal_front_right_fw_unit
+        - large_front_right_fw_unit
+
+back_left_fw_unit:
+    relation_type: proper
+    subtypes:
+        - normal_back_left_fw_unit
+        - large_back_left_fw_unit
+        - double_back_left_fw_unit
+
+back_right_fw_unit:
+    relation_type: proper
+    subtypes:
+        - normal_back_right_fw_unit
+        - large_back_right_fw_unit
+        - double_back_right_fw_unit
+
+color:
+    relation_type: quasi
+    subtypes:
+        - red
+        - green
+        - blue
+        - gold
+        - white

@@ -2,14 +2,15 @@
 Simulated user which takes part in dialogue with rule-based pattern matching
 -- no cognitive architecture ongoing within the user
 """
-import os
 import re
-import copy
 import random
+from itertools import combinations, groupby
 
 import yaml
 import inflect
+import clingo
 import numpy as np
+import networkx as nx
 
 from python.itl.vision.utils import mask_iou
 
@@ -38,49 +39,67 @@ class SimulatedTeacher:
 
         # Load appropriate domain knowledge stored as yamls in assets dir
         self.domain_knowledge = {}
-        yml_path = f"{cfg.paths.assets_dir}/domain_knowledge/truck_types.yaml"
-        if os.path.exists(yml_path):
-            with open(yml_path) as yml_f:
-                self.domain_knowledge.update(yaml.safe_load(yml_f))
-        # Convert lists to sets for order invariance
-        for info in self.domain_knowledge.values():
-            if info["part_attributes"] is None:
-                info["part_attributes"] = {}
-            else:
-                info["part_attributes"] = {
-                    part: set(attrs)
-                    for part, attrs in info["part_attributes"].items()
-                }
+        knowledge_path = f"{cfg.paths.assets_dir}/domain_knowledge"
+        with open(f"{knowledge_path}/definitions.yaml") as yml_f:
+            self.domain_knowledge["definitions"] = yaml.safe_load(yml_f)
+        with open(f"{knowledge_path}/constraints.yaml") as yml_f:
+            self.domain_knowledge["constraints"] = yaml.safe_load(yml_f)
+        with open(f"{knowledge_path}/ontology_taxonomy.yaml") as yml_f:
+            self.domain_knowledge["taxonomy"] = yaml.safe_load(yml_f)
+        with open(f"{knowledge_path}/ontology_partWhole.yaml") as yml_f:
+            self.domain_knowledge["part_whole"] = yaml.safe_load(yml_f)
 
-        # Extract taxonomy knowledge implied by the domain knowledge, as a map from
-        # part subtype to its supertype
-        self.taxonomy_knowledge = {}
-        for info in self.domain_knowledge.values():
-            for part_type, part_subtype in info["parts"].items():
-                self.taxonomy_knowledge[part_subtype] = part_type
+        # Tabulate and store ontology knowledge in graph forms, so that transitive
+        # closures are easily obtained
+        taxonomy_graph = nx.DiGraph()
+        for supertype, data in self.domain_knowledge["taxonomy"].items():
+            is_proper = data["relation_type"] == "proper"
+            for subtype in data["subtypes"]:
+                taxonomy_graph.add_edge(supertype, subtype, is_proper=is_proper)
+        self.domain_knowledge["taxonomy"] = taxonomy_graph
 
-    def setup_episode(self, target_task):
+        part_whole_graph = nx.DiGraph()
+        for whole, data in self.domain_knowledge["part_whole"].items():
+            for part, count in data["parts"].items():
+                part_whole_graph.add_edge(whole, part, count=count)
+        self.domain_knowledge["part_whole"] = part_whole_graph
+
+    def setup_episode(self, target_task, all_subtypes):
         """
         Preparation of a new interaction episode, comprising random initialization
         of the task for the episode and queueing of target concepts to teach
         """
-        target_concepts = self.target_concepts[target_task]
+        self.current_episode_record = {}
         self.target_task = target_task
 
-        # Random environment initialization before reset; currently, sample fine-grained
-        # type of truck as distinguished by load type
-        sampled_type = random.sample(range(len(target_concepts)), 1)[0]
+        constraints = {}
+        if target_task == "build_truck_supertype":
+            # More 'basic' experiment suite invested on learning part types, valid
+            # structures of trucks (& subassemblies) and contact pairs & points
+            self.target_concept = "truck"
 
-        # Initialize target concept queue and episode record
-        self.current_queue = copy.deepcopy(target_concepts[sampled_type][1])
-        self.current_episode_record = {}
+            # Sampling with minimal constraints, just so enough that a valid truck
+            # structure can be built; no distractors added
 
-        # Return environment parameters to pass
-        random_inits = {
-            part_type: part_subtype_ind
-            for part_type, part_subtype_ind in target_concepts[sampled_type][0]
-        }
-        return random_inits
+        else:
+            assert target_task == "build_truck_subtype"
+
+            # 'Advanced' stage invested on learning definitions of truck subtypes,
+            # along with rules and constraints that influence trucks in general
+            # or specific truck subtypes
+            self.target_concept = random.sample([
+                "base_truck", "dumper_truck", "missile_truck", "fire_truck"
+            ], 1)[0]
+
+            # Sampling with full consideration of constraints in domain knowledge;
+            # add distractors specifically selected to allow mistakes
+
+        # Leverage ASP to obtain all possible samples of valid part set subject to
+        # a set of constraints
+        sampled_inits = _sample_ASP(self.domain_knowledge, constraints, all_subtypes)
+
+        # Return sampled parts to pass as environment parameters
+        return sampled_inits
 
     def initiate_dialogue(self):
         """
@@ -600,3 +619,140 @@ def _add_after_redundancy_check(outgoing_buffer, feedback):
     """ Add to buffer of outgoing feedback messages only if not already included """
     if feedback in outgoing_buffer: return
     outgoing_buffer.append(feedback)
+
+
+def _sample_ASP(domain_knowledge, constraints, all_subtypes):
+    """
+    Helper method factored out for writing & running ASP program for controlled
+    sampling, subject to provided domain knowledge. (If some other person ever gets
+    to read this part, sorry in advance :s)
+    """
+    program_str = "hasPart(O0, O2) :- hasPart(O0, O1), hasPart(O1, O2).\n"
+
+    # Add rules for covering whole-to-part derivations
+    pw_graph = domain_knowledge["part_whole"]
+    pw_rules = [(n, pw_graph.out_edges(n, data="count")) for n in pw_graph.nodes]
+    pw_rules = [(n, r) for n, r in pw_rules if len(r) > 0]
+    i = 0; occurring_subassemblies = set()
+    for hol, per_holonym in pw_rules:
+        for _, mer, count in per_holonym:
+            occurring_subassemblies.add(hol); occurring_subassemblies.add(mer)
+            for _ in range(count):
+                program_str += f"{mer}(f_{i}(O)) :- {hol}(O).\n"
+                program_str += f"hasPart(O, f_{i}(O)) :- {hol}(O).\n"
+                i += 1
+
+    # Add rules for covering supertype-subtype relations and choices
+    tx_graph = domain_knowledge["taxonomy"]
+    tx_rules = [(n, tx_graph.out_edges(n)) for n in tx_graph.nodes]
+    tx_rules = [(n, r) for (n, r) in tx_rules if len(r) > 0]
+    for hyper, per_hypernym in tx_rules:
+        if hyper == "color": continue
+
+        for _, hypo in per_hypernym:
+            program_str += f"{hyper}(O) :- {hypo}(O).\n"
+        if hyper not in occurring_subassemblies: continue
+
+        program_str += "1{ "
+        program_str += "; ".join(f"{hypo}(O)" for _, hypo in per_hypernym)
+        program_str += " }1 :- "
+        program_str += f"{hyper}(O).\n"
+
+    # Add rules for covering color choices for applicable parts
+    program_str += "1{ hasColor(O, C) : color(C) }1 :- colored_part(O).\n"
+    program_str += ". ".join(f"color({c})" for c in all_subtypes["color"]) + ".\n"
+
+    # Add rules for specifying atomic parts
+    for supertype, subtypes in all_subtypes.items():
+        if supertype == "color": continue
+        for subtype in subtypes:
+            program_str += f"atomic(O, {subtype}) :- {subtype}(O).\n"
+
+    # Add integrity constraints for filtering invalid combinations
+    # constraints = domain_knowledge["constraints"]
+    for ci, scope_type in enumerate(constraints):
+        for ei, (parts, attributes) in enumerate(constraints[scope_type]["exists"]):
+            ...
+
+        for ai, (parts, attributes) in enumerate(constraints[scope_type]["forall"]):
+            full_scope_str = f"{scope_type}(O), "
+            full_scope_str += ", ".join(f"{p}(O{i})" for i, p in enumerate(parts)) + ", "
+            full_scope_str += ", ".join(f"hasPart(O, O{i})" for i in range(len(parts)))
+            if len(parts) > 1:
+                obj_pairs = combinations(range(len(parts)), 2)
+                full_scope_str += ", "
+                full_scope_str += ", ".join(f"O{i} != O{j}" for i, j in obj_pairs)
+
+            if attributes is None:
+                program_str += f":- {full_scope_str}.\n"
+            else:
+                attr_args_str = ", ".join(f"O{a}" for a in range(len(parts)))
+                attr_str = f"attr_c{ci}a{ai}({attr_args_str}) :- {full_scope_str}, "
+                piece_strs = []
+                for attr, pol, arg_inds in attributes:
+                    if attr == "_same_color":
+                        assert len(arg_inds) == 2
+                        piece_str = f"hasColor(O{arg_inds[0]}, C0), "
+                        piece_str += f"hasColor(O{arg_inds[1]}, C1), "
+                        piece_str += "C0 = C1" if pol else "C0 != C1"
+                    else:
+                        piece_args_str = ", ".join(f"O{a}" for a in arg_inds)
+                        piece_str = "" if pol else "not "
+                        piece_str += f"{attr}({piece_args_str})"
+                    piece_strs.append(piece_str)
+                attr_str += ", ".join(piece_strs) + ".\n"
+
+                program_str += attr_str
+                program_str += f":- {full_scope_str}, not attr_c{ci}a{ai}({attr_args_str}).\n"
+
+    # Finally add a grounded instance representing the whole truck sample
+    program_str += "truck(o).\n"
+
+    ctl = clingo.Control(["--warn=none"])
+    ctl.add("base", [], program_str)
+    ctl.ground([("base", [])])
+    ctl.configuration.solve.models = 0
+
+    models = []
+    with ctl.solve(yield_=True) as solve_gen:
+        for m in solve_gen:
+            models.append(m.symbols(atoms=True))
+            if len(models) > 30000: break       # Should be enough...
+
+    # Randomly select a sampled model
+    sampled_model = random.sample(models, 1)[0]
+
+    # Inverse map from subtype to supertype
+    all_subtypes_inv_map = {x: k for k, v in all_subtypes.items() for x in v}
+
+    # Filter out unnecessary atoms, to extract atomic parts and colors sampled
+    parts_by_fname = {}; colors_by_fname = {}
+    for atm in sampled_model:
+        # Collate part types first, indexing by skolem function name
+        if atm.name == "atomic":
+            parts_by_fname[atm.arguments[0].name] = (
+                atm.arguments[1].name, all_subtypes_inv_map[atm.arguments[1].name]
+            )
+    for atm in sampled_model:
+        # Then fetch matching colors for colorable parts
+        if atm.name == "hasColor":
+            colors_by_fname[atm.arguments[0].name] = atm.arguments[1].name
+
+    # Group by part supertype
+    objs_grouped_by_supertype = {
+        k: sorted([f for f, _ in v], key=lambda x: int(x.replace("f_", "")))
+        for k, v in groupby(parts_by_fname.items(), key=lambda x: x[1][1])
+    }
+
+    # Organize into final return value dict
+    sampled_inits = {}
+    for obj, (part_subtype, part_supertype) in parts_by_fname.items():
+        obj_ind = objs_grouped_by_supertype[part_supertype].index(obj)
+        sampled_inits[f"{part_supertype}/type/{obj_ind}"] = \
+            all_subtypes[part_supertype].index(part_subtype)
+
+        if obj in colors_by_fname:
+            sampled_inits[f"{part_supertype}/color/{obj_ind}"] = \
+                all_subtypes["color"].index(colors_by_fname[obj])
+
+    return sampled_inits

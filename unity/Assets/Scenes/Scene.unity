@@ -2340,8 +2340,8 @@ MonoBehaviour:
   dialogueChannel: {fileID: 11400000, guid: d8c9fe8a3eb6388a78714da4906877db, type: 2}
   calibrationImageRequest: -1
   cabinTypes:
-  - {fileID: 2949065247790984902, guid: 12a27d7a213d6f8328a20020250dad82, type: 3}
   - {fileID: 529572093487759519, guid: 006d10dbcd78f3490840087a3dbc7a6b, type: 3}
+  - {fileID: 2949065247790984902, guid: 12a27d7a213d6f8328a20020250dad82, type: 3}
   loadTypes:
   - {fileID: 2778262593457678370, guid: db0b40214ced5f2469105789823aee6a, type: 3}
   - {fileID: 290069892407523909, guid: e33de51125212cce5a5a9676441fbefa, type: 3}
@@ -2352,8 +2352,8 @@ MonoBehaviour:
   centerChassisTypes:
   - {fileID: 3057356756438121794, guid: f801c812d11786af9bad16bbf39c49ba, type: 3}
   - {fileID: 1626345510092331421, guid: 840672daf7b7e11f48dd9726b9056588, type: 3}
-  - {fileID: 4531940676182110155, guid: fa607ee5ebcdd7cb791b1e2f241a0303, type: 3}
   - {fileID: 3281324660702431920, guid: a13bd4a5eb3f7d238a7eb2097ec5c2d7, type: 3}
+  - {fileID: 4531940676182110155, guid: fa607ee5ebcdd7cb791b1e2f241a0303, type: 3}
   backChassisTypes:
   - {fileID: 6978908122867524358, guid: c7fd3d2771a16f25890b201132eea5a8, type: 3}
   fenderFrontLeftTypes:

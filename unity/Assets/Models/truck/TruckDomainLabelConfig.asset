@@ -19,16 +19,16 @@ MonoBehaviour:
   - label: chassis_center
     id: 1
     hierarchyRelation: 0
-  - label: chassis_center_flat
+  - label: flat_chassis_center
     id: 2
     hierarchyRelation: 0
-  - label: chassis_center_staircase_oshkosh
+  - label: staircase_hemtt_chassis_center
     id: 3
     hierarchyRelation: 0
-  - label: chassis_center_staircase_4seats
+  - label: staircase_quad_chassis_center
     id: 4
     hierarchyRelation: 0
-  - label: chassis_center_spares
+  - label: spares_chassis_center
     id: 5
     hierarchyRelation: 0
   - label: chassis_front
@@ -37,37 +37,37 @@ MonoBehaviour:
   - label: cabin
     id: 7
     hierarchyRelation: 0
-  - label: cabin_oshkosh
+  - label: hemtt_cabin
     id: 8
     hierarchyRelation: 0
-  - label: cabin_4seats
+  - label: quad_cabin
     id: 9
     hierarchyRelation: 0
   - label: load
     id: 10
     hierarchyRelation: 0
-  - label: load_dumper
+  - label: dumper
     id: 11
     hierarchyRelation: 0
   - label: load_empty
     id: 12
     hierarchyRelation: 0
-  - label: load_ladder
+  - label: ladder
     id: 13
     hierarchyRelation: 0
-  - label: load_rocketLauncher
+  - label: rocket_launcher
     id: 14
     hierarchyRelation: 0
   - label: fender
     id: 15
     hierarchyRelation: 0
-  - label: fender_normal
+  - label: normal_fender
     id: 16
     hierarchyRelation: 0
-  - label: fender_large
+  - label: large_fender
     id: 17
     hierarchyRelation: 0
-  - label: fender_double
+  - label: double_fender
     id: 18
     hierarchyRelation: 0
   - label: wheel

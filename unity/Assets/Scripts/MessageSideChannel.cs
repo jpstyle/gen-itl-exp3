@@ -53,6 +53,10 @@ public class MessageSideChannel : SideChannel
                 _listeningAgent.calibrationImageRequest = Convert.ToInt32(request);
             }
 
+            // Handle any part subtypes ordering request
+            if (utterance == "Subtype orderings request")
+                _listeningAgent.subtypeOrderingRequest = true;
+
             // Handle any ground-truth masks info requests
             if (utterance.StartsWith("GT mask request: "))
             {
