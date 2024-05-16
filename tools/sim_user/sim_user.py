@@ -4,13 +4,14 @@ Simulated user which takes part in dialogue with rule-based pattern matching
 """
 import re
 import random
+from collections import defaultdict
 from itertools import combinations, groupby
 
 import yaml
 import inflect
-import clingo
 import numpy as np
 import networkx as nx
+from clingo import Control, Function, Number
 
 from python.itl.vision.utils import mask_iou
 
@@ -23,6 +24,8 @@ MATCH_THRES = 0.9
 class SimulatedTeacher:
     
     def __init__(self, cfg):
+        self.cfg = cfg
+
         # History of ITL episode records
         self.episode_records = []
 
@@ -56,6 +59,8 @@ class SimulatedTeacher:
             is_proper = data["relation_type"] == "proper"
             for subtype in data["subtypes"]:
                 taxonomy_graph.add_edge(supertype, subtype, is_proper=is_proper)
+        for definiendum, definiens in self.domain_knowledge["definitions"].items():
+            taxonomy_graph.add_edge(definiens["supertype"], definiendum, is_proper=True)
         self.domain_knowledge["taxonomy"] = taxonomy_graph
 
         part_whole_graph = nx.DiGraph()
@@ -72,7 +77,14 @@ class SimulatedTeacher:
         self.current_episode_record = {}
         self.target_task = target_task
 
-        constraints = {}
+        # These constraints are always included in order to account for physically
+        # infeasible part combinations...
+        constraints = [
+            ("forall", "truck", (["spares_chassis_center", "dumper"], None), False),
+            ("forall", "truck", (["staircase_chassis_center", "dumper"], None), False),
+            ("forall", "truck", (["staircase_chassis_center", "rocket_launcher"], None), False)
+        ]
+
         if target_task == "build_truck_supertype":
             # More 'basic' experiment suite invested on learning part types, valid
             # structures of trucks (& subassemblies) and contact pairs & points
@@ -80,6 +92,7 @@ class SimulatedTeacher:
 
             # Sampling with minimal constraints, just so enough that a valid truck
             # structure can be built; no distractors added
+            num_distractors = 0
 
         else:
             assert target_task == "build_truck_subtype"
@@ -93,10 +106,23 @@ class SimulatedTeacher:
 
             # Sampling with full consideration of constraints in domain knowledge;
             # add distractors specifically selected to allow mistakes
+            num_distractors = 4
+            constraints += [
+                ("exists", definiendum, (list(definiens["parts"].values()), []), True)
+                for definiendum, definiens in self.domain_knowledge["definitions"].items()
+            ] + [
+                (rule_type, scope_class, tuple(entry), True)
+                for scope_class, rules in self.domain_knowledge["constraints"].items()
+                for rule_type, entries in rules.items()
+                for entry in entries
+            ]
 
         # Leverage ASP to obtain all possible samples of valid part set subject to
         # a set of constraints
-        sampled_inits = _sample_ASP(self.domain_knowledge, constraints, all_subtypes)
+        sampled_inits = _sample_ASP(
+            self.target_concept, self.domain_knowledge,
+            constraints, all_subtypes, num_distractors, self.cfg.seed
+        )
 
         # Return sampled parts to pass as environment parameters
         return sampled_inits
@@ -621,13 +647,15 @@ def _add_after_redundancy_check(outgoing_buffer, feedback):
     outgoing_buffer.append(feedback)
 
 
-def _sample_ASP(domain_knowledge, constraints, all_subtypes):
+def _sample_ASP(
+        goal_object, domain_knowledge, constraints, all_subtypes, num_distractors, seed
+    ):
     """
     Helper method factored out for writing & running ASP program for controlled
     sampling, subject to provided domain knowledge. (If some other person ever gets
     to read this part, sorry in advance :s)
     """
-    program_str = "hasPart(O0, O2) :- hasPart(O0, O1), hasPart(O1, O2).\n"
+    base_prg_str = "hasPart(O0, O2) :- hasPart(O0, O1), hasPart(O1, O2).\n"
 
     # Add rules for covering whole-to-part derivations
     pw_graph = domain_knowledge["part_whole"]
@@ -636,10 +664,10 @@ def _sample_ASP(domain_knowledge, constraints, all_subtypes):
     i = 0; occurring_subassemblies = set()
     for hol, per_holonym in pw_rules:
         for _, mer, count in per_holonym:
-            occurring_subassemblies.add(hol); occurring_subassemblies.add(mer)
+            occurring_subassemblies.add(mer)
             for _ in range(count):
-                program_str += f"{mer}(f_{i}(O)) :- {hol}(O).\n"
-                program_str += f"hasPart(O, f_{i}(O)) :- {hol}(O).\n"
+                base_prg_str += f"{mer}(f_{i}(O)) :- {hol}(O).\n"
+                base_prg_str += f"hasPart(O, f_{i}(O)) :- {hol}(O).\n"
                 i += 1
 
     # Add rules for covering supertype-subtype relations and choices
@@ -650,70 +678,93 @@ def _sample_ASP(domain_knowledge, constraints, all_subtypes):
         if hyper == "color": continue
 
         for _, hypo in per_hypernym:
-            program_str += f"{hyper}(O) :- {hypo}(O).\n"
+            base_prg_str += f"{hyper}(O) :- {hypo}(O).\n"
         if hyper not in occurring_subassemblies: continue
 
-        program_str += "1{ "
-        program_str += "; ".join(f"{hypo}(O)" for _, hypo in per_hypernym)
-        program_str += " }1 :- "
-        program_str += f"{hyper}(O).\n"
+        base_prg_str += "1{ "
+        base_prg_str += "; ".join(f"{hypo}(O)" for _, hypo in per_hypernym)
+        base_prg_str += " }1 :- "
+        base_prg_str += f"{hyper}(O).\n"
 
     # Add rules for covering color choices for applicable parts
-    program_str += "1{ hasColor(O, C) : color(C) }1 :- colored_part(O).\n"
-    program_str += ". ".join(f"color({c})" for c in all_subtypes["color"]) + ".\n"
+    base_prg_str += "1{ hasColor(O, C) : color(C) }1 :- colored_part(O).\n"
+    base_prg_str += ". ".join(f"color({c})" for c in all_subtypes["color"]) + ".\n"
 
     # Add rules for specifying atomic parts
     for supertype, subtypes in all_subtypes.items():
         if supertype == "color": continue
         for subtype in subtypes:
-            program_str += f"atomic(O, {subtype}) :- {subtype}(O).\n"
+            base_prg_str += f"atomic(O, {subtype}) :- {subtype}(O).\n"
 
     # Add integrity constraints for filtering invalid combinations
-    # constraints = domain_knowledge["constraints"]
-    for ci, scope_type in enumerate(constraints):
-        for ei, (parts, attributes) in enumerate(constraints[scope_type]["exists"]):
-            ...
+    for ci, (rule_type, scope_class, entry, _) in enumerate(constraints):
+        base_prg_str += f"rule({ci}).\n"
+        parts, attributes = entry
 
-        for ai, (parts, attributes) in enumerate(constraints[scope_type]["forall"]):
-            full_scope_str = f"{scope_type}(O), "
-            full_scope_str += ", ".join(f"{p}(O{i})" for i, p in enumerate(parts)) + ", "
-            full_scope_str += ", ".join(f"hasPart(O, O{i})" for i in range(len(parts)))
-            if len(parts) > 1:
-                obj_pairs = combinations(range(len(parts)), 2)
-                full_scope_str += ", "
-                full_scope_str += ", ".join(f"O{i} != O{j}" for i, j in obj_pairs)
+        full_scope_str = f"{scope_class}(O), "
+        full_scope_str += ", ".join(f"{p}(O{i})" for i, p in enumerate(parts)) + ", "
+        full_scope_str += ", ".join(f"hasPart(O, O{i})" for i in range(len(parts)))
+        if len(parts) > 1:
+            obj_pairs = combinations(range(len(parts)), 2)
+            full_scope_str += ", "
+            full_scope_str += ", ".join(f"O{i} != O{j}" for i, j in obj_pairs)
+        base_prg_str += f"{rule_type}_applicable({ci}) :- {scope_class}(O).\n"
 
-            if attributes is None:
-                program_str += f":- {full_scope_str}.\n"
-            else:
-                attr_args_str = ", ".join(f"O{a}" for a in range(len(parts)))
-                attr_str = f"attr_c{ci}a{ai}({attr_args_str}) :- {full_scope_str}, "
-                piece_strs = []
-                for attr, pol, arg_inds in attributes:
-                    if attr == "_same_color":
-                        assert len(arg_inds) == 2
-                        piece_str = f"hasColor(O{arg_inds[0]}, C0), "
-                        piece_str += f"hasColor(O{arg_inds[1]}, C1), "
-                        piece_str += "C0 = C1" if pol else "C0 != C1"
+        if attributes is None:
+            base_prg_str += f"exception_found({ci}) :- {full_scope_str}.\n"
+        else:
+            attr_args_str = ", ".join(f"O{a}" for a in range(len(parts)))
+            piece_strs = []
+
+            for attr, pol, arg_inds in attributes:
+                if attr == "_same_color":
+                    assert len(arg_inds) == 2
+                    piece_str = f"hasColor(O{arg_inds[0]}, C0), "
+                    piece_str += f"hasColor(O{arg_inds[1]}, C1), "
+                    piece_str += "C0 = C1" if pol else "C0 != C1"
+                else:
+                    piece_args_str = ", ".join(f"O{a}" for a in arg_inds)
+                    piece_str = "" if pol else "not "
+                    if attr in all_subtypes["color"]:
+                        piece_str += f"hasColor({piece_args_str}, {attr})"
                     else:
-                        piece_args_str = ", ".join(f"O{a}" for a in arg_inds)
-                        piece_str = "" if pol else "not "
                         piece_str += f"{attr}({piece_args_str})"
-                    piece_strs.append(piece_str)
-                attr_str += ", ".join(piece_strs) + ".\n"
+                piece_strs.append(piece_str)
 
-                program_str += attr_str
-                program_str += f":- {full_scope_str}, not attr_c{ci}a{ai}({attr_args_str}).\n"
+            if rule_type == "exists":
+                base_prg_str += \
+                    ", ".join([f"case_found({ci}) :- {full_scope_str}"]+piece_strs) + ".\n"
+            else:
+                assert rule_type == "forall"
+                base_prg_str += \
+                    ", ".join([f"attr_{ci}({attr_args_str}) :- {full_scope_str}"]+piece_strs) + ".\n"
+                base_prg_str += \
+                    f"exception_found({ci}) :- {full_scope_str}, not attr_{ci}({attr_args_str}).\n"
+
+    # 'exists' rules are violated if required attribute case is not found; 'forall' rules
+    # if any exception to required attribute is found
+    base_prg_str += "rule_violated(R) :- rule(R), exists_applicable(R), not case_found(R).\n"
+    base_prg_str += "rule_violated(R) :- rule(R), forall_applicable(R), exception_found(R).\n"
+
+    # Control the number of rules to be violated (0 or 1) by an external query atom
+    base_prg_str += ":- violate_none, rule_violated(R).\n"
+    base_prg_str += ":- violate_one, not 1{ rule_violated(R) : rule(R) }1.\n"
 
     # Finally add a grounded instance representing the whole truck sample
-    program_str += "truck(o).\n"
+    base_prg_str += f"{goal_object}(o).\n"
 
-    ctl = clingo.Control(["--warn=none"])
-    ctl.add("base", [], program_str)
+    # Program fragment defining the external control atoms
+    base_prg_str += "#external violate_none.\n"
+    base_prg_str += "#external violate_one.\n"
+
+    ctl = Control(["--warn=none"])
+    ctl.add("base", [], base_prg_str)
     ctl.ground([("base", [])])
     ctl.configuration.solve.models = 0
+    ctl.configuration.solver.seed = seed
 
     models = []
+    ctl.assign_external(Function("violate_none", []), True)
     with ctl.solve(yield_=True) as solve_gen:
         for m in solve_gen:
             models.append(m.symbols(atoms=True))
@@ -726,33 +777,183 @@ def _sample_ASP(domain_knowledge, constraints, all_subtypes):
     all_subtypes_inv_map = {x: k for k, v in all_subtypes.items() for x in v}
 
     # Filter out unnecessary atoms, to extract atomic parts and colors sampled
-    parts_by_fname = {}; colors_by_fname = {}
+    tgt_parts_by_fname = {}; tgt_colors_by_fname = {}
     for atm in sampled_model:
         # Collate part types first, indexing by skolem function name
         if atm.name == "atomic":
-            parts_by_fname[atm.arguments[0].name] = (
+            tgt_parts_by_fname[atm.arguments[0].name] = (
                 atm.arguments[1].name, all_subtypes_inv_map[atm.arguments[1].name]
             )
     for atm in sampled_model:
         # Then fetch matching colors for colorable parts
         if atm.name == "hasColor":
-            colors_by_fname[atm.arguments[0].name] = atm.arguments[1].name
+            tgt_colors_by_fname[atm.arguments[0].name] = atm.arguments[1].name
 
     # Group by part supertype
-    objs_grouped_by_supertype = {
+    tgt_objs_grouped_by_supertype = {
         k: sorted([f for f, _ in v], key=lambda x: int(x.replace("f_", "")))
-        for k, v in groupby(parts_by_fname.items(), key=lambda x: x[1][1])
+        for k, v in groupby(tgt_parts_by_fname.items(), key=lambda x: x[1][1])
     }
+
+    if num_distractors > 0:
+        # For distractors, we want to sample additional part groups that violate
+        # exactly one of the constraints
+        ctl.assign_external(Function("violate_none", []), False)
+        ctl.assign_external(Function("violate_one", []), True)
+
+        # Part groups to consider resampling as distractors
+        part_groups_by_type = [
+            [["cabin"]],
+            [["load"]],
+            [["chassis_center"]],
+            [["fl_fender", "fr_fender", "bl_fender", "br_fender"], ["wheel"]]
+        ]
+        part_groups_by_obj = [
+            [
+                sum([tgt_objs_grouped_by_supertype[p] for p in group], [])
+                for group in part_supertypes
+            ]
+            for part_supertypes in part_groups_by_type
+        ]
+        part_specs = {
+            obj: (tgt_parts_by_fname[obj][0], tgt_colors_by_fname.get(obj))
+            for groups in part_groups_by_obj
+            for group in groups
+            for obj in group
+        }
+
+        # Remove already sampled parts in this group so that exact same part
+        # specs (part type and color if applicable) cannot be sampled again,
+        # while fixing all other parts as identical; implement as additional
+        # clingo program fragment
+        sampled_distractor_groups = []
+        dtr_parts_by_fname = {}; dtr_colors_by_fname = {}
+
+        i = 0; sample_pool = list(range(len(part_groups_by_obj)))
+        while len(sampled_distractor_groups) < num_distractors:
+            if len(sample_pool) == 0:
+                # No more distractor sampling possible, terminate here
+                break
+
+            gi = random.sample(sample_pool, 1)[0]
+            sample_pool.remove(gi)
+
+            # Program fragment representing additional temporary constraints
+            alt_prg_str = f"#external active_{i}.\n"
+
+            # Ban current specs of the resampling target group
+            for group in part_groups_by_obj[gi]:
+                for obj in group:
+                    part_type_str = f"{part_specs[obj][0]}(O)"
+                    part_color_str = "" if part_specs[obj][1] is None \
+                        else f", hasColor(O, {part_specs[obj][1]})"
+                    alt_prg_str += f":- {part_type_str}{part_color_str}, active_{i}.\n"
+
+            # Enforce current specs for the remainder
+            piece_strs = []; oi = 0
+            for gj, groups in enumerate(part_groups_by_obj):
+                if gi == gj: continue
+
+                for group in groups:
+                    for obj in group:
+                        part_type_str = f"{part_specs[obj][0]}(O{oi})"
+                        part_color_str = "" if part_specs[obj][1] is None \
+                            else f", hasColor(O{oi}, {part_specs[obj][1]})"
+
+                        piece_strs.append(part_type_str + part_color_str)
+                        oi += 1
+
+            piece_strs += [f"O{oi} != O{oj}" for oi, oj in combinations(range(oi), 2)]
+
+            alt_prg_str += f"remainder_preserved_{i} :- "
+            alt_prg_str += ", ".join(piece_strs)
+            alt_prg_str += f", active_{i}.\n"
+
+            alt_prg_str += f":- not remainder_preserved_{i}, active_{i}.\n"
+
+            # Manage solver control by appropriate processing of external atoms and
+            # grounding
+            if i > 0:
+                ctl.release_external(Function(f"active_{i-1}", []))
+                ctl.cleanup()
+            ctl.add(f"distractor_sampling_{i}", [], alt_prg_str)
+            ctl.ground([(f"distractor_sampling_{i}", [])])
+            ctl.assign_external(Function(f"active_{i}", []), True)
+
+            models = []
+            with ctl.solve(yield_=True) as solve_gen:
+                for m in solve_gen:
+                    if len(models) > 1000: break
+                    models.append(m.symbols(atoms=True))
+
+            if len(models) == 0:
+                # No possible sampling of distractor that violate exactly one rule
+                i += 1
+                continue
+
+            # Some rules have more violating distractor samples than others; sample
+            # by rule-basis, not model-basis
+            violated_constraints = [
+                [atm.arguments[0].number for atm in m if atm.name == "rule_violated"][0]
+                for m in models
+            ]
+            model_inds_by_constraint = {
+                ci: [mi for mi, cj in enumerate(violated_constraints) if ci==cj]
+                for ci in range(len(constraints))
+            }
+            sampled_violated_constraint = random.sample([
+                ci for ci, (_, _, _, can_violate) in enumerate(constraints)
+                if can_violate and len(model_inds_by_constraint[ci]) > 0
+            ], 1)[0]
+            sampled_model = random.sample(
+                model_inds_by_constraint[sampled_violated_constraint]
+            , 1)[0]
+            sampled_model = models[sampled_model]
+
+            # Filter out unnecessary atoms, to extract atomic parts and colors sampled
+            types_to_collect = sum(part_groups_by_type[gi], [])
+            for atm in sampled_model:
+                # Collate part types in resampled group
+                if atm.name == "atomic":
+                    part_supertype = all_subtypes_inv_map[atm.arguments[1].name]
+                    if part_supertype in types_to_collect:
+                        dtr_parts_by_fname[atm.arguments[0].name] = (
+                            atm.arguments[1].name, part_supertype
+                        )
+            for atm in sampled_model:
+                # Then fetch matching colors for colorable parts
+                if atm.name == "hasColor" and atm.arguments[0].name in dtr_parts_by_fname:
+                    dtr_colors_by_fname[atm.arguments[0].name] = atm.arguments[1].name
+
+            i += 1
+            sampled_distractor_groups += part_groups_by_type[gi]
+
+        dtr_objs_grouped_by_supertype = defaultdict(list)
+        for obj, (_, part_supertype) in dtr_parts_by_fname.items():
+            dtr_objs_grouped_by_supertype[part_supertype].append(obj)
+        dtr_objs_grouped_by_supertype = dict(dtr_objs_grouped_by_supertype)
 
     # Organize into final return value dict
     sampled_inits = {}
-    for obj, (part_subtype, part_supertype) in parts_by_fname.items():
-        obj_ind = objs_grouped_by_supertype[part_supertype].index(obj)
-        sampled_inits[f"{part_supertype}/type/{obj_ind}"] = \
+    for obj, (part_subtype, part_supertype) in tgt_parts_by_fname.items():
+        oi = tgt_objs_grouped_by_supertype[part_supertype].index(obj)
+        sampled_inits[f"{part_supertype}/type/t{oi}"] = \
             all_subtypes[part_supertype].index(part_subtype)
 
-        if obj in colors_by_fname:
-            sampled_inits[f"{part_supertype}/color/{obj_ind}"] = \
-                all_subtypes["color"].index(colors_by_fname[obj])
+        if obj in tgt_colors_by_fname:
+            sampled_inits[f"{part_supertype}/color/t{oi}"] = \
+                all_subtypes["color"].index(tgt_colors_by_fname[obj])
+
+    for i in range(min(num_distractors, len(sampled_distractor_groups))):
+        dtr_group = sampled_distractor_groups[i]
+        for part_supertype in dtr_group:
+            for oi, obj in enumerate(dtr_objs_grouped_by_supertype[part_supertype]):
+                part_subtype = dtr_parts_by_fname[obj][0]
+                sampled_inits[f"{part_supertype}/type/d{oi}"] = \
+                    all_subtypes[part_supertype].index(part_subtype)
+
+                if obj in dtr_colors_by_fname:
+                    sampled_inits[f"{part_supertype}/color/d{oi}"] = \
+                        all_subtypes["color"].index(dtr_colors_by_fname[obj])
 
     return sampled_inits

@@ -19,25 +19,25 @@
 #             ...
 #         ...
 
-base truck:
+base_truck:
     supertype: truck
     parts:
         load: platform
     part_attributes: null
 
-dump truck:
+dump_truck:
     supertype: truck
     parts:
         load: dumper
     part_attributes: null
 
-missile truck:
+missile_truck:
     supertype: truck
     parts:
-        load: rocket launcher
+        load: rocket_launcher
     part_attributes: null
 
-fire truck:
+fire_truck:
     supertype: truck
     parts:
         load: ladder

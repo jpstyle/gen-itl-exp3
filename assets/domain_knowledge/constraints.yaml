@@ -47,19 +47,18 @@ base_truck:
 
 missile_truck:
     exists:
-        - [["cabin"], [["green", true, [0]]]]
+        - [["colored_part"], [["green", true, [0]]]]
     forall:
-        - [["colored_part"], [["red", false, [0]]]]
         - [["wheel"], [["large_wheel", true, [0]]]]
 
 dump_truck:
     exists:
         - [["hemtt_cabin"], []]
     forall:
-        - [["fender"], [["yellow", true, [0]]]]
+        - [["fender"], [["gold", true, [0]]]]
 
 fire_truck:
     exists:
         - [["staircase_chassis_center"], []]
     forall:
-        - [["colored_part"], [["red", true, [0]]]]
+        - [["fender"], [["red", true, [0]]]]

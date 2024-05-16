@@ -40,14 +40,15 @@ public class TeacherAgent : DialogueAgent
     {
         new Vector3(-0.24f, 0.76f, 0.24f),
         new Vector3(0.24f, 0.76f, 0.24f),
-        new Vector3(-0.36f, 0.76f, 0.48f),
-        new Vector3(-0.12f, 0.76f, 0.48f),
-        new Vector3(0.12f, 0.76f, 0.48f),
-        new Vector3(0.36f, 0.76f, 0.48f),
-        new Vector3(-0.42f, 0.88f, 0.74f),
-        new Vector3(-0.14f, 0.88f, 0.74f),
-        new Vector3(0.14f, 0.88f, 0.74f),
-        new Vector3(0.42f, 0.88f, 0.74f)
+        new Vector3(-0.48f, 0.76f, 0.48f),
+        new Vector3(-0.24f, 0.76f, 0.48f),
+        new Vector3(0f, 0.76f, 0.48f),
+        new Vector3(0.24f, 0.76f, 0.48f),
+        new Vector3(0.48f, 0.76f, 0.48f),
+        new Vector3(-0.42f, 0.88f, 0.75f),
+        new Vector3(-0.14f, 0.88f, 0.75f),
+        new Vector3(0.14f, 0.88f, 0.75f),
+        new Vector3(0.42f, 0.88f, 0.75f)
     };
     // Store workplace partition info for main work area
     private readonly Vector3 _mainPartitionPosition = new(0f, 0.76f, 0.24f);
@@ -84,26 +85,60 @@ public class TeacherAgent : DialogueAgent
         foreach (var rb in FindObjectsByType<Rigidbody>(FindObjectsSortMode.None))
             rb.detectCollisions = false;
 
-        var typeIndices = new Dictionary<(string, int), int>();
-        var colorIndices = new Dictionary<(string, int), int>();
+        var partGroups = new Dictionary<string, string>
+        {
+            { "cabin", "cabin" }, { "load", "load" },
+            { "chassis_front", "chassis_fb" },
+            { "chassis_center", "chassis_center" },
+            { "chassis_back", "chassis_fb" },
+            { "fl_fender", "fender" }, { "fr_fender", "fender" },
+            { "bl_fender", "fender" }, { "br_fender", "fender" },
+            { "wheel", "wheel" }, { "bolt", "bolt" }
+        };
+        var targetTypes = new Dictionary<(string, string), int>();
+        var targetColors = new Dictionary<(string, string), int>();
+        var targetGroups = new List<string>();
+        var distractorTypes = new Dictionary<(string, string), int>();
+        var distractorColors = new Dictionary<(string, string), int>();
+        var distractorGroups = new List<string>();
         foreach (var key in envParams.Keys())
         {
             var keyFields = key.Split("/");
             var partSupertype = keyFields[0];
             var descriptor = keyFields[1];
-            var identifier = Convert.ToInt32(keyFields[2]);
+            var identifier = keyFields[2];
 
-            if (descriptor == "type")
-                typeIndices[(partSupertype, identifier)] = GetEnvParam(envParams, key);
+            var groupType = partGroups[partSupertype];
+
+            var paramValue = GetEnvParam(envParams, key);
+            if (identifier.StartsWith("t"))
+            {
+                // Parts that make up desired target object
+                if (descriptor == "type")
+                    targetTypes[(partSupertype, identifier)] = paramValue;
+                else
+                    targetColors[(partSupertype, identifier)] = paramValue;
+                
+                if (!targetGroups.Contains(groupType))
+                    targetGroups.Add(groupType);
+            }
             else
-                colorIndices[(partSupertype, identifier)] = GetEnvParam(envParams, key);
+            {
+                // Parts that act as distractors
+                if (descriptor == "type")
+                    distractorTypes[(partSupertype, identifier)] = paramValue;
+                else
+                    distractorColors[(partSupertype, identifier)] = paramValue;
+
+                if (!distractorGroups.Contains(groupType))
+                    distractorGroups.Add(groupType);
+            }
         }
 
         // Create appropriate number of 'workspace partitions'; square areas that take up
         // space on the tabletop (corresponding gameObjects don't need to be Planes though,
         // we only need reference coordinates)
-        var addDistractors = envParams.GetWithDefault("_add_distractors", 0f) == 0f;
-        var numPartitions = addDistractors ? 10 : 6;
+        var numPartitions = targetGroups.Count + distractorGroups.Count;
         var sampledPartitionLocations = Enumerable.Range(0, _partPartitionPositions.Count).ToList();
         Shuffle(sampledPartitionLocations);
 
@@ -121,46 +156,119 @@ public class TeacherAgent : DialogueAgent
         }
 
         // Instantiate sampled parts on sampled partitions on tabletop
-        InstantiateCabin(typeIndices[("cabin", 0)], partitions[0], colorIndices[("cabin", 0)]);
-        InstantiateLoad(typeIndices[("load", 0)], partitions[1]);
-        InstantiateChassis(
+        InstantiateCabin(
+            targetTypes[("cabin", "t0")],
+            partitions[0], 
+            targetColors[("cabin", "t0")],
+            "t"
+        );
+        InstantiateLoad(targetTypes[("load", "t0")], partitions[1], "t");
+        InstantiateChassisFB(
             new List<int>
             {
-                typeIndices[("chassis_front", 0)],
-                typeIndices[("chassis_center", 0)],
-                typeIndices[("chassis_back", 0)]
+                targetTypes[("chassis_front", "t0")],
+                targetTypes[("chassis_back", "t0")]
             },
             partitions[2],
-            colorIndices[("chassis_center", 0)]
+            "t"
+        );
+        InstantiateChassisC(
+            targetTypes[("chassis_center", "t0")],
+            partitions[3],
+            targetColors[("chassis_center", "t0")],
+            "t"
         );
         InstantiateFenders(
             new List<int>
             {
-                typeIndices[("fl_fender", 0)],
-                typeIndices[("fr_fender", 0)],
-                typeIndices[("bl_fender", 0)],
-                typeIndices[("br_fender", 0)]
+                targetTypes[("fl_fender", "t0")],
+                targetTypes[("fr_fender", "t0")],
+                targetTypes[("bl_fender", "t0")],
+                targetTypes[("br_fender", "t0")]
             },
-            partitions[3],
+            partitions[4],
             new List<int>
             {
-                colorIndices[("fl_fender", 0)],
-                colorIndices[("fr_fender", 0)],
-                colorIndices[("bl_fender", 0)],
-                colorIndices[("br_fender", 0)]
-            }
+                targetColors[("fl_fender", "t0")],
+                targetColors[("fr_fender", "t0")],
+                targetColors[("bl_fender", "t0")],
+                targetColors[("br_fender", "t0")]
+            },
+            "t"
         );
         InstantiateWheels(
-            typeIndices
+            targetTypes
                 .Where(x => x.Key.Item1 == "wheel")
                 .Select(x => x.Value).ToList(),
-            partitions[4]
+            partitions[5],
+            "t"
         );
-        InstantiateBolts(typeIndices
+        InstantiateBolts(targetTypes
                 .Where(x => x.Key.Item1 == "bolt")
                 .Select(x => x.Value).ToList(),
-            partitions[5]
+            partitions[6],
+            "t"
         );
+
+        for (var i=0; i<distractorGroups.Count; i++)
+        {
+            var groupType = distractorGroups[i];
+            var partition = partitions[i+7];
+            switch (groupType)
+            {
+                case "cabin":
+                    InstantiateCabin(
+                        distractorTypes[("cabin", "d0")],
+                        partition,
+                        distractorColors[("cabin", "d0")],
+                        "d"
+                    );
+                    break;
+                case "load":
+                    InstantiateLoad(distractorTypes[("load", "d0")], partition, "d");
+                    break;
+                case "chassis_center":
+                    InstantiateChassisC(
+                        distractorTypes[("chassis_center", "d0")],
+                        partition,
+                        distractorColors[("chassis_center", "d0")],
+                        "d"
+                    );
+                    break;
+                case "fender":
+                    InstantiateFenders(
+                        new List<int>
+                        {
+                            distractorTypes[("fl_fender", "d0")],
+                            distractorTypes[("fr_fender", "d0")],
+                            distractorTypes[("bl_fender", "d0")],
+                            distractorTypes[("br_fender", "d0")]
+                        },
+                        partition,
+                        new List<int>
+                        {
+                            distractorColors[("fl_fender", "d0")],
+                            distractorColors[("fr_fender", "d0")],
+                            distractorColors[("bl_fender", "d0")],
+                            distractorColors[("br_fender", "d0")]
+                        },
+                        "d"
+                    );
+                    break;
+                case "wheel":
+                    InstantiateWheels(
+                        distractorTypes
+                            .Where(x => x.Key.Item1 == "wheel")
+                            .Select(x => x.Value).ToList(),
+                        partition,
+                        "d"
+                    );
+                    break;
+                default:
+                    // Shouldn't reach here
+                    throw new Exception("Invalid distractor part type");
+            }
+        }
 
         // Cleanup partitions now they're no longer needed
         foreach (var partition in partitions) Destroy(partition);
@@ -221,13 +329,13 @@ public class TeacherAgent : DialogueAgent
 
     // Helper methods for initializing sampled parts on sampled locations
     private void InstantiateCabin(
-        int typeIndex, GameObject partition, int colorIndex
+        int typeIndex, GameObject partition, int colorIndex, string identifier
     )
     {
         // Instantiate provided cabin type with generalized name
         var cabinPrefab = cabinTypes[typeIndex];
         var cabin = Instantiate(cabinPrefab, partition.transform);
-        cabin.name = "cabin";
+        cabin.name = $"{identifier}_cabin";
 
         // Apply sampled color
         foreach (var mesh in cabin.GetComponentsInChildren<MeshRenderer>())
@@ -238,7 +346,9 @@ public class TeacherAgent : DialogueAgent
         cabin.AddComponent<Rigidbody>();
         
         // Define position w.r.t. partition coordinate
-        cabin.transform.localPosition = new Vector3(0f, 0.06f, 0f);
+        var xPosition = Random.Range(-0.04f, 0.04f);
+        var zPosition = Random.Range(-0.04f, 0.04f);
+        cabin.transform.localPosition = new Vector3(xPosition, 0.06f, zPosition);
 
         // Apply random rotations to the parent partition object
         var rotY = Random.Range(0f, 359.9f);
@@ -247,12 +357,12 @@ public class TeacherAgent : DialogueAgent
         // Detach instantiated part from parent
         cabin.transform.parent = null;
     }
-    private void InstantiateLoad(int typeIndex, GameObject partition)
+    private void InstantiateLoad(int typeIndex, GameObject partition, string identifier)
     {
         // Instantiate provided load type with generalized name
         var loadPrefab = loadTypes[typeIndex];
         var load = Instantiate(loadPrefab, partition.transform);
-        load.name = "load";
+        load.name = $"{identifier}_load";
 
         // Add RigidBody component for physical interaction with environment
         load.AddComponent<Rigidbody>();
@@ -267,34 +377,24 @@ public class TeacherAgent : DialogueAgent
         // Detach instantiated part from parent
         load.transform.parent = null;
     }
-    private void InstantiateChassis(
-        List<int> typeIndices, GameObject partition, int centerColorIndex
+    private void InstantiateChassisFB(
+        List<int> typeIndices, GameObject partition, string identifier
     )
     {
         // Instantiate provided chassis types with generalized names
         var frontPrefab = frontChassisTypes[typeIndices[0]];
-        var centerPrefab = centerChassisTypes[typeIndices[1]];
-        var backPrefab = backChassisTypes[typeIndices[2]];
+        var backPrefab = backChassisTypes[typeIndices[1]];
         var chassisFront = Instantiate(frontPrefab, partition.transform);
-        var chassisCenter = Instantiate(centerPrefab, partition.transform);
         var chassisBack = Instantiate(backPrefab, partition.transform);
-        chassisFront.name = "chassis_front";
-        chassisCenter.name = "chassis_center";
-        chassisBack.name = "chassis_back";
-
-        // Apply sampled color to center chassis
-        foreach (var mesh in chassisCenter.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default"))
-                mesh.material = colors[centerColorIndex];
+        chassisFront.name = $"{identifier}_chassis_front";
+        chassisBack.name = $"{identifier}_chassis_back";
 
         // Add RigidBody component for physical interaction with environment
         chassisFront.AddComponent<Rigidbody>();
-        chassisCenter.AddComponent<Rigidbody>();
         chassisBack.AddComponent<Rigidbody>();
         
         // Define positions w.r.t. partition coordinate
-        chassisFront.transform.localPosition = new Vector3(0.018f, 0.02f, -0.05f);
-        chassisCenter.transform.localPosition = new Vector3(-0.075f, 0.02f, -0.05f);
+        chassisFront.transform.localPosition = new Vector3(0f, 0.02f, -0.05f);
         chassisBack.transform.localPosition = new Vector3(0f, 0.02f, 0.05f);
 
         // Apply random rotations to the parent partition object
@@ -303,11 +403,39 @@ public class TeacherAgent : DialogueAgent
         
         // Detach instantiated parts from parent
         chassisFront.transform.parent = null;
-        chassisCenter.transform.parent = null;
         chassisBack.transform.parent = null;
     }
+    private void InstantiateChassisC(
+        int typeIndex, GameObject partition, int centerColorIndex, string identifier
+    )
+    {
+        // Instantiate provided chassis type with generalized names
+        var centerPrefab = centerChassisTypes[typeIndex];
+        var chassisCenter = Instantiate(centerPrefab, partition.transform);
+        chassisCenter.name = $"{identifier}_chassis_center";
+
+        // Apply sampled color to center chassis
+        foreach (var mesh in chassisCenter.GetComponentsInChildren<MeshRenderer>())
+            if (mesh.material.name.StartsWith("Default"))
+                mesh.material = colors[centerColorIndex];
+
+        // Add RigidBody component for physical interaction with environment
+        chassisCenter.AddComponent<Rigidbody>();
+        
+        // Define position w.r.t. partition coordinate
+        var xPosition = Random.Range(-0.04f, 0.04f);
+        var zPosition = Random.Range(-0.04f, 0.04f);
+        chassisCenter.transform.localPosition = new Vector3(xPosition, 0.02f, zPosition);
+
+        // Apply random rotation to the parent partition object
+        var rotY = Random.Range(-0f, 359.9f);
+        partition.transform.eulerAngles = new Vector3(0f, rotY, 0f);
+        
+        // Detach instantiated part from parent
+        chassisCenter.transform.parent = null;
+    }
     private void InstantiateFenders(
-        List<int> typeIndices, GameObject partition, List<int> colorIndices
+        List<int> typeIndices, GameObject partition, List<int> colorIndices, string identifier
     )
     {
         // Instantiate provided fender types with generalized names
@@ -319,10 +447,10 @@ public class TeacherAgent : DialogueAgent
         var fenderFrontRight = Instantiate(frontRightPrefab, partition.transform);
         var fenderBackLeft = Instantiate(backLeftPrefab, partition.transform);
         var fenderBackRight = Instantiate(backRightPrefab, partition.transform);
-        fenderFrontLeft.name = "fl_fender";
-        fenderFrontRight.name = "fr_fender";
-        fenderBackLeft.name = "bl_fender";
-        fenderBackRight.name = "br_fender";
+        fenderFrontLeft.name = $"{identifier}_fl_fender";
+        fenderFrontRight.name = $"{identifier}_fr_fender";
+        fenderBackLeft.name = $"{identifier}_bl_fender";
+        fenderBackRight.name = $"{identifier}_br_fender";
 
         // Apply sampled color to each fender
         foreach (var mesh in fenderFrontLeft.GetComponentsInChildren<MeshRenderer>())
@@ -345,33 +473,38 @@ public class TeacherAgent : DialogueAgent
         fenderBackRight.AddComponent<Rigidbody>();
         
         // Define positions & rotations w.r.t. partition coordinate
-        var zPositions = new List<float> {-0.10f, -0.04f, 0.02f, 0.08f};
+        var xRotations = new List<int>
+        {
+            // -1 corresponds to x-rotation of -90, requiring 0.01 z-position offset
+            // 1 corresponds to x-rotation of 90, requiring -0.01 z-position offset
+            Random.Range(0, 2) * 2 - 1,
+            Random.Range(0, 2) * 2 - 1,
+            Random.Range(0, 2) * 2 - 1,
+            Random.Range(0, 2) * 2 - 1
+        };
+        var zPositions = new List<float> {-0.09f, -0.03f, 0.03f, 0.09f};
         var randomIndices = Enumerable.Range(0, 4).ToList();
         Shuffle(randomIndices);
         fenderFrontLeft.transform.localPosition = new Vector3(
-            Random.Range(-0.03f, 0.03f), 0.02f, zPositions[randomIndices[0]]
+            Random.Range(-0.03f, 0.03f), 0.02f,
+            zPositions[randomIndices[0]] + xRotations[0] * -0.01f
         );
         fenderFrontRight.transform.localPosition = new Vector3(
-            Random.Range(-0.03f, 0.03f), 0.02f, zPositions[randomIndices[1]]
+            Random.Range(-0.03f, 0.03f), 0.02f,
+            zPositions[randomIndices[1]] + xRotations[1] * -0.01f
         );
         fenderBackLeft.transform.localPosition = new Vector3(
-            Random.Range(-0.03f, 0.03f), 0.02f, zPositions[randomIndices[2]]
+            Random.Range(-0.03f, 0.03f), 0.02f,
+            zPositions[randomIndices[2]] + xRotations[2] * -0.01f
         );
         fenderBackRight.transform.localPosition = new Vector3(
-            Random.Range(-0.03f, 0.03f), 0.02f, zPositions[randomIndices[3]]
+            Random.Range(-0.03f, 0.03f), 0.02f,
+            zPositions[randomIndices[3]] + xRotations[3] * -0.01f
         );
-        fenderFrontLeft.transform.eulerAngles = new Vector3(
-            (Random.Range(0, 2) * 2 - 1) * 90f, 0f, 0f
-        );
-        fenderFrontRight.transform.eulerAngles = new Vector3(
-            (Random.Range(0, 2) * 2 - 1) * 90f, 0f, 0f
-        );
-        fenderBackLeft.transform.eulerAngles = new Vector3(
-            (Random.Range(0, 2) * 2 - 1) * 90f, 0f, 0f
-        );
-        fenderBackRight.transform.eulerAngles = new Vector3(
-            (Random.Range(0, 2) * 2 - 1) * 90f, 0f, 0f
-        );
+        fenderFrontLeft.transform.eulerAngles = new Vector3(xRotations[0] * 90f, 0f, 0f);
+        fenderFrontRight.transform.eulerAngles = new Vector3(xRotations[1] * 90f, 0f, 0f);
+        fenderBackLeft.transform.eulerAngles = new Vector3(xRotations[2] * 90f, 0f, 0f);
+        fenderBackRight.transform.eulerAngles = new Vector3(xRotations[3] * 90f, 0f, 0f);
 
         // Apply random rotations to the parent partition object
         var rotY = 90f * Random.Range(0, 4) + Random.Range(-5f, 5f);
@@ -383,7 +516,9 @@ public class TeacherAgent : DialogueAgent
         fenderBackLeft.transform.parent = null;
         fenderBackRight.transform.parent = null;
     }
-    private void InstantiateWheels(List<int> typeIndices, GameObject partition)
+    private void InstantiateWheels(
+        List<int> typeIndices, GameObject partition, string identifier
+    )
     {
         // Valid (x,z)-positions to sample from
         var xzPositions = new List<(float, float)>
@@ -401,7 +536,7 @@ public class TeacherAgent : DialogueAgent
             // Instantiate provided wheel type with generalized name
             var wheelPrefab = wheelTypes[typeIndices[i]];
             var wheel = Instantiate(wheelPrefab, partition.transform);
-            wheel.name = $"wheel_{i}";
+            wheel.name = $"{identifier}_wheel_{i}";
 
             // Add RigidBody component for physical interaction with environment
             wheel.AddComponent<Rigidbody>();
@@ -425,7 +560,9 @@ public class TeacherAgent : DialogueAgent
         // Detach instantiated parts from parent
         foreach (var wheel in generatedWheels) wheel.transform.parent = null;
     }
-    private void InstantiateBolts(List<int> typeIndices, GameObject partition)
+    private void InstantiateBolts(
+        List<int> typeIndices, GameObject partition, string identifier
+    )
     {
         // Valid (x,z)-positions to sample from
         var xzPositions = new List<(float, float)>
@@ -443,7 +580,7 @@ public class TeacherAgent : DialogueAgent
             // Instantiate provided wheel type with generalized name
             var boltPrefab = boltTypes[typeIndices[i]];
             var bolt = Instantiate(boltPrefab, partition.transform);
-            bolt.name = $"bolt_{i}";
+            bolt.name = $"{identifier}_bolt_{i}";
 
             // Add RigidBody component for physical interaction with environment
             bolt.AddComponent<Rigidbody>();
