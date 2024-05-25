@@ -28,9 +28,19 @@ class Val:
 
 
 library = {
-    # Resolve neologism by requesting definitions in language or exemplars, in
-    # accordance with the agent's learning interaction stategy
-    "address_neologism": None,
+    # Resolve neologism by requesting definitions or exemplars
+    "address_neologism": [
+        # Prepare answering utterance to generate
+        {
+            "action_method": Val(referrable=["comp_actions", "report_neologism"]),
+            "action_args_getter": lambda x: (Val(data=x),)
+        },
+        # Generate whatever response queued
+        {
+            "action_method": Val(referrable=["lang", "generate"]),
+            "action_args_getter": lambda x: ()
+        }
+    ],
 
     # Handle unanswered question by first checking if it can be answered with agent's
     # current knowledge, and if so, adding to agenda to actually answer it
@@ -55,6 +65,16 @@ library = {
             "action_method": Val(referrable=["lang", "generate"]),
             "action_args_getter": lambda x: ()
         }
+    ],
+
+    # Handle unanswered question by first checking if it can be executed with agent's
+    # current knowledge, and if so, adding to agenda to actually execute it
+    "address_unexecuted_commands": [
+        # Prepare answering utterance to generate
+        {
+            "action_method": Val(referrable=["comp_actions", "attempt_execute_command"]),
+            "action_args_getter": lambda x: (Val(data=x),)
+        },
     ],
 
     # Resolve mismatch between agent's vs. user's perception by asking question,

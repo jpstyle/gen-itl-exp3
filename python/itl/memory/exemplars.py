@@ -79,12 +79,13 @@ class Exemplars:
                     # Referring to an already existing exemplar
                     scene_id, obj_id = xi
 
-                if pol == "pos":
-                    self.exemplars_pos[conc_type][conc_ind].add((scene_id, obj_id))
-                elif pol == "neg":
-                    self.exemplars_neg[conc_type][conc_ind].add((scene_id, obj_id))
-                else:
-                    raise ValueError("Bad concept polarity value")
+                match pol:
+                    case "pos":
+                        self.exemplars_pos[conc_type][conc_ind].add((scene_id, obj_id))
+                    case "neg":
+                        self.exemplars_neg[conc_type][conc_ind].add((scene_id, obj_id))
+                    case _:
+                        raise ValueError("Bad concept polarity value")
 
                 xb_updated.add((conc_type, conc_ind))
 

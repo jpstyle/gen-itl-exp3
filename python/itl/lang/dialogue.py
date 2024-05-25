@@ -17,7 +17,8 @@ class DialogueManager:
             "dis": {}   # Introduced by dialogue
         }
         self.referents["env"]["_self"] = None
-                # Self always included as environment entity
+        self.referents["env"]["_user"] = None
+                # Agent self & (one) user always included as environment entity
 
         self.assignment_hard = {}   # Store fixed assignment by demonstrative+pointing, names, etc.
         self.referent_names = {}    # Store mapping from symbolic name to entity
@@ -32,9 +33,10 @@ class DialogueManager:
         # Sensemaking results after processing each dialogue input, indexed by dialogue
         # turns
         self.sensemaking_v_snaps = {}
-        self.sensemaking_vl_snaps = {}
 
         self.unanswered_Qs = set()
+        self.unexecuted_commands = set()
+
         if hasattr(self, "acknowledged_stms"):
             # If acknowledgement info exists for current record when refreshing, outdate
             # by re-indexing "curr" entries with "prev"
@@ -65,7 +67,7 @@ class DialogueManager:
         """
         env_entities = {
             k: v for k, v in self.referents["env"].items()
-            if k != "_self"
+            if not (k == "_self" or k == "_user")
         }       # Entities except self
 
         if len(env_entities) > 0:

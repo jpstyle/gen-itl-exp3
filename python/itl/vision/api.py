@@ -33,8 +33,6 @@ class VisionModule:
         self.latest_input = None        # Latest raw input
         self.previous_input = None      # Any input *before* current self.latest_input
 
-        self.fs_model_path = None
-
         # Inventory of distinct visual concepts that the module (and thus the agent
         # equipped with this module) is aware of, one per concept category. Right now
         # I cannot think of any specific type of information that has to be stored in
@@ -43,36 +41,18 @@ class VisionModule:
         self.inventories = VisualConceptInventory()
 
         self.model = VisualSceneAnalyzer(self.cfg)
-
-        # If pre-trained vision model is specified, download and load weights
-        if "fs_model" in self.cfg.vision.model:
-            self.fs_model_path = self.cfg.vision.model.fs_model
-            self.load_weights()
         
         if torch.cuda.is_available():
             self.model = self.model.to("cuda")
 
         self.confusions = set()
 
-    def load_weights(self):
-        """ Load model parameter weights from specified source (self.fs_model) """
-        # Path to trained weights few-shot prediciton head is provided as either
-        # W&B run id or local path to checkpoint file
-        assert self.fs_model_path is not None
-
-        local_ckpt_path = self.fs_model_path
-        logger.info(f"Loading few-shot component weights from {local_ckpt_path}")
-
-        ckpt = torch.load(local_ckpt_path)
-        self.model.load_state_dict(ckpt["state_dict"], strict=False)
-
-
     def predict(
         self, image, exemplars, reclassify=False, masks=None, specs=None,
         visualize=True, lexicon=None
     ):
         """
-        Model inference in either one of three modes:
+        Model inference in either one of four modes:
             1) full scene graph generation mode, where the module is only given
                 an image and needs to return its estimation of the full scene
                 graph for the input
@@ -250,7 +230,41 @@ class VisionModule:
                         conc_type, conc_ind = conc.split("_")
                         conc_ind = int(conc_ind)
 
-                        if conc_type == "cls" or conc_type == "att":
+                        match conc_type:
+                            case "cls" | "att":
+                                # Fetch set of positive exemplars
+                                pos_exs_inds = exemplars.exemplars_pos[conc_type][conc_ind]
+                                pos_exs_info = [
+                                    (
+                                        exemplars.scenes[scene_id][0],
+                                        mask.decode(
+                                            exemplars.scenes[scene_id][1][obj_id]["mask"]
+                                        ).astype(bool),
+                                        exemplars.scenes[scene_id][1][obj_id]["f_vec"]
+                                    )
+                                    for scene_id, obj_id in pos_exs_inds
+                                ]
+                                bin_clf = exemplars.binary_classifiers[conc_type][conc_ind]
+                                disj_cond.append((pos_exs_info, bin_clf))
+
+                            case "rel":
+                                # Relations are not neurally predicted, nor used for search
+                                # (for now, at least...)
+                                continue
+
+                            case _:
+                                raise ValueError("Invalid concept type")
+
+                    search_conds.append(disj_cond)
+
+                else:
+                    # Single elementary predicate, fetch positive exemplars for the
+                    # corresponding concept
+                    conc_type, conc_ind = d_lit.name.split("_")
+                    conc_ind = int(conc_ind)
+
+                    match conc_type:
+                        case "cls" | "att":
                             # Fetch set of positive exemplars
                             pos_exs_inds = exemplars.exemplars_pos[conc_type][conc_ind]
                             pos_exs_info = [
@@ -264,43 +278,15 @@ class VisionModule:
                                 for scene_id, obj_id in pos_exs_inds
                             ]
                             bin_clf = exemplars.binary_classifiers[conc_type][conc_ind]
-                            disj_cond.append((pos_exs_info, bin_clf))
-                        else:
-                            assert conc_type == "rel"
+                            search_conds.append([(pos_exs_info, bin_clf)])
 
+                        case "rel":
                             # Relations are not neurally predicted, nor used for search
                             # (for now, at least...)
                             continue
 
-                    search_conds.append(disj_cond)
-
-                else:
-                    # Single elementary predicate, fetch positive exemplars for the
-                    # corresponding concept
-                    conc_type, conc_ind = d_lit.name.split("_")
-                    conc_ind = int(conc_ind)
-
-                    if conc_type == "cls" or conc_type == "att":
-                        # Fetch set of positive exemplars
-                        pos_exs_inds = exemplars.exemplars_pos[conc_type][conc_ind]
-                        pos_exs_info = [
-                            (
-                                exemplars.scenes[scene_id][0],
-                                mask.decode(
-                                    exemplars.scenes[scene_id][1][obj_id]["mask"]
-                                ).astype(bool),
-                                exemplars.scenes[scene_id][1][obj_id]["f_vec"]
-                            )
-                            for scene_id, obj_id in pos_exs_inds
-                        ]
-                        bin_clf = exemplars.binary_classifiers[conc_type][conc_ind]
-                        search_conds.append([(pos_exs_info, bin_clf)])
-                    else:
-                        assert conc_type == "rel"
-
-                        # Relations are not neurally predicted, nor used for search
-                        # (for now, at least...)
-                        continue
+                        case _:
+                            raise ValueError("Invalid concept type")
 
             # Run search conditioned on the exemplars
             vis_embs, masks_out, scores = self.model(image, search_conds=search_conds)
@@ -328,50 +314,53 @@ class VisionModule:
                     conc_type, conc_ind = d_lit.name.split("_")
                     conc_ind = int(conc_ind)
 
-                    if conc_type == "cls" or conc_type == "att":
-                        # Use the returned scores as compatibility scores
-                        comp_scores = torch.tensor(scores, device=self.model.device)
+                    match conc_type:
+                        case "cls" | "att":
+                            # Use the returned scores as compatibility scores
+                            comp_scores = torch.tensor(scores, device=self.model.device)
 
-                    else:
-                        # Compatibility scores geometric relations, which are not neurally
-                        # predicted int the current module implementation
-                        assert conc_type == "rel"
+                        case "rel":
+                            # Compatibility scores geometric relations, which are not neurally
+                            # predicted int the current module implementation
 
-                        # Cannot process relations other than "have" for now...
-                        assert conc_ind == 0
+                            # Cannot process relations other than "have" for now...
+                            assert conc_ind == 0
 
-                        # Cannot process search specs with more than one variables for
-                        # now (not planning to address that for a good while!)
-                        assert len(s_vars) == 1
+                            # Cannot process search specs with more than one variables for
+                            # now (not planning to address that for a good while!)
+                            assert len(s_vars) == 1
 
-                        # Handles to literal args; either search target variable or
-                        # previously identified entity
-                        arg_handles = [
-                            ("v", s_vars.index(arg[0]))
-                                if arg[0] in s_vars
-                                else ("e", exs_idx_map_inv[arg[0]])
-                            for arg in d_lit.args
-                        ]
+                            # Handles to literal args; either search target variable or
+                            # previously identified entity
+                            arg_handles = [
+                                ("v", s_vars.index(arg[0]))
+                                    if arg[0] in s_vars
+                                    else ("e", exs_idx_map_inv[arg[0]])
+                                for arg in d_lit.args
+                            ]
 
-                        # Mask areas for all candidates
-                        masks_out_A = masks_out.sum(axis=(-2,-1))
+                            # Mask areas for all candidates
+                            masks_out_A = masks_out.sum(axis=(-2,-1))
 
-                        # Fetch bbox of reference entity, against which bbox area
-                        # ratios will be calculated among candidates
-                        reference_ent = [
-                            arg_ind for arg_type, arg_ind in arg_handles
-                            if arg_type=="e"
-                        ][0]
-                        reference_ent = exs_idx_map[reference_ent]
-                        reference_mask = self.scene[reference_ent]["pred_mask"]
+                            # Fetch bbox of reference entity, against which bbox area
+                            # ratios will be calculated among candidates
+                            reference_ent = [
+                                arg_ind for arg_type, arg_ind in arg_handles
+                                if arg_type=="e"
+                            ][0]
+                            reference_ent = exs_idx_map[reference_ent]
+                            reference_mask = self.scene[reference_ent]["pred_mask"]
 
-                        # Compute area ratio between the reference mask and all proposals
-                        intersections = masks_out * reference_mask[None]
-                        intersections_A = intersections.sum(axis=(-2,-1))
+                            # Compute area ratio between the reference mask and all proposals
+                            intersections = masks_out * reference_mask[None]
+                            intersections_A = intersections.sum(axis=(-2,-1))
 
-                        comp_scores = torch.tensor(
-                            intersections_A / masks_out_A, device=self.model.device
-                        )
+                            comp_scores = torch.tensor(
+                                intersections_A / masks_out_A, device=self.model.device
+                            )
+
+                        case _:
+                            raise ValueError("Invalid concept type")
 
                 # Update aggregate compatibility score; using min function
                 # as the t-norm (other options: product, ...)
@@ -479,8 +468,7 @@ class VisionModule:
 
 class VisualConceptInventory:
     def __init__(self):
-        # self.cls = self.att = self.rel = 0
-
-        # (Temp) Inventory of relation concept is a fixed singleton set, containing "have"
-        self.cls = self.att = 0
-        self.rel = 1
+        # Inventory of (visually perceivable) relation concept is a fixed singleton
+        # set, containing "have"
+        self.pcls = 0
+        self.prel = 1

@@ -65,7 +65,7 @@ def query(reg_gr, q_vars, event, restrictors):
         # grounded event instances
         pred_var_arities = {
             l for l in set.union(*[ev_rule.literals() for ev_rule in event])
-            if l.name=="*_isinstance"
+            if l.name=="sp_isinstance"
         }
         pred_var_arities = { l.args[0][0]: len(l.args)-1 for l in pred_var_arities }
 

@@ -42,8 +42,7 @@ public class MessageSideChannel : SideChannel
                 demRefs[(start, end)] = new EntityRef(msg.ReadString());
         }
 
-        // Handle system requests from backend (only concerns ground-truth masks info
-        // requests currently)
+        // Handle system requests or action parameter specifications from backend
         if (speaker == "System")
         {
             // Handle any calibration image requests
@@ -63,6 +62,16 @@ public class MessageSideChannel : SideChannel
                 var requests = utterance.Replace("GT mask request: ", "");
                 foreach (var req in requests.Split(", "))
                     _listeningAgent.gtMaskRequests.Enqueue(req);
+            }
+
+            // Receive and store action parameters; string parameters (which are not
+            // handled by MLAgent Package) are sent via this channel
+            if (utterance.StartsWith("Action parameters: "))
+            {
+                var parameters = utterance.Replace("Action parameters: ", "");
+                if (parameters != "")
+                    foreach (var prm in parameters.Split(", "))
+                        _listeningAgent.actionParameterBuffer.Enqueue(prm);
             }
         }
 

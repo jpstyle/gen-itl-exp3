@@ -41,6 +41,14 @@ from tools.message_side_channel import StringMsgChannel
 logger = logging.getLogger(__name__)
 TAB = "\t"
 
+# Integer indexing of action types for reference in Unity env
+ACT_TYPE_INDS = {
+    "PickUpLeft": 1, "PickUpRight": 2,
+    "DropLeft": 3, "DropRight": 4,
+    "AssembleRightToLeft": 5, "AssembleLeftToRight": 6,
+    "InspectLeft": 7, "InspectRight": 8
+}
+
 OmegaConf.register_new_resolver(
     "randid", lambda: str(uuid.uuid4())[:6]
 )
@@ -196,19 +204,15 @@ def main(cfg):
         # # Request sending ground-truth mask info to teacher at the beginning
         # teacher_channel.send_string("System", "GT mask request: cabin, load", {})
 
-        # # Send teacher's episode-initial output---thus user's episode-initial input
-        # # (Comment out when testing in Heuristics mode)
-        # opening_output = teacher.initiate_dialogue()
-        # teacher_channel.send_string(
-        #     "Teacher", opening_output[0]["utterance"], opening_output[0]["pointing"]
-        # )
-        # logger.info(f"T> {TAB}{opening_output[0]['utterance']}")
+        # Send teacher's episode-initial output---thus user's episode-initial input
+        opening_output = teacher.initiate_dialogue()
+        teacher_channel.send_string(
+            "Teacher", opening_output[0]["utterance"], opening_output[0]["pointing"]
+        )
+        logger.info(f"T> {TAB}{opening_output[0]['utterance']}")
 
         # Let the settings take effect and begin the episode
         env.reset()
-
-        # New scene bool flag
-        new_scene = True
 
         while True:
             # Keep running until either student or teacher terminates episode
@@ -234,7 +238,7 @@ def main(cfg):
 
                         # Obtain agent's visual observation from camera sensor
                         vis_obs = dec_step.obs[0]
-                        vis_obs = (vis_obs * 255).astype(np.uint8)
+                        vis_obs = (vis_obs.transpose(1,2,0) * 255).astype(np.uint8)
                         i_h, i_w, _ = vis_obs.shape
                         agent_loop_input["v_usr_in"] = Image.fromarray(vis_obs, mode="RGB")
 
@@ -253,7 +257,7 @@ def main(cfg):
                                 agent_loop_input["pointing"].append(dem_refs)
 
                         # ITL agent loop: process input and generate output (action)
-                        act_out = student.loop(**agent_loop_input, new_scene=new_scene)
+                        act_out = student.loop(**agent_loop_input)
 
                         if len(act_out) > 0:
                             # Process action output accordingly by setting Unity MLAgent
@@ -270,15 +274,13 @@ def main(cfg):
                                     student_channel.send_string(
                                         "Student", utterance, dem_refs
                                     )
-                                    logger.info(f"L> {TAB}{utterance}")
+                                    if not utterance.startswith("#"):
+                                        logger.info(f"L> {TAB}{utterance}")
 
                             # Finally apply actions
                             env.set_action_for_agent(b_name, dec_step.agent_id, action)
                         else:
                             terminate = True
-
-                        # Disable new scene flag after any agent loop
-                        new_scene = False
 
                     # Handle teacher's decision request
                     if b_name.startswith("TeacherBehavior"):
@@ -309,14 +311,25 @@ def main(cfg):
 
                         if len(user_response) > 0:
                             action = b_spec.action_spec.empty_action(1)
-                            for act_data in user_response:
-                                action.discrete[0][0] = 1       # 'Utter' action
-                                utterance = act_data["utterance"]
-                                dem_refs = act_data["pointing"]
-                                teacher_channel.send_string(
-                                    "Teacher", utterance, dem_refs
-                                )
-                                logger.info(f"T> {TAB}{utterance}")
+                            for act_type, act_args in user_response:
+                                if act_type == "Utter":
+                                    # 'Utter' action
+                                    action.discrete[0][0] = 1
+                                    utterance = act_args["utterance"]
+                                    dem_refs = act_args["pointing"]
+                                    teacher_channel.send_string("Teacher", utterance, dem_refs)
+                                    if not utterance.startswith("#"):
+                                        logger.info(f"T> {TAB}{utterance}")
+                                    if utterance.startswith("I will demonstrate how to"):
+                                        # Purely for logging purpose
+                                        logger.info(f"T> {TAB}[Demonstrating a valid action sequence...]")
+                                else:
+                                    # Physical actions for demonstration; set discrete action
+                                    # type and send string parameters via channel
+                                    action.discrete[0][1] = ACT_TYPE_INDS[act_type]
+                                    str_params = ", ".join(act_args["parameters"])
+                                    full_spec = f"Action parameters: {str_params}"
+                                    teacher_channel.send_string("System", full_spec, {})
 
                             # Finally apply actions
                             env.set_action_for_agent(b_name, dec_step.agent_id, action)

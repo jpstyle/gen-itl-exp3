@@ -3,7 +3,6 @@ import gzip
 import pickle
 from PIL import Image
 from itertools import product
-from collections import defaultdict
 
 import cv2
 import numpy as np
@@ -11,18 +10,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-from omegaconf import OmegaConf
 from PIL import ImageFilter
 from scipy.optimize import linear_sum_assignment
 from skimage.morphology import opening, closing, dilation
 from skimage.measure import label
 from sklearn.cluster import KMeans
-from torch.optim import AdamW
-from torchvision.ops import batched_nms, masks_to_boxes, box_convert
+from torchvision.ops import masks_to_boxes, box_convert
 from transformers import AutoImageProcessor, Dinov2Model, SamProcessor, SamModel
-
-from .process_data import process_batch, preprocess_input
-from ..utils import flatten_cfg
 
 
 BLUR_RADIUS = 5                 # Gaussian blur kernel radius for background image
@@ -132,7 +126,7 @@ class VisualSceneAnalyzer(nn.Module):
 
             # Processing for image encoder
             dino_processed_input = self.dino_processor(images=image, return_tensors="pt")
-            pixel_values = dino_processed_input.pixel_values.to(self.device)
+            pixel_values = dino_processed_input.pixel_values.to(self.dino.device)
             dino_processed_input = self.dino(
                 pixel_values=pixel_values, return_dict=True
             )
@@ -149,9 +143,9 @@ class VisualSceneAnalyzer(nn.Module):
             sam_processed_input = self.sam_processor(
                 images=image, input_points=grid_points, return_tensors="pt"
             )
-            pixel_values = sam_processed_input.pixel_values.to(self.device)
-            sam_grid_prompts = sam_processed_input.input_points.to(self.device)
-            sam_reshaped_size = sam_processed_input.reshaped_input_sizes.to(self.device)
+            pixel_values = sam_processed_input.pixel_values.to(self.sam.device)
+            sam_grid_prompts = sam_processed_input.input_points.to(self.sam.device)
+            sam_reshaped_size = sam_processed_input.reshaped_input_sizes.to(self.sam.device)
             sam_embs = self.sam.get_image_embeddings(
                 pixel_values=pixel_values, return_dict=True
             )
@@ -250,7 +244,7 @@ class VisualSceneAnalyzer(nn.Module):
             vis_embs = []
             for vp in visual_prompts:
                 vp_processed = self.dino_processor(images=vp, return_tensors="pt")
-                vp_pixel_values = vp_processed.pixel_values.to(self.device)
+                vp_pixel_values = vp_processed.pixel_values.to(self.dino.device)
                 vp_dino_out = self.dino(pixel_values=vp_pixel_values, return_dict=True)
                 vis_embs.append(vp_dino_out.pooler_output.cpu().numpy())
             vis_embs = np.concatenate(vis_embs)
@@ -315,13 +309,13 @@ class VisualSceneAnalyzer(nn.Module):
         # Matching between cropped exemplar (reference) images w/ masks vs. current
         # scene view, select low resolution patches
         matched_patches = _patch_matching(
-            cropped_images, cropped_masks, orig_size, self.device,
+            cropped_images, cropped_masks, orig_size, self.dino.device,
             self.dino, self.dino_processor, dino_embs, self.dino.config
         )
 
         # Obtain segmentation input prompts, run segmentation model and postprocess
         final_masks = _prompted_segmentation(
-            matched_patches, image, orig_size, self.device,
+            matched_patches, image, orig_size, self.sam.device,
             self.sam, self.sam_processor, sam_embs, self.dino.config
         )
 
@@ -411,7 +405,7 @@ class VisualSceneAnalyzer(nn.Module):
             processed_input = self.sam_processor(
                 image_raw,
                 return_tensors="pt"
-            ).to(self.device)
+            ).to(self.sam.device)
 
             # Obtain image embeddings from the raw pixel values
             with torch.no_grad():

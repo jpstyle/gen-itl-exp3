@@ -1,35 +1,41 @@
 class Lexicon:
     """
-    Lexicon of open-classed words <-> their denoted concepts in physical world. Should
-    allow many-to-many mappings between symbols and denotations.
+    Lexicon of open-classed words <-> their denoted concepts in physical world.
+    Allows many-to-many mappings between symbols and denotations.
+
+    Types of considered denotations: perceivable unary concepts ("pcls"), perceivable
+    binary concepts ("prel"), action concepts ("arel")
     """
-    # Special reserved symbols; any predicates obtainable from the parsing-translation
-    # pipeline, that do NOT refer to first-order domain concepts
+    # Special reserved symbols; any predicates that are not straightforward to
+    # represent as lexicon entry
     RESERVED = [
-        # Invokes object identity check
-        ("=", "*"),
         # Invokes concept instance (i.e., set element) check
-        ("isinstance", "*"),
+        ("sp", "isinstance"),
         # Invokes supertype-subtype check (against taxonomy KB)
-        ("subtype", "*"),
-        # Invokes concept difference computation
-        ("diff", "*"),
-        # Pronoun indicator
-        ("pronoun", "*"),
-        # Expresses a dialogue participant's belief on a statement w/ irrealis mood
-        ("think", "*")
+        ("sp", "subtype"),
+        # Represents agent lack of knowledge
+        ("sp", "unknown"),
+        # Represents agent inability
+        ("sp", "unable"),
+        # Represents 1st, 2nd person pronouns
+        ("sp", "pronoun1"), ("sp", "pronoun2"),
+        # Signals demonstration of how to achieve a task
+        ("sp", "demonstrate"), ("sp", "manner")
     ]
 
     def __init__(self):
         self.s2d = {}     # Symbol-to-denotation
         self.d2s = {}     # Denotation-to-symbol
-        self.d_freq = {}  # Denotation frequency
 
         # Add reserved symbols & denotations
         for r in Lexicon.RESERVED: self.add(r, r)
 
-        # (Temp) Inventory of relation concept is a fixed singleton set, containing "have"
-        self.add(("have", "v"), (0, "rel"))
+        # Specify the initial inventory of lexical entries that each agent starts with
+        self.add(("vs", "have"), ("prel", 0))
+        self.add(("va", "build"), ("arel", 0))
+        self.add(("va", "pick_up"), ("arel", 1))
+        self.add(("va", "drop"), ("arel", 2))
+        self.add(("va", "assemble"), ("arel", 3))
 
     def __repr__(self):
         return f"Lexicon(len={len(self.s2d)})"
@@ -37,11 +43,7 @@ class Lexicon:
     def __contains__(self, symbol):
         return symbol in self.s2d
 
-    def add(self, symbol, denotation, freq=None):
-        # For consistency; we don't need the 'adjective satellite' thingy
-        # from WordNet
-        if symbol[1] == "s": symbol = (symbol[0], "a")
-
+    def add(self, symbol, denotation):
         # Symbol-to-denotation
         if symbol in self.s2d:
             self.s2d[symbol].append(denotation)
@@ -53,6 +55,3 @@ class Lexicon:
             self.d2s[denotation].append(symbol)
         else:
             self.d2s[denotation] = [symbol]
-
-        freq = freq or 1
-        self.d_freq[denotation] = freq

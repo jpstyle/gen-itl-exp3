@@ -2,10 +2,10 @@
 Outermost wrapper containing ITL agent API
 """
 import os
+import re
 import copy
 import pickle
 import logging
-from collections import defaultdict
 
 import torch
 
@@ -13,7 +13,7 @@ from .vision import VisionModule
 from .lang import LanguageModule
 from .memory import LongTermMemoryModule
 from .symbolic_reasoning import SymbolicReasonerModule
-from .practical_reasoning import PracticalReasonerModule
+from .action_planning import ActionPlannerModule
 from .comp_actions import CompositeActions
 
 logger = logging.getLogger(__name__)
@@ -26,9 +26,9 @@ class ITLAgent:
 
         # Initialize component modules
         self.vision = VisionModule(cfg)
-        self.lang = LanguageModule(cfg)
+        self.lang = LanguageModule()
         self.symbolic = SymbolicReasonerModule()
-        self.practical = PracticalReasonerModule()
+        self.planner = ActionPlannerModule()
         self.lt_mem = LongTermMemoryModule(cfg)
 
         # Provide access to methods in comp_actions
@@ -56,23 +56,20 @@ class ITLAgent:
         # May consider fulfilling this later...)
         self.confused_no_more = set()
 
-        # Snapshot of KB, to be taken at the beginning of every training episode,
-        # with which scalar implicatures will be computed. Won't be necessary
-        # if we were to use more structured discourse representation...
+        # Snapshot of KB, to be taken at the beginning of every training episode
         self.kb_snap = copy.deepcopy(self.lt_mem.kb)
 
-        # (Temporary) Episodic memory; may be bumped up into proper long-term memory
-        # component if KB maintenance with episodic memory works well
-        self.episodic_memory = []
+        self.observation_mode = False
+        self.observation_record = None
 
-    def loop(self, v_usr_in=None, l_usr_in=None, pointing=None, new_scene=True):
+    def loop(self, v_usr_in=None, l_usr_in=None, pointing=None, new_vis=True):
         """
         Single agent activity loop, called with inputs of visual scene, natural
         language utterances from user and affiliated gestures (demonstrative
-        references by pointing in our case). new_scene flag indicates whether
+        references by pointing in our case). new_vis flag indicates whether
         the visual scene input is new.
         """
-        self._vis_inp(usr_in=v_usr_in, new_scene=new_scene)
+        self._vis_inp(usr_in=v_usr_in, new_vis=new_vis)
         self._lang_inp(usr_in=l_usr_in, pointing=pointing)
         self._update_belief(pointing=pointing)
         act_out = self._act()
@@ -106,8 +103,6 @@ class ITLAgent:
                 "lexicon": vars(self.lt_mem.lexicon)
             }
         }
-        if "fs_model" in self.cfg.vision.model:
-            ckpt["vision"]["fs_model_path"] = self.cfg.vision.model.fs_model
 
         torch.save(ckpt, ckpt_path)
         logger.info(f"Saved current agent model at {ckpt_path}")
@@ -139,27 +134,11 @@ class ITLAgent:
                         setattr(component, component_prop, prop_data)
                 else:
                     module = getattr(self, module_name)
-                    prev_component_data = getattr(module, module_component)
                     setattr(module, module_component, component_data)
-                
-                # Handling vision.fs_model_path data
-                if module_name == "vision":
-                    if module_component == "fs_model_path":
-                        if (prev_component_data is not None and
-                            prev_component_data != component_data):
-                            logger.warn(
-                                "Path to few-shot components in vision module is already provided "
-                                "in config and is inconsistent with the pointer saved in the agent "
-                                f"model specified (config: {prev_component_data} vs. agent_model: "
-                                f"{component_data}). Agent vision module might exhibit unexpected "
-                                "behaviors."
-                            )
-                        
-                        self.vision.load_weights()
 
-    def _vis_inp(self, usr_in, new_scene):
+    def _vis_inp(self, usr_in, new_vis):
         """ Handle provided visual input """
-        self.vision.new_input_provided = new_scene
+        self.vision.new_input_provided = new_vis
         if self.vision.new_input_provided:
             self.vision.previous_input = self.vision.latest_input
             self.vision.latest_input = usr_in
@@ -179,41 +158,8 @@ class ITLAgent:
         else:
             self.lang.new_input_provided = True
 
-            # Patchwork handling of connectives, acknowledgements, interjections, etc.
-            # that don't really need principled treatment and can be shaved off without
-            # consequences. Treat these properly later if they ever become important...
-            usr_in_new = []
-            for utt_string, dem_ref in zip(usr_in, pointing):
-                # 'Sanitization' process
-                if utt_string.startswith("But ") or utt_string.startswith("And "):
-                    pf_len = 4
-                    utt_string = utt_string[pf_len:].capitalize()
-                    dem_ref_items = list(dem_ref.items())
-                    for k, v in dem_ref_items: del dem_ref[k]
-                    for k, v in dem_ref_items:
-                        dem_ref[(k[0]-pf_len, k[1]-pf_len)] = v
-                if utt_string.startswith("It's true "):
-                    pf_len = 10
-                    utt_string = utt_string[pf_len:].capitalize()
-                    dem_ref_items = list(dem_ref.items())
-                    for k, v in dem_ref_items: del dem_ref[k]
-                    for k, v in dem_ref_items:
-                        dem_ref[(k[0]-pf_len, k[1]-pf_len)] = v
-                if utt_string.endswith(", too."):
-                    sf_len = 5
-                    utt_string = utt_string[:-sf_len-1] + "."
-
-                # Add final processed utterance string
-                usr_in_new.append(utt_string)
-            usr_in = usr_in_new
-
-            parsed_input = None
-            try:
-                parsed_input = self.lang.semantic.nl_parse(usr_in)
-            except IndexError as e:
-                logger.info(str(e))
-            else:
-                self.lang.latest_input = parsed_input
+            parsed_input = self.lang.semantic.nl_parse(usr_in, pointing)
+            self.lang.latest_input = parsed_input
 
     def _update_belief(self, pointing):
         """ Form beliefs based on visual and/or language input """
@@ -239,16 +185,6 @@ class ITLAgent:
 
         # Some cleaning steps needed whenever visual context changes
         if self.vision.new_input_provided:
-            # # Prior to resetting visual context, store current one into the episodic
-            # # memory (visual perceptions & user language inputs), in the form of
-            # # LP^MLN program fragments
-            # if (self.vision.scene is not None and
-            #     len(self.vision.scene) > 1 and
-            #     self.symbolic.concl_vis_lang is not None):
-
-            #     pr_prog, _, dl_prog = self.symbolic.concl_vis_lang[1]
-            #     self.episodic_memory.append((pr_prog, dl_prog))
-            
             # Refresh dialogue manager & symbolic reasoning module states
             self.lang.dialogue.refresh()
             self.symbolic.refresh()
@@ -272,7 +208,7 @@ class ITLAgent:
             ##                  Processing perceived inputs                  ##
             ###################################################################
 
-            if self.vision.new_input_provided:
+            if self.vision.new_input_provided and not self.observation_mode:
                 # Ground raw visual perception with scene graph generation module
                 self.vision.predict(
                     self.vision.latest_input, self.lt_mem.exemplars,
@@ -283,7 +219,7 @@ class ITLAgent:
                 # Inform the language module of the new visual context
                 self.lang.situate(self.vision.scene)
 
-            elif xb_updated:
+            elif xb_updated and not self.observation_mode:
                 # Concept exemplar base updated, need reclassification while keeping
                 # the discovered objects and embeddings intact
                 self.vision.predict(
@@ -298,11 +234,11 @@ class ITLAgent:
                 self.lang.understand(self.lang.latest_input, pointing=pointing)
 
             ents_updated = False
-            if self.vision.scene is not None:
+            if self.vision.scene is not None and not self.observation_mode:
                 # If a new entity is registered as a result of understanding the latest
                 # input, re-run vision module to update with new predictions for it
                 new_ents = set(self.lang.dialogue.referents["env"]) - set(self.vision.scene)
-                new_ents.remove("_self")
+                new_ents.remove("_self"); new_ents.remove("_user")
                 if len(new_ents) > 0:
                     masks = {
                         ent: self.lang.dialogue.referents["env"][ent]["mask"]
@@ -320,7 +256,8 @@ class ITLAgent:
             ##       Sensemaking via synthesis of perception+knowledge       ##
             ###################################################################
 
-            if self.vision.new_input_provided or ents_updated or xb_updated or kb_updated:
+            if (self.vision.new_input_provided or ents_updated or xb_updated or kb_updated
+                and not self.observation_mode):
                 # Sensemaking from vision input only
                 exported_kb = self.lt_mem.kb.export_reasoning_program()
                 visual_evidence = self.lt_mem.kb.visual_evidence_from_scene(self.vision.scene)
@@ -333,106 +270,148 @@ class ITLAgent:
                     self.lang.dialogue, self.lt_mem.lexicon
                 )
 
-                # if self.vision.scene is not None:
-                #     # Sensemaking from vision & language input
-                #     self.symbolic.sensemake_vis_lang(self.lang.dialogue)
-                #     self.lang.dialogue.sensemaking_vl_snaps[ti_last] = \
-                #         self.symbolic.concl_vis_lang
-
-            ###################################################################
-            ##           Identify & exploit learning opportunities           ##
-            ###################################################################
-
-            # Disable learning when agent is in test mode
-            if self.cfg.agent.test_mode: break
-
-            # Resetting flags
-            xb_updated = False
-            kb_updated = False
-
-            # Generic statements to be added to KB
-            generics = []
-
-            # Info needed (along with generics) for computing scalar implicatures
-            pair_rules = defaultdict(list)
-
-            # Collect previous factual statements and questions made during this dialogue
-            prev_statements = []; prev_Qs = []
-            for ti, (spk, turn_clauses) in enumerate(prev_translated):
-                for ci, ((rule, ques), raw) in enumerate(turn_clauses):
-                    # Factual statement
-                    if rule is not None and len(rule[0])==1 and rule[1] is None:
-                        prev_statements.append(((ti, ci), (spk, rule)))
-
-                    # Question
-                    if ques is not None:
-                        # Here, `rule` represents presuppositions included in `ques`
-                        prev_Qs.append(((ti, ci), (spk, ques, rule, raw)))
-
             # Translate dialogue record into processable format based on the result
             # of symbolic.resolve_symbol_semantics
             translated = self.symbolic.translate_dialogue_content(self.lang.dialogue)
 
-            # Process translated dialogue record to do the following:
-            #   - Identify recognition mismatch btw. user provided vs. agent
-            #   - Identify visual concept confusion
-            #   - Identify new generic rules to be integrated into KB
-            for ti, (speaker, turn_clauses) in enumerate(translated):
-                if speaker != "U": continue
+            # Check here whether a user demonstration is pending and agent should
+            # switch to 'observation mode', where agent hands over the control to
+            # user and begins to record subsequent events. Postpone any type of
+            # learning until the observation mode is switched off.
 
-                for ci, ((rule, _), raw) in enumerate(turn_clauses):
-                    if rule is None: continue
+            # First recognize any future indicative 'demonstrate how' by user
+            demonstrated_event = None
+            speaker, turn_clauses = translated[-1]; ti = len(translated)-1
+            for ci, ((_, _, _, cons), _, mood) in enumerate(turn_clauses):
+                demo_lit = [lit for lit in cons if lit.name=="sp_demonstrate"]
 
-                    # Disregard clause if it is not domain-describing or is in irrealis mood
-                    clause_info = self.lang.dialogue.clause_info[f"t{ti}c{ci}"]
-                    if not clause_info["domain_describing"]:
-                        continue
-                    if clause_info["irrealis"]:
-                        continue
+                if len(demo_lit) == 0: break
 
-                    # Identify learning opportunities; i.e., any deviations from the agent's
-                    # estimated states of affairs, generic rules delivered via NL generic
-                    # statements, or acknowledgements (positive or lack of negative)
-                    self.comp_actions.identify_mismatch(rule)
-                    self.comp_actions.identify_confusion(
-                        rule, prev_statements, novel_concepts
+                (demo_evt, _), (demonstrator, _), (demo_target, _) = demo_lit[0].args
+                clause_info = self.lang.dialogue.clause_info[demo_evt]
+
+                if not (clause_info["mood"] == "." and clause_info["tense"] == "future"):
+                    break
+                if not (demonstrator == "_user" and speaker == "U"): break
+
+                how_lit = [
+                    lit for lit in cons
+                    if lit.name=="sp_manner" and lit.args[0][0]==demo_target
+                ]
+                if len(how_lit) > 0:
+                    demonstrated_event = how_lit[0].args[1][0]
+                    break
+
+            if demonstrated_event is not None:
+                # Demonstration notice recognized, record corresponding event pointer
+                # and switch to observation mode
+                demonstrated_event = re.findall(r"t(\d+)c(\d+)", demonstrated_event)[0]
+                demo_ti = int(demonstrated_event[0])
+                demo_ci = int(demonstrated_event[1])
+                self.observation_mode = True
+                self.observation_record = (
+                    (demo_ti, demo_ci), [(self.vision.latest_input, None, None)]
+                )
+                break           # Break here without proceeding
+
+            if self.observation_mode:
+                ###################################################################
+                ##           Record ongoing task demonstration by user           ##
+                ###################################################################
+                self.observation_record[1].append(
+                    (
+                        self.vision.latest_input,
+                        self.symbolic.translate_dialogue_content(self.lang.dialogue)[-1][1],
+                        self.lang.dialogue.referents["env"]
                     )
-                    self.comp_actions.identify_acknowledgement(
-                        rule, prev_statements, prev_context
+                )
+                break
+
+            else:
+                ###################################################################
+                ##           Identify & exploit learning opportunities           ##
+                ###################################################################
+
+                # Disable learning when agent is in test mode
+                if self.cfg.agent.test_mode: break
+
+                # Resetting flags
+                xb_updated = False
+                kb_updated = False
+
+                # Generic statements to be added to KB
+                generics = []
+
+                # Collect previous factual statements and questions made during this
+                # dialogue
+                prev_statements = []; prev_Qs = []
+                for ti, (speaker, turn_clauses) in enumerate(prev_translated):
+                    for ci, ((rule, ques), raw) in enumerate(turn_clauses):
+                        # Factual statement
+                        if rule is not None and len(rule[0])==1 and rule[1] is None:
+                            prev_statements.append(((ti, ci), (speaker, rule)))
+
+                        # Question
+                        if ques is not None:
+                            # Here, `rule` represents presuppositions included in `ques`
+                            prev_Qs.append(((ti, ci), (speaker, ques, rule, raw)))
+
+                # Process translated dialogue record to do the following:
+                #   - Identify recognition mismatch btw. user provided vs. agent
+                #   - Identify visual concept confusion
+                #   - Identify new generic rules to be integrated into KB
+                for ti, (speaker, turn_clauses) in enumerate(translated):
+                    if speaker != "U": continue
+
+                    for ci, ((gq, bvars, ante, cons), raw, mood) in enumerate(turn_clauses):
+                        # Skip any non-indicative statements (or presuppositions)
+                        if mood != ".": continue
+
+                        # Disregard clause if it does not discuss the task domain
+                        clause_info = self.lang.dialogue.clause_info[f"t{ti}c{ci}"]
+                        if not clause_info.get("domain_describing"):
+                            continue
+
+                        # Identify learning opportunities; i.e., any deviations from the
+                        # agent's estimated states of affairs, generic rules delivered
+                        # via NL generic statements, or acknowledgements (positive or lack
+                        # of negative)
+                        self.comp_actions.identify_mismatch(rule)
+                        self.comp_actions.identify_confusion(
+                            rule, prev_statements, novel_concepts
+                        )
+                        self.comp_actions.identify_acknowledgement(
+                            rule, prev_statements, prev_context
+                        )
+                        self.comp_actions.identify_generics(
+                            rule, raw, prev_Qs, generics
+                        )
+
+                # By default, treat lack of any negative acknowledgements to an agent's statement
+                # as positive acknowledgement
+                prev_or_curr = "prev" if self.vision.new_input_provided else "curr"
+                for (ti, ci), (speaker, (statement, _)) in prev_statements:
+                    if speaker != "A": continue         # Not interested
+
+                    stm_ind = (prev_or_curr, ti, ci)
+                    if stm_ind not in self.lang.dialogue.acknowledged_stms:
+                        acknowledgement_data = (statement, True, prev_context)
+                        self.lang.dialogue.acknowledged_stms[stm_ind] = acknowledgement_data
+
+                # Update knowledge base with obtained generic statements
+                for rule, w_pr, knowledge_source, knowledge_type in generics:
+                    kb_updated |= self.lt_mem.kb.add(
+                        rule, w_pr, knowledge_source, knowledge_type
                     )
-                    self.comp_actions.identify_generics(
-                        rule, raw, prev_Qs, generics, pair_rules
-                    )
 
-            # By default, treat lack of any negative acknowledgements to an agent's statement
-            # as positive acknowledgement
-            prev_or_curr = "prev" if self.vision.new_input_provided else "curr"
-            for (ti, ci), (speaker, (statement, _)) in prev_statements:
-                if speaker != "A": continue         # Not interested
-
-                stm_ind = (prev_or_curr, ti, ci)
-                if stm_ind not in self.lang.dialogue.acknowledged_stms:
-                    acknowledgement_data = (statement, True, prev_context)
-                    self.lang.dialogue.acknowledged_stms[stm_ind] = acknowledgement_data
-
-            # Update knowledge base with obtained generic statements
-            for rule, w_pr, knowledge_source, knowledge_type in generics:
-                kb_updated |= self.lt_mem.kb.add(
-                    rule, w_pr, knowledge_source, knowledge_type
+                # Handle neologisms
+                xb_updated |= self.comp_actions.handle_neologism(
+                    novel_concepts, self.lang.dialogue
                 )
 
-            # Compute scalar implicature if required by agent's strategy
-            if self.strat_generic == "semNegScal":
-                self.comp_actions.add_scalar_implicature(pair_rules)
-
-            # Handle neologisms
-            xb_updated |= self.comp_actions.handle_neologism(
-                novel_concepts, self.lang.dialogue
-            )
-
-            # Terminate the loop when 'equilibrium' is reached
-            if not (xb_updated or kb_updated):
-                break
+                # Terminate the loop when 'equilibrium' is reached
+                if not (xb_updated or kb_updated):
+                    break
 
     def _act(self):
         """
@@ -445,80 +424,90 @@ class ITLAgent:
         # Currently, the maintenance goals are not to leave:
         #   - any unaddressed neologism which is unresolvable
         #   - any unaddressed recognition inconsistency btw. agent and user
-        #   - any unanswered question that is answerable
+        #   - any unanswered question that is unaddressed
         #
         # Ideally, this is to be accomplished declaratively by properly setting up formal
         # maintenance goals and then performing automated planning or something to come
         # up with right sequence of actions to be added to agenda. However, the ad-hoc
-        # code below (+ plan library in practical_reasoning/plans/library.py) will do
+        # code below (+ plan library in action_planner/plans/library.py) will do
         # for our purpose right now; we will see later if we'll ever need to generalize
         # and implement the said procedure.)
 
-        # This ordering ensures any knowledge updates (that doesn't require interaction)
-        # happen first, addressing & answering questions happen next, finally asking
-        # any questions afterwards
-        for m in self.symbolic.mismatches:
-            self.practical.agenda.append(("address_mismatch", m))
-        for a in self.lang.dialogue.acknowledged_stms.items():
-            self.practical.agenda.append(("address_acknowledgement", a))
-        for ti, ci in self.lang.dialogue.unanswered_Qs:
-            self.practical.agenda.append(("address_unanswered_Q", (ti, ci)))
-        for n in self.lang.unresolved_neologisms:
-            self.practical.agenda.append(("address_neologism", n))
-        for c in self.vision.confusions:
-            self.practical.agenda.append(("address_confusion", c))
+        if self.observation_mode:
+            # Agent currently in observation mode; just signal that agent is properly
+            # recording user demonstration
+            return_val = [("generate", ("# Observing", {}))]
 
-        return_val = []
+        else:
+            # Agent is in full control, identify and resolve any pending agenda items
 
-        num_resolved_items = 0; unresolved_items = []
-        while True:
-            # Loop through agenda stack items from the top; new agenda items may
-            # be pushed to the top by certain plans
-            while len(self.practical.agenda) > 0:
-                # Pop the top agenda item from the stack
-                todo_state, todo_args = self.practical.agenda.pop(0)
+            # This ordering ensures any knowledge updates (that doesn't require interaction)
+            # happen first, addressing & answering questions happen next, finally asking
+            # any questions afterwards
+            for m in self.symbolic.mismatches:
+                self.planner.agenda.append(("address_mismatch", m))
+            for a in self.lang.dialogue.acknowledged_stms.items():
+                self.planner.agenda.append(("address_acknowledgement", a))
+            for ti, ci in self.lang.dialogue.unanswered_Qs:
+                self.planner.agenda.append(("address_unanswered_Q", (ti, ci)))
+            for ti, ci in self.lang.dialogue.unexecuted_commands:
+                self.planner.agenda.append(("address_unexecuted_commands", (ti, ci)))
+            for n in self.lang.unresolved_neologisms:
+                self.planner.agenda.append(("address_neologism", n))
+            for c in self.vision.confusions:
+                self.planner.agenda.append(("address_confusion", c))
 
-                # Check if this item can be resolved at this stage and if so, obtain
-                # appropriate plan (sequence of actions) for resolving the item
-                plan = self.practical.obtain_plan(todo_state)
+            return_val = []
 
-                if plan is not None:
-                    # Perform plan actions
-                    for action in plan:
-                        act_method = action["action_method"].extract(self)
-                        act_args = action["action_args_getter"](todo_args)
-                        if type(act_args) == tuple:
-                            act_args = tuple(arg.extract(self) for arg in act_args)
+            num_resolved_items = 0; unresolved_items = []
+            while True:
+                # Loop through agenda stack items from the top; new agenda items may
+                # be pushed to the top by certain plans
+                while len(self.planner.agenda) > 0:
+                    # Pop the top agenda item from the stack
+                    todo_state, todo_args = self.planner.agenda.pop(0)
+
+                    # Check if this item can be resolved at this stage and if so, obtain
+                    # appropriate plan (sequence of actions) for resolving the item
+                    plan = self.planner.obtain_plan(todo_state)
+
+                    if plan is not None:
+                        # Perform plan actions
+                        for action in plan:
+                            act_method = action["action_method"].extract(self)
+                            act_args = action["action_args_getter"](todo_args)
+                            if type(act_args) == tuple:
+                                act_args = tuple(arg.extract(self) for arg in act_args)
+                            else:
+                                act_args = (act_args.extract(self),)
+
+                            act_out = act_method(*act_args)
+                            if act_out is not None:
+                                return_val += act_out
+
+                                # Note) We don't need to consider any sort of plan failures
+                                # right now, but when that happens (should be identifiable
+                                # from act_out value), in principle, will need to break
+                                # from plan execution and add to unresolved item list
+                                if False:       # Plan failure check not implemented
+                                    unresolved_items.append((todo_state, todo_args))
+                                    break
                         else:
-                            act_args = (act_args.extract(self),)
-
-                        act_out = act_method(*act_args)
-                        if act_out is not None:
-                            return_val += act_out
-
-                            # Note) We don't need to consider any sort of plan failures
-                            # right now, but when that happens (should be identifiable
-                            # from act_out value), in principle, will need to break
-                            # from plan execution and add to unresolved item list
-                            if False:       # Plan failure check not implemented
-                                unresolved_items.append((todo_state, todo_args))
-                                break
+                            num_resolved_items += 1
                     else:
-                        num_resolved_items += 1
-                else:
-                    # Plan not found, agenda item unresolved
-                    unresolved_items.append((todo_state, todo_args))
+                        # Plan not found, agenda item unresolved
+                        unresolved_items.append((todo_state, todo_args))
 
-            # Any unresolved items back to agenda stack
-            self.practical.agenda = unresolved_items
+                # Any unresolved items back to agenda stack
+                self.planner.agenda = unresolved_items
 
-            if num_resolved_items == 0 or len(self.practical.agenda) == 0:
-                # No resolvable agenda item any more, or stack clear
-                if len(return_val) == 0 and self.lang.new_input_provided:
-                    # Nothing to utter, acknowledge any user input
-                    self.practical.agenda.append(("acknowledge", None))
-                else:
-                    # Break loop with return vals
-                    break
+                if num_resolved_items == 0 or len(self.planner.agenda) == 0:
+                    # No resolvable agenda item any more, or stack clear
+                    if len(return_val) == 0 and self.lang.new_input_provided:
+                        # Nothing to utter, acknowledge any user input
+                        self.planner.agenda.append(("acknowledge", None))
+                    else:
+                        # Break loop with return vals
+                        break
 
         return return_val

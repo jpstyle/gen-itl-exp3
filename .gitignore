@@ -1,7 +1,5 @@
 ## Root
 /outputs
-/datasets/*
-!/datasets/vg_image_data.json
 /assets/*
 !/assets/domain_knowledge/
 xsession.log
@@ -19,6 +17,7 @@ __pycache__/
 /unity/[Ll]ogs/
 /unity/[Mm]emoryCaptures/
 /unity/[Uu]serSettings/
+/unity/mono_crash*
 
 # Some assets may be unnecessary for commits or sensitive (license issue, etc.)
 # /unity/[Aa]ssets/[Mm]odels/

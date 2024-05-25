@@ -4,10 +4,6 @@ using Unity.MLAgents.SideChannels;
 
 public class StudentAgent : DialogueAgent
 {
-    // For visualizing handheld objects
-    public Transform leftHand;
-    public Transform rightHand;
-
     protected override void Awake()
     {
         // Register Python-Agent string communication side channel

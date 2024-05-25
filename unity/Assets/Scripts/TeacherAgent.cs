@@ -1,10 +1,13 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using Unity.MLAgents;
 using Unity.MLAgents.Actuators;
 using Unity.MLAgents.SideChannels;
+using UnityEngine.Assertions;
+using UnityEngine.Perception.GroundTruth.LabelManagement;
 using Random = UnityEngine.Random;
 
 public class TeacherAgent : DialogueAgent
@@ -38,8 +41,8 @@ public class TeacherAgent : DialogueAgent
     // Store workplace partition info for initializing part poses
     private readonly List<Vector3> _partPartitionPositions = new()
     {
-        new Vector3(-0.24f, 0.76f, 0.24f),
-        new Vector3(0.24f, 0.76f, 0.24f),
+        new Vector3(-0.36f, 0.76f, 0.24f),
+        new Vector3(0.36f, 0.76f, 0.24f),
         new Vector3(-0.48f, 0.76f, 0.48f),
         new Vector3(-0.24f, 0.76f, 0.48f),
         new Vector3(0f, 0.76f, 0.48f),
@@ -52,7 +55,7 @@ public class TeacherAgent : DialogueAgent
     };
     // Store workplace partition info for main work area
     private readonly Vector3 _mainPartitionPosition = new(0f, 0.76f, 0.24f);
-    
+
     protected override void Awake()
     {
         // Register Python-Agent string communication side channel
@@ -199,12 +202,14 @@ public class TeacherAgent : DialogueAgent
         InstantiateWheels(
             targetTypes
                 .Where(x => x.Key.Item1 == "wheel")
+                .OrderBy(x => x.Key.Item2)
                 .Select(x => x.Value).ToList(),
             partitions[5],
             "t"
         );
         InstantiateBolts(targetTypes
                 .Where(x => x.Key.Item1 == "bolt")
+                .OrderBy(x => x.Key.Item2)
                 .Select(x => x.Value).ToList(),
             partitions[6],
             "t"
@@ -289,9 +294,73 @@ public class TeacherAgent : DialogueAgent
     {
         if (actionBuffers.DiscreteActions[0] == 1)
         {
-            // 'Utter' action
-            StartCoroutine(Utter());
+            if (actionBuffers.DiscreteActions[1] == 0)
+                // Just 'Utter' action only
+                StartCoroutine(Utter());
+            else
+                // Both 'Utter' action and some physical action queued; utter first
+                // then act (in order to send any mask annotations based on 'before'
+                // state)
+                StartCoroutine(UtterThenAct(actionBuffers.DiscreteActions[1]));
         }
+        else
+        {
+            // No 'Utter' action needed, just Act
+            if (actionBuffers.DiscreteActions[1] != 0)
+                StartCoroutine(Act(actionBuffers.DiscreteActions[1]));
+        }
+    }
+
+    // ReSharper disable Unity.PerformanceAnalysis
+    private IEnumerator Act(int actionType)
+    {
+        // Coroutine that executes specified physical action
+        switch (actionType)
+        {
+            case 1:
+            case 2:
+                // PickUpLeft/Right action, parameter: (target object)
+                var targetName = actionParameterBuffer.Dequeue();
+                var targetEnt = EnvEntity.FindByObjectPath($"/{targetName}");
+                var withLeft = actionType % 2 == 1;
+                PickUp(targetEnt.gameObject, withLeft);
+                break;
+            case 3:
+            case 4:
+                // DropLeft/Right action, parameter: ()
+                var fromLeft = actionType % 2 == 1;
+                Drop(fromLeft);
+                break;
+            case 5:
+            case 6:
+                // AssembleRtoL/LtoR action, parameter: {contact point L, contact point R,
+                // resultant subassembly string name)
+                var leftPoint = actionParameterBuffer.Dequeue();
+                var rightPoint = actionParameterBuffer.Dequeue();
+                var productName = actionParameterBuffer.Dequeue();
+                var rightToLeft = actionType % 2 == 1;
+                Assemble(leftPoint, rightPoint, productName, rightToLeft);
+                break;
+            case 7:
+                // InspectLeft action, parameter: ()
+                break;
+            case 8:
+                // InspectRight action, parameter: ()
+                break;
+        }
+
+        // All parameters consumed and none left in buffer
+        Assert.IsTrue(actionParameterBuffer.Count == 0);
+        yield break;
+    }
+
+    private IEnumerator UtterThenAct(int actionType)
+    {
+        // Coroutine that first invokes Utter(), waits until it finishes, and then
+        // execute specified physical action
+        // ReSharper disable once Unity.PerformanceCriticalCodeInvocation
+        yield return StartCoroutine(Utter());
+        yield return StartCoroutine(Act(actionType));
     }
 
     public override void Heuristic(in ActionBuffers actionBuffers)
@@ -327,194 +396,379 @@ public class TeacherAgent : DialogueAgent
         };
     }
 
-    // Helper methods for initializing sampled parts on sampled locations
+    private void PickUp(GameObject targetObj, bool withLeft)
+    {
+        // Pick up a target object on the tabletop with the specified hand
+        var activeHand = withLeft ? leftHand : rightHand;
+
+        // Move target object to hand position, reassign hand as the parent,
+        // disable physics interaction
+        targetObj.transform.parent = activeHand.transform;
+        targetObj.transform.localPosition = Vector3.zero;
+        var objRigidbody = targetObj.GetComponent<Rigidbody>();
+        objRigidbody.isKinematic = true;
+        objRigidbody.detectCollisions = false;
+    }
+
+    private void Drop(bool fromLeft)
+    {
+        // Drop an object currently held in the specified hand onto the tabletop
+        var activeHand = fromLeft ? leftHand : rightHand;
+
+        // Get handle of object (implicit assumption; max one item can be held per
+        // manipulator)
+        GameObject heldObj = null;
+        foreach (Transform tr in activeHand.transform)
+        {
+            heldObj = tr.gameObject;
+            break;
+        }
+        Assert.IsNotNull(heldObj);
+
+        // Move target object above (y) some random x/z-position within the main
+        // work area partition, 'release' by nullifying the hand's child status,
+        float xPos, zPos;
+        if (heldObj.name == "truck")
+        {
+            // Assuming the tabletop is pretty much clear now...
+            xPos = 0f;
+            zPos = _mainPartitionPosition.z + 0.12f;
+        }
+        else
+        {
+            xPos = _mainPartitionPosition.x + Random.Range(-0.21f, 0.21f);
+            zPos = _mainPartitionPosition.z + Random.Range(-0.04f, 0.12f);
+        }
+        activeHand.localEulerAngles = Vector3.zero;
+        var volume = GetBoundingVolume(heldObj);
+        activeHand.localEulerAngles = fromLeft ? leftOriginalEuler : rightOriginalEuler;
+        var yPos = _mainPartitionPosition.y + volume.extents.y + 0.06f;
+        heldObj.transform.parent = null;
+        heldObj.transform.position = new Vector3(xPos, yPos, zPos);
+
+        // Re-enable physics & fast-forward physics simulation until the object rests
+        // on the desktop
+        var objRigidbody = heldObj.GetComponent<Rigidbody>();
+        objRigidbody.isKinematic = false;
+        objRigidbody.detectCollisions = true;
+        Physics.simulationMode = SimulationMode.Script;
+        for (var i=0; i<2000; i++)
+        {
+            Physics.Simulate(Time.fixedDeltaTime);
+        }
+        Physics.simulationMode = SimulationMode.FixedUpdate;
+    }
+
+    private void Assemble(
+        string leftPoint, string rightPoint, string productName, bool rightToLeft
+    )
+    {
+        // Assemble two subassemblies held in each hand as guided by the specified
+        // target contact points, left-to-right or right-to-left
+        var leftTargetParsed = leftPoint.Split("/");
+        var rightTargetParsed = rightPoint.Split("/");
+
+        // Source & target hands and points appropriately determined by `rightToLeft` parameter
+        Transform srcHand, tgtHand;
+        string srcAtomicPart, tgtAtomicPart, srcPointName, tgtPointName;
+        if (rightToLeft)
+        {
+            srcHand = rightHand; tgtHand = leftHand;
+            srcAtomicPart = rightTargetParsed[0];
+            tgtAtomicPart = leftTargetParsed[0];
+            srcPointName = $"cp_{rightTargetParsed[1]}";
+            tgtPointName = $"cp_{leftTargetParsed[1]}";
+        }
+        else
+        {
+            srcHand = leftHand; tgtHand = rightHand;
+            srcAtomicPart = leftTargetParsed[0];
+            tgtAtomicPart = rightTargetParsed[0];
+            srcPointName = $"cp_{leftTargetParsed[1]}";
+            tgtPointName = $"cp_{rightTargetParsed[1]}";
+        }
+
+        Transform srcPoint = null; Transform tgtPoint = null;
+        foreach (var candidateEnt in srcHand.GetComponentsInChildren<EnvEntity>())
+        {
+            if (candidateEnt.gameObject.name != srcAtomicPart) continue;
+            foreach (Transform candidatePt in candidateEnt.gameObject.transform)
+            {
+                if (candidatePt.gameObject.name != srcPointName) continue;
+                srcPoint = candidatePt;
+                break;
+            }
+            if (srcPoint is not null) break;
+        }
+        foreach (var candidateEnt in tgtHand.GetComponentsInChildren<EnvEntity>())
+        {
+            if (candidateEnt.gameObject.name != tgtAtomicPart) continue;
+            foreach (Transform candidatePt in candidateEnt.gameObject.transform)
+            {
+                if (candidatePt.gameObject.name != tgtPointName) continue;
+                tgtPoint = candidatePt;
+                break;
+            }
+            if (tgtPoint is not null) break;
+        }
+        Assert.IsNotNull(srcPoint); Assert.IsNotNull(tgtPoint);
+
+        // Get relative pose (position & rotation) from source to target points, then
+        // move source hand to target pose (rotation first, translation next)
+        var relativeRotation = tgtPoint.rotation * Quaternion.Inverse(srcPoint.rotation);
+        srcHand.rotation = relativeRotation * srcHand.rotation;
+        var relativePosition = tgtPoint.position - srcPoint.position;
+        srcHand.position += relativePosition;
+
+        // Handles to subassembly objects held in source & target hands
+        GameObject srcHeld = null; GameObject tgtHeld = null;
+        foreach (Transform tr in srcHand.transform)
+        {
+            srcHeld = tr.gameObject;
+            break;
+        }
+        foreach (Transform tr in tgtHand.transform)
+        {
+            tgtHeld = tr.gameObject;
+            break;
+        }
+        Assert.IsNotNull(srcHeld); Assert.IsNotNull(tgtHeld);
+
+        // Obtain pre-assembly bounding volume for later repositioning of children parts
+        tgtHand.localEulerAngles = Vector3.zero;
+        var beforeVolume = GetBoundingVolume(tgtHeld);
+        tgtHand.localEulerAngles = rightToLeft ? leftOriginalEuler : rightOriginalEuler;
+
+        // Merge the two subassemblies, 'releasing' from source hand by reassigning
+        // parent transforms of parts in the source subassembly
+        var childrenParts = new List<Transform>();
+        foreach (Transform tr in srcHeld.transform) childrenParts.Add(tr);
+        foreach (var tr in childrenParts) tr.parent = tgtHeld.transform;
+
+        // Obtain post-assembly bounding volume for later repositioning of children parts
+        tgtHand.localEulerAngles = Vector3.zero;
+        var afterVolume = GetBoundingVolume(tgtHeld);
+        tgtHand.localEulerAngles = rightToLeft ? leftOriginalEuler : rightOriginalEuler;
+
+        // Finish merging by destroying source subassembly and renaming target subassembly
+        // with the provided string name
+        srcHeld.GetComponent<EnvEntity>().enabled = false;
+        Destroy(srcHeld);
+        tgtHeld.name = productName;
+
+        // Repositioning children prefabs in merged subassembly so the center of the
+        // bounding volume becomes origin of the local space
+        foreach (Transform child in tgtHeld.transform)
+            child.position += beforeVolume.center - afterVolume.center;
+
+        // Move back the source hand to the original pose
+        srcHand.localPosition = rightToLeft ? rightOriginalPosition : leftOriginalPosition;
+        srcHand.localEulerAngles = rightToLeft ? rightOriginalEuler : leftOriginalEuler;
+    }
+
+    private static Bounds GetBoundingVolume(GameObject subassembly)
+    {
+        // Obtain encasing bounding volume of a subassembly GameObject (in world coordinates)
+        // Obtain bounding volume that encases all descendant meshes
+        var minCoords = Vector3.positiveInfinity;
+        var maxCoords = Vector3.negativeInfinity;
+        foreach (var mesh in subassembly.GetComponentsInChildren<MeshRenderer>())
+        {
+            // Update min/max coordinates of mesh bounds to obtain encasing volume later
+            var meshBounds = mesh.bounds;
+            minCoords = Vector3.Min(minCoords, meshBounds.min);
+            maxCoords = Vector3.Max(maxCoords, meshBounds.max);
+        }
+        var boundingVolume = new Bounds((minCoords + maxCoords) / 2, maxCoords - minCoords);
+
+        return boundingVolume;
+    }
+
+    private static void InstantiateAtomicPrefab(
+        GameObject prefab, Material colorMaterial, GameObject partition,
+        string wrapperName, string instanceName,
+        Vector3 wrapperPos, Vector3 wrapperRot, Vector3 prtRot
+    )
+    {
+        // Helper methods for initializing sampled parts on sampled locations
+
+        // Create an empty wrapper GameObject representing 'singleton subassembly'
+        var wrapper = new GameObject(wrapperName, typeof(Labeling))
+        {
+            transform =
+            {
+                position = partition.transform.position,
+                parent = partition.transform
+            }
+        };
+        var wrapperLabeling = wrapper.GetComponent<Labeling>();
+        wrapperLabeling.labels.Add("subassembly");
+
+        // Instantiate provided cabin type with generalized name
+        var prefabInstance = Instantiate(prefab, wrapper.transform);
+        prefabInstance.name = instanceName;
+
+        // Apply color to colorable meshes 
+        foreach (var mesh in prefabInstance.GetComponentsInChildren<MeshRenderer>())
+        {
+            if (colorMaterial is null) continue;
+            if (mesh.material.name.StartsWith("Default"))
+                mesh.material = colorMaterial;
+        }
+
+        // Make sure to attach EnvEntity component after adding the atomic child
+        wrapper.AddComponent<EnvEntity>();
+
+        // Reposition
+        var boundingVolume = GetBoundingVolume(wrapper);
+        var disposition = prefabInstance.transform.position - boundingVolume.center;
+        prefabInstance.transform.position += disposition;
+
+        // Then tweak the y-position of the wrapper so that they will float slightly above
+        // the tabletop
+        wrapperPos.y += boundingVolume.extents.y + 0.015f;
+
+        // Add RigidBody component for physical interaction with environment
+        wrapper.AddComponent<Rigidbody>();
+
+        wrapper.transform.localPosition = wrapperPos;
+        wrapper.transform.eulerAngles = wrapperRot;
+        partition.transform.eulerAngles = prtRot;
+
+        // Detach the wrapper from partition parent
+        wrapper.transform.parent = null;
+        partition.transform.eulerAngles = Vector3.zero;
+    }
     private void InstantiateCabin(
         int typeIndex, GameObject partition, int colorIndex, string identifier
     )
     {
-        // Instantiate provided cabin type with generalized name
-        var cabinPrefab = cabinTypes[typeIndex];
-        var cabin = Instantiate(cabinPrefab, partition.transform);
-        cabin.name = $"{identifier}_cabin";
-
-        // Apply sampled color
-        foreach (var mesh in cabin.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default"))
-                mesh.material = colors[colorIndex];
-
-        // Add RigidBody component for physical interaction with environment
-        cabin.AddComponent<Rigidbody>();
-        
         // Define position w.r.t. partition coordinate
         var xPosition = Random.Range(-0.04f, 0.04f);
         var zPosition = Random.Range(-0.04f, 0.04f);
-        cabin.transform.localPosition = new Vector3(xPosition, 0.06f, zPosition);
+        var wrapperPos = new Vector3(xPosition, 0f, zPosition);
 
         // Apply random rotations to the parent partition object
         var rotY = Random.Range(0f, 359.9f);
-        partition.transform.eulerAngles = new Vector3(0f, rotY, 0f);
-        
-        // Detach instantiated part from parent
-        cabin.transform.parent = null;
+        var prtRot = new Vector3(0f, rotY, 0f);
+
+        InstantiateAtomicPrefab(
+            cabinTypes[typeIndex], colors[colorIndex], partition,
+            $"{identifier}_cabin_0", "cabin",
+            wrapperPos, Vector3.zero, prtRot
+        );
     }
     private void InstantiateLoad(int typeIndex, GameObject partition, string identifier)
     {
-        // Instantiate provided load type with generalized name
-        var loadPrefab = loadTypes[typeIndex];
-        var load = Instantiate(loadPrefab, partition.transform);
-        load.name = $"{identifier}_load";
-
-        // Add RigidBody component for physical interaction with environment
-        load.AddComponent<Rigidbody>();
-        
         // Define position w.r.t. partition coordinate
-        load.transform.localPosition = new Vector3(0.04f, 0.02f, 0f);
+        var wrapperPos = Vector3.zero;
 
         // Apply random rotations to the parent partition object
         var rotY = 180f * Random.Range(0, 2) + Random.Range(-10f, 10f);
-        partition.transform.eulerAngles = new Vector3(0f, rotY, 0f);
-        
-        // Detach instantiated part from parent
-        load.transform.parent = null;
+        var prtRot = new Vector3(0f, rotY, 0f);
+
+        InstantiateAtomicPrefab(
+            loadTypes[typeIndex], null, partition,
+            $"{identifier}_load_0", "load",
+            wrapperPos, Vector3.zero, prtRot
+        );
     }
     private void InstantiateChassisFB(
         List<int> typeIndices, GameObject partition, string identifier
     )
     {
-        // Instantiate provided chassis types with generalized names
-        var frontPrefab = frontChassisTypes[typeIndices[0]];
-        var backPrefab = backChassisTypes[typeIndices[1]];
-        var chassisFront = Instantiate(frontPrefab, partition.transform);
-        var chassisBack = Instantiate(backPrefab, partition.transform);
-        chassisFront.name = $"{identifier}_chassis_front";
-        chassisBack.name = $"{identifier}_chassis_back";
-
-        // Add RigidBody component for physical interaction with environment
-        chassisFront.AddComponent<Rigidbody>();
-        chassisBack.AddComponent<Rigidbody>();
-        
         // Define positions w.r.t. partition coordinate
-        chassisFront.transform.localPosition = new Vector3(0f, 0.02f, -0.05f);
-        chassisBack.transform.localPosition = new Vector3(0f, 0.02f, 0.05f);
+        var wrapperPos = new List<Vector3>
+        {
+            new (0f, 0f, -0.05f),
+            new (0f, 0f, 0.05f)
+        };
 
         // Apply random rotations to the parent partition object
         var rotY = 90f * Random.Range(0, 4) + Random.Range(-15f, 15f);
-        partition.transform.eulerAngles = new Vector3(0f, rotY, 0f);
-        
-        // Detach instantiated parts from parent
-        chassisFront.transform.parent = null;
-        chassisBack.transform.parent = null;
+        var prtRot = new Vector3(0f, rotY, 0f);
+
+        // Create empty wrapper GameObjects representing 'singleton subassembly'
+        var instantiateConfigs = new List<(GameObject, int, string, string)>
+        {
+            (frontChassisTypes[typeIndices[0]], 0, $"{identifier}_chassis_front_0", "chassis_front"),
+            (backChassisTypes[typeIndices[1]], 1, $"{identifier}_chassis_back_0", "chassis_back")
+        };
+        instantiateConfigs
+            .ForEach(config => InstantiateAtomicPrefab(
+                config.Item1, null, partition,
+                config.Item3, config.Item4,
+                wrapperPos[config.Item2], Vector3.zero, prtRot
+            ));
     }
     private void InstantiateChassisC(
         int typeIndex, GameObject partition, int centerColorIndex, string identifier
     )
     {
-        // Instantiate provided chassis type with generalized names
-        var centerPrefab = centerChassisTypes[typeIndex];
-        var chassisCenter = Instantiate(centerPrefab, partition.transform);
-        chassisCenter.name = $"{identifier}_chassis_center";
-
-        // Apply sampled color to center chassis
-        foreach (var mesh in chassisCenter.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default"))
-                mesh.material = colors[centerColorIndex];
-
-        // Add RigidBody component for physical interaction with environment
-        chassisCenter.AddComponent<Rigidbody>();
-        
         // Define position w.r.t. partition coordinate
         var xPosition = Random.Range(-0.04f, 0.04f);
         var zPosition = Random.Range(-0.04f, 0.04f);
-        chassisCenter.transform.localPosition = new Vector3(xPosition, 0.02f, zPosition);
+        var wrapperPos = new Vector3(xPosition, 0f, zPosition);
 
         // Apply random rotation to the parent partition object
         var rotY = Random.Range(-0f, 359.9f);
-        partition.transform.eulerAngles = new Vector3(0f, rotY, 0f);
+        var prtRot = new Vector3(0f, rotY, 0f);
         
-        // Detach instantiated part from parent
-        chassisCenter.transform.parent = null;
+        InstantiateAtomicPrefab(
+            centerChassisTypes[typeIndex], colors[centerColorIndex], partition,
+            $"{identifier}_chassis_center_0", "chassis_center",
+            wrapperPos, Vector3.zero, prtRot
+        );
     }
     private void InstantiateFenders(
         List<int> typeIndices, GameObject partition, List<int> colorIndices, string identifier
     )
     {
-        // Instantiate provided fender types with generalized names
-        var frontLeftPrefab = fenderFrontLeftTypes[typeIndices[0]];
-        var frontRightPrefab = fenderFrontRightTypes[typeIndices[1]];
-        var backLeftPrefab = fenderBackLeftTypes[typeIndices[2]];
-        var backRightPrefab = fenderBackRightTypes[typeIndices[3]];
-        var fenderFrontLeft = Instantiate(frontLeftPrefab, partition.transform);
-        var fenderFrontRight = Instantiate(frontRightPrefab, partition.transform);
-        var fenderBackLeft = Instantiate(backLeftPrefab, partition.transform);
-        var fenderBackRight = Instantiate(backRightPrefab, partition.transform);
-        fenderFrontLeft.name = $"{identifier}_fl_fender";
-        fenderFrontRight.name = $"{identifier}_fr_fender";
-        fenderBackLeft.name = $"{identifier}_bl_fender";
-        fenderBackRight.name = $"{identifier}_br_fender";
-
-        // Apply sampled color to each fender
-        foreach (var mesh in fenderFrontLeft.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default"))
-                mesh.material = colors[colorIndices[0]];
-        foreach (var mesh in fenderFrontRight.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default"))
-                mesh.material = colors[colorIndices[1]];
-        foreach (var mesh in fenderBackLeft.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default"))
-                mesh.material = colors[colorIndices[2]];
-        foreach (var mesh in fenderBackRight.GetComponentsInChildren<MeshRenderer>())
-            if (mesh.material.name.StartsWith("Default"))
-                mesh.material = colors[colorIndices[3]];
-
-        // Add RigidBody component for physical interaction with environment
-        fenderFrontLeft.AddComponent<Rigidbody>();
-        fenderFrontRight.AddComponent<Rigidbody>();
-        fenderBackLeft.AddComponent<Rigidbody>();
-        fenderBackRight.AddComponent<Rigidbody>();
-        
         // Define positions & rotations w.r.t. partition coordinate
-        var xRotations = new List<int>
+        var xRotations = new List<float>
         {
-            // -1 corresponds to x-rotation of -90, requiring 0.01 z-position offset
-            // 1 corresponds to x-rotation of 90, requiring -0.01 z-position offset
-            Random.Range(0, 2) * 2 - 1,
-            Random.Range(0, 2) * 2 - 1,
-            Random.Range(0, 2) * 2 - 1,
-            Random.Range(0, 2) * 2 - 1
+            // -1 corresponds to x-rotation of -90, 1 corresponds to x-rotation of 90
+            (Random.Range(0, 2) * 2 - 1) * 90f,
+            (Random.Range(0, 2) * 2 - 1) * 90f,
+            (Random.Range(0, 2) * 2 - 1) * 90f,
+            (Random.Range(0, 2) * 2 - 1) * 90f
         };
         var zPositions = new List<float> {-0.09f, -0.03f, 0.03f, 0.09f};
         var randomIndices = Enumerable.Range(0, 4).ToList();
         Shuffle(randomIndices);
-        fenderFrontLeft.transform.localPosition = new Vector3(
-            Random.Range(-0.03f, 0.03f), 0.02f,
-            zPositions[randomIndices[0]] + xRotations[0] * -0.01f
-        );
-        fenderFrontRight.transform.localPosition = new Vector3(
-            Random.Range(-0.03f, 0.03f), 0.02f,
-            zPositions[randomIndices[1]] + xRotations[1] * -0.01f
-        );
-        fenderBackLeft.transform.localPosition = new Vector3(
-            Random.Range(-0.03f, 0.03f), 0.02f,
-            zPositions[randomIndices[2]] + xRotations[2] * -0.01f
-        );
-        fenderBackRight.transform.localPosition = new Vector3(
-            Random.Range(-0.03f, 0.03f), 0.02f,
-            zPositions[randomIndices[3]] + xRotations[3] * -0.01f
-        );
-        fenderFrontLeft.transform.eulerAngles = new Vector3(xRotations[0] * 90f, 0f, 0f);
-        fenderFrontRight.transform.eulerAngles = new Vector3(xRotations[1] * 90f, 0f, 0f);
-        fenderBackLeft.transform.eulerAngles = new Vector3(xRotations[2] * 90f, 0f, 0f);
-        fenderBackRight.transform.eulerAngles = new Vector3(xRotations[3] * 90f, 0f, 0f);
+        var wrapperPos = new List<Vector3>
+        {
+            new (Random.Range(-0.03f, 0.03f), 0f, zPositions[randomIndices[0]]),
+            new (Random.Range(-0.03f, 0.03f), 0f, zPositions[randomIndices[1]]),
+            new (Random.Range(-0.03f, 0.03f), 0f, zPositions[randomIndices[2]]),
+            new (Random.Range(-0.03f, 0.03f), 0f, zPositions[randomIndices[3]])
+        };
+        var wrapperRot = new List<Vector3>
+        {
+            new (xRotations[0], 0f, 0f),
+            new (xRotations[1], 0f, 0f),
+            new (xRotations[2], 0f, 0f),
+            new (xRotations[3], 0f, 0f),
+        };
 
         // Apply random rotations to the parent partition object
         var rotY = 90f * Random.Range(0, 4) + Random.Range(-5f, 5f);
-        partition.transform.eulerAngles = new Vector3(0f, rotY, 0f);
-        
-        // Detach instantiated parts from parent
-        fenderFrontLeft.transform.parent = null;
-        fenderFrontRight.transform.parent = null;
-        fenderBackLeft.transform.parent = null;
-        fenderBackRight.transform.parent = null;
+        var prtRot = new Vector3(0f, rotY, 0f);
+
+        var instantiateConfigs = new List<(GameObject, int, string, string)>
+        {
+            (fenderFrontLeftTypes[typeIndices[0]], 0, $"{identifier}_fl_fender_0", "fl_fender"),
+            (fenderFrontRightTypes[typeIndices[1]], 1, $"{identifier}_fr_fender_0", "fr_fender"),
+            (fenderBackLeftTypes[typeIndices[2]], 2, $"{identifier}_bl_fender_0", "bl_fender"),
+            (fenderBackRightTypes[typeIndices[3]], 3, $"{identifier}_br_fender_0", "br_fender")
+        };
+        instantiateConfigs
+            .ForEach(config => 
+                InstantiateAtomicPrefab(
+                    config.Item1, colors[colorIndices[config.Item2]], partition,
+                    config.Item3, config.Item4,
+                    wrapperPos[config.Item2], wrapperRot[config.Item2], prtRot
+                ));
     }
     private void InstantiateWheels(
         List<int> typeIndices, GameObject partition, string identifier
@@ -530,35 +784,23 @@ public class TeacherAgent : DialogueAgent
         var randomIndices = Enumerable.Range(0, 6).ToList();
         Shuffle(randomIndices);
 
-        var generatedWheels = new List<GameObject>();
-        for (var i = 0; i < typeIndices.Count; i++)
-        {
-            // Instantiate provided wheel type with generalized name
-            var wheelPrefab = wheelTypes[typeIndices[i]];
-            var wheel = Instantiate(wheelPrefab, partition.transform);
-            wheel.name = $"{identifier}_wheel_{i}";
-
-            // Add RigidBody component for physical interaction with environment
-            wheel.AddComponent<Rigidbody>();
-        
-            // Define position & rotation w.r.t. partition coordinate
-            var xzPos = xzPositions[randomIndices[i]]; 
-            wheel.transform.localPosition = new Vector3(
-                xzPos.Item1, 0.03f, xzPos.Item2
-            );
-            wheel.transform.eulerAngles = new Vector3(
-                0f, 0f, (Random.Range(0, 2) * 2 - 1) * 90f
-            );
-            
-            generatedWheels.Add(wheel);
-        }
-
         // Apply random rotations to the parent partition object
         var rotY = 90f * Random.Range(0, 4) + Random.Range(-10f, 10f);
-        partition.transform.eulerAngles = new Vector3(0f, rotY, 0f);
-        
-        // Detach instantiated parts from parent
-        foreach (var wheel in generatedWheels) wheel.transform.parent = null;
+        var prtRot = new Vector3(0f, rotY, 0f);
+
+        for (var i = 0; i < typeIndices.Count; i++)
+        {
+            // Define position & rotation w.r.t. partition coordinate
+            var xzPos = xzPositions[randomIndices[i]]; 
+            var wrapperPos = new Vector3(xzPos.Item1, 0f, xzPos.Item2);
+            var wrapperRot = new Vector3(0f, 0f, (Random.Range(0, 2) * 2 - 1) * 90f);
+
+            InstantiateAtomicPrefab(
+                wheelTypes[typeIndices[i]], null, partition,
+                $"{identifier}_wheel_{i}", "wheel",
+                wrapperPos, wrapperRot, prtRot
+            );
+        }
     }
     private void InstantiateBolts(
         List<int> typeIndices, GameObject partition, string identifier
@@ -574,35 +816,25 @@ public class TeacherAgent : DialogueAgent
         var randomIndices = Enumerable.Range(0, 11).ToList();
         Shuffle(randomIndices);
 
-        var generatedBolts = new List<GameObject>();
+        // Apply random rotations to the parent partition object
+        var rotY = Random.Range(0f, 359.9f);
+        var prtRot = new Vector3(0f, rotY, 0f);
+
         for (var i = 0; i < typeIndices.Count; i++)
         {
-            // Instantiate provided wheel type with generalized name
-            var boltPrefab = boltTypes[typeIndices[i]];
-            var bolt = Instantiate(boltPrefab, partition.transform);
-            bolt.name = $"{identifier}_bolt_{i}";
-
-            // Add RigidBody component for physical interaction with environment
-            bolt.AddComponent<Rigidbody>();
-        
             // Define position & rotation w.r.t. partition coordinate
             var xzPos = xzPositions[randomIndices[i]]; 
-            bolt.transform.localPosition = new Vector3(
-                xzPos.Item1, 0.03f, xzPos.Item2
-            );
-            bolt.transform.eulerAngles = new Vector3(
+            var wrapperPos = new Vector3(xzPos.Item1, 0f, xzPos.Item2);
+            var wrapperRot = new Vector3(
                 (Random.Range(0, 2) * 2 - 1) * 90f, 0f, Random.Range(-10f, 10f)
             );
 
-            generatedBolts.Add(bolt);
+            InstantiateAtomicPrefab(
+                boltTypes[typeIndices[i]], null, partition,
+                $"{identifier}_bolt_{i}", "bolt",
+                wrapperPos, wrapperRot, prtRot
+            );
         }
-
-        // Apply random rotations to the parent partition object
-        var rotY = Random.Range(0f, 359.9f);
-        partition.transform.eulerAngles = new Vector3(0f, rotY, 0f);
-        
-        // Detach instantiated parts from parent
-        foreach (var bolt in generatedBolts) bolt.transform.parent = null;
     }
 
     // Helper method for randomly shuffling a list (Fisher-Yates shuffle)

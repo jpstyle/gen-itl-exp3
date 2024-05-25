@@ -9,7 +9,7 @@ COPY python/itl/memory/requirements.txt itl/memory/
 COPY python/itl/vision/requirements.txt itl/vision/
 COPY python/itl/lang/requirements.txt itl/lang/
 COPY python/itl/symbolic_reasoning/requirements.txt itl/symbolic_reasoning/
-COPY python/itl/practical_reasoning/requirements.txt itl/practical_reasoning/
+COPY python/itl/action_planning/requirements.txt itl/action_planning/
 COPY python/itl/lpmln/requirements.txt itl/lpmln/
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir gdown

@@ -28,7 +28,7 @@ HIGH = 0.85
 # Recursive helper method for checking whether rule cons/ante uses a reserved (pred
 # type *) predicate 
 has_reserved_pred = \
-    lambda cnjt: cnjt.name.startswith("*_") \
+    lambda cnjt: cnjt.name.startswith("sp_") \
         if isinstance(cnjt, Literal) else any(has_reserved_pred(nc) for nc in cnjt)
 
 def attempt_answer_Q(agent, utt_pointer):
@@ -52,7 +52,7 @@ def attempt_answer_Q(agent, utt_pointer):
         return
     else:
         # Schedule to answer the question
-        agent.practical.agenda.insert(0, ("answer_Q", utt_pointer))
+        agent.planner.agenda.insert(0, ("answer_Q", utt_pointer))
         return
 
 def prepare_answer_Q(agent, utt_pointer):
@@ -73,6 +73,86 @@ def prepare_answer_Q(agent, utt_pointer):
     else:
         _answer_nondomain_Q(agent, utt_pointer, translated)
 
+def attempt_execute_command(agent, utt_pointer):
+    """
+    Attempt to execute an unexecuted command from user.
+    
+    If it turns out the command cannot be answered at all with the agent's
+    current knowledge (e.g. has not heard of the target concept, does not know
+    how to interact with environment to reach target state), report inability
+    and dismiss the command; soon a demonstration or a definition will be provided
+    from user.
+
+    If the agent can come up with a plan to fulfill the command, right or wrong,
+    schedule to actually plan & execute it by adding a new agenda item.
+    """
+    translated = agent.symbolic.translate_dialogue_content(agent.lang.dialogue)
+
+    ti, ci = utt_pointer
+    parse, raw, _ = translated[ti][1][ci]
+    cons = parse[3]
+
+    command_executable = True
+
+    action_lit = [lit for lit in cons if lit.name.startswith("arel_")][0]
+    action_type = int(action_lit.name.replace("arel_", ""))
+    action_params = {}
+    for arg in action_lit.args[2:]:
+        arg_describing_lits = [lit for lit in cons if lit.args==[arg]]
+
+        if agent.lang.dialogue.referents["dis"][arg[0]].get("is_pred"):
+            # Referent denotes a predicate category
+            action_params[arg[0]] = [lit.name for lit in arg_describing_lits]
+            if any(pred == "sp_neologism" for pred in action_params[arg[0]]):
+                # Neologism included in action parameter config, cannot execute
+                # (neologism will be separately handled by `report_neologism` method)
+                command_executable = False
+                break
+        else:
+            # Referent denotes an environment entity
+            action_params[arg[0]] = agent.lang.dialogue.referents["env"][arg[0]]
+
+    if command_executable:
+        # Schedule to generate plan & execute towards fulfilling the command
+        agent.planner.agenda.insert(0, ("execute_command", (action_type, action_params)))
+        return
+
+    else:
+        # Command cannot be executed for some reason; report inability and dismiss
+        # the command
+        ri_command = f"t{ti}c{ci}"                      # Denotes original request
+
+        # New dialogue turn & clause index for the answer to be provided
+        ti_new = len(agent.lang.dialogue.record)
+        ci_new = len(agent.lang.dialogue.to_generate)
+        ri_inability = f"t{ti_new}c{ci_new}"            # Denotes the inability state event
+        ri_self = f"t{ti_new}c{ci_new}x0"               # Denotes self (i.e., agent)
+        tok_ind = (f"t{ti_new}", f"c{ci_new}", "pc0")   # Denotes 'unable' predicate
+
+        # Update cognitive state w.r.t. value assignment and word sense
+        agent.symbolic.value_assignment[ri_self] = "_self"
+        agent.symbolic.word_senses[tok_ind] = (("sp", "unable"), "sp_unable")
+
+        # Corresponding logical form
+        gq = None; bvars = None; ante = []
+        cons = [
+            ("sp", "unable", [ri_self, ri_command]),
+            ("sp", "pronoun1", [ri_self])
+        ]
+
+        agent.lang.dialogue.unexecuted_commands.remove(utt_pointer)
+        agent.lang.dialogue.to_generate.append(
+            (
+                (gq, bvars, ante, cons),
+                f"I am unable to {raw[0].lower()}{raw[1:]}",
+                ".",
+                { ri_self: { "source_evt": ri_inability } },
+                {}
+            )
+        )
+
+        return
+
 def _answer_domain_Q(agent, utt_pointer, translated):
     """
     Helper method factored out for computation of answers to an in-domain question;
@@ -85,7 +165,6 @@ def _answer_domain_Q(agent, utt_pointer, translated):
     q_vars, (q_cons, q_ante) = question
 
     reg_gr_v, _ = agent.symbolic.concl_vis
-    # reg_gr_vl, _ = symbolic.concl_vis_lang
 
     # New dialogue turn & clause index for the answer to be provided
     ti_new = len(agent.lang.dialogue.record)
@@ -94,7 +173,7 @@ def _answer_domain_Q(agent, utt_pointer, translated):
     # Mapping from predicate variables to their associated entities
     pred_var_to_ent_ref = {
         ql.args[0][0]: ql.args[1][0] for ql in q_cons
-        if ql.name == "*_isinstance"
+        if ql.name == "sp_isinstance"
     }
 
     qv_to_dis_ref = {
@@ -114,10 +193,10 @@ def _answer_domain_Q(agent, utt_pointer, translated):
         # Extract any '*_subtype' statements and cast into appropriate query restrictors
         restrictors = {
             lit.args[0][0]: agent.lt_mem.kb.find_entailer_concepts(conc_conjs[lit.args[1][0]])
-            for lit in q_cons if lit.name=="*_subtype"
+            for lit in q_cons if lit.name=="sp_subtype"
         }
         # Remove the '*_subtype' statements from q_cons now that they are processed
-        q_cons = tuple(lit for lit in q_cons if lit.name!="*_subtype")
+        q_cons = tuple(lit for lit in q_cons if lit.name!="sp_subtype")
         question = (q_vars, (q_cons, q_ante))
 
     # Ensure it has every ingredient available needed for making most informed judgements
@@ -151,11 +230,8 @@ def _answer_domain_Q(agent, utt_pointer, translated):
             agent.lang.dialogue.sensemaking_v_snaps[ti_new] = agent.symbolic.concl_vis
 
             agent.symbolic.resolve_symbol_semantics(agent.lang.dialogue, agent.lt_mem.lexicon)
-            # agent.symbolic.sensemake_vis_lang(agent.lang.dialogue)
-            # agent.lang.dialogue.sensemaking_vl_snaps[ti_new] = agent.symbolic.concl_vis_lang
 
             reg_gr_v, _ = agent.symbolic.concl_vis
-            # reg_gr_vl, _ = symbolic.concl_vis_lang
 
     # Compute raw answer candidates by appropriately querying compiled region graph
     answers_raw, _ = agent.symbolic.query(reg_gr_v, q_vars, (q_cons, q_ante), restrictors)
@@ -253,12 +329,12 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
 
     conc_type_to_pos = { "cls": "n" }
 
-    if any(lit.name=="*_expl" for lit in q_cons):
+    if any(lit.name=="sp_expl" for lit in q_cons):
         # Answering why-question
 
         # Extract target event to explain from the question; fetch the explanandum
         # statement
-        expl_lits = [lit for lit in q_cons if lit.name=="*_expl"]
+        expl_lits = [lit for lit in q_cons if lit.name=="sp_expl"]
         expd_utts = [
             re.search("^t(\d+)c(\d+)$", lit.args[1][0])
             for lit in expl_lits
@@ -276,7 +352,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
         self_think_lits = [
             [
                 lit for lit in expd_cons[0]
-                if lit.name=="*_think" and lit.args[0][0]=="_self"
+                if lit.name=="sp_think" and lit.args[0][0]=="_self"
             ]
             for expd_cons, _ in expd_contents
         ]
@@ -303,7 +379,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
         nst_expd_contents = [
             tuple(
                 lit for lit in expd_cons[0]
-                if not (lit.name=="*_think" and lit.args[0][0]=="_self")
+                if not (lit.name=="sp_think" and lit.args[0][0]=="_self")
             )
             for expd_cons, _ in expd_contents
         ]
@@ -349,7 +425,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
         # predicate anticipated by taxonomy entailment
         prev_Qs_U = [
             (ques, presup) for _, (spk, ques, presup) in prev_Qs
-            if spk=="U" and "*_isinstance" in {ql.name for ql in ques[1][0]}
+            if spk=="U" and "sp_isinstance" in {ql.name for ql in ques[1][0]}
         ]
         probing_Q, probing_presup = prev_Qs_U[-1]
         # Process any 'concept conjunctions' provided in the presupposition into a more
@@ -360,7 +436,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
         # Extract any '*_subtype' statements and cast into appropriate query restrictors
         restrictors = {
             lit.args[0][0]: agent.lt_mem.kb.find_entailer_concepts(conc_conjs[lit.args[1][0]])
-            for lit in probing_Q[1][0] if lit.name=="*_subtype"
+            for lit in probing_Q[1][0] if lit.name=="sp_subtype"
         }
 
         # Find valid templates of potential explanantia for the expected ground-truth
@@ -487,7 +563,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
                 # question. Not to be uttered explicitly (already uttered, as a matter
                 # of fact), but for bookkeeping purpose.
                 rrel_logical_form = (
-                    "expl", "*", (f"t{ti_new}c{ci_new}", q_cons[0].args[1][0]), False
+                    "expl", "sp", (f"t{ti_new}c{ci_new}", q_cons[0].args[1][0]), False
                 )
                 rrel_logical_form = ((rrel_logical_form,), ())
                 agent.lang.dialogue.to_generate.append(
@@ -629,22 +705,25 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
                                 field = f"pred_{conc_type}"
                                 C = getattr(agent.vision.inventories, conc_type)
 
-                                if conc_type == "cls" or conc_type == "att":
-                                    arg1 = h_lit.args[0][0]
-                                    if field not in scene_new[arg1]:
-                                        scene_new[arg1][field] = np.zeros(C)
-                                    scene_new[arg1][field][conc_ind] = HIGH
+                                match conc_type:
+                                    case "cls" | "att":
+                                        arg1 = h_lit.args[0][0]
+                                        if field not in scene_new[arg1]:
+                                            scene_new[arg1][field] = np.zeros(C)
+                                        scene_new[arg1][field][conc_ind] = HIGH
 
-                                else:
-                                    assert conc_type == "rel"
-                                    assert len(h_lit.args) == 2
+                                    case "rel":
+                                        assert len(h_lit.args) == 2
 
-                                    arg1 = h_lit.args[0][0]; arg2 = h_lit.args[1][0]
-                                    if field not in scene_new[arg1]:
-                                        scene_new[arg1][field] = {}
-                                    if arg2 not in scene_new[arg1][field]:
-                                        scene_new[arg1][field][arg2] = np.zeros(C)
-                                    scene_new[arg1][field][arg2][conc_ind] = HIGH
+                                        arg1 = h_lit.args[0][0]; arg2 = h_lit.args[1][0]
+                                        if field not in scene_new[arg1]:
+                                            scene_new[arg1][field] = {}
+                                        if arg2 not in scene_new[arg1][field]:
+                                            scene_new[arg1][field][arg2] = np.zeros(C)
+                                        scene_new[arg1][field][arg2][conc_ind] = HIGH
+                                    
+                                    case _:
+                                        raise ValueError("Invalid concept type")
 
                             hyp_evidence = agent.lt_mem.kb.visual_evidence_from_scene(scene_new)
                             reg_gr_hyp = (kb_prog + hyp_evidence).compile()
@@ -766,7 +845,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
                     # question. Not to be uttered explicitly (already uttered, as a matter
                     # of fact), but for bookkeeping purpose.
                     rrel_logical_form = (
-                        "expl", "*", (f"t{ti_new}c{ci_new}", q_cons[0].args[1][0]), False
+                        "expl", "sp", (f"t{ti_new}c{ci_new}", q_cons[0].args[1][0]), False
                     )
                     rrel_logical_form = ((rrel_logical_form,), ())
                     agent.lang.dialogue.to_generate.append(
@@ -803,7 +882,7 @@ def _search_specs_from_kb(agent, question, restrictors, ref_reg_gr):
     # Inspecting literals in each q_rule for identifying search specs to feed into
     # visual search calls
     for q_lit in cons:
-        if q_lit.name == "*_isinstance":
+        if q_lit.name == "sp_isinstance":
             # Literal whose predicate is question-marked (contained for questions
             # like "What (kind of X) is this?", etc.); the first argument term,
             # standing for the predicate variable, must be contained in q_vars

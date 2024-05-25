@@ -30,12 +30,29 @@ public class DialogueAgent : Agent
     public int calibrationImageRequest = -1;
 
     // Stores whether any part subtype ordering info request is received from the backend
+    [HideInInspector]
     public bool subtypeOrderingRequest;     // false by default
-    
+
+    // Stores any action parameters of string type
+    public readonly Queue<string> actionParameterBuffer = new();
+
+    // For visualizing handheld objects
+    public Transform leftHand;
+    public Transform rightHand;
+    // Canonical manipulator positions
+    [HideInInspector]
+    public Vector3 leftOriginalPosition;
+    [HideInInspector]
+    public Vector3 leftOriginalEuler;
+    [HideInInspector]
+    public Vector3 rightOriginalPosition;
+    [HideInInspector]
+    public Vector3 rightOriginalEuler;
+
     // Communication side channel to Python backend for requesting decisions
     protected string channelUuid;
     protected MessageSideChannel backendMsgChannel;
-    
+
     // Camera sensor & annotating perception camera component
     private CameraSensorComponent _cameraSensor;
     private PerceptionCamera _perCam;
@@ -52,7 +69,7 @@ public class DialogueAgent : Agent
 
     // For controlling minimal update interval, to allow visual inspection during runs
     private float _nextTimeToAct;
-    private const float TimeInterval = 1f;
+    private const float TimeInterval = 0.5f;
 
     public void Start()
     {
@@ -65,6 +82,11 @@ public class DialogueAgent : Agent
 
         _behaviorType = GetComponent<BehaviorParameters>().BehaviorType;
         _nextTimeToAct = Time.time;
+
+        leftOriginalPosition = leftHand.localPosition;
+        rightOriginalPosition = rightHand.localPosition;
+        leftOriginalEuler = leftHand.localEulerAngles;
+        rightOriginalEuler = rightHand.localEulerAngles;
 
         dialogueChannel.dialogueParticipants.Add(this);
     }
