@@ -180,51 +180,59 @@ class SimulatedTeacher:
                 ))
 
             elif utt == "# Observing":
-                # Agent has signaled it is paying attention to user's demonstration;
-                # keep popping and executing plan actions until plan is empty
-                act_type, act_params = self.ongoing_demonstration.pop(0)
-
-                # Execute physical action
-                response.append((act_type, { "parameters": act_params }))
-                # Annotate physical action to be executed for this step, communicated
-                # to agent along with the action
-                if act_type.startswith("PickUp"):
-                    # For PickUp~ actions, provide demonstrative reference by string path
-                    # to target GameObject (which will be converted into binary mask)
-                    offset = len(f"# Action: {act_type}")
-                    act_anno = {
-                        "utterance": f"# Action: {act_type}(target)",
-                        "pointing": { (offset+1, offset+7): "/" + act_params[0] }
-                    }
-                elif act_type.startswith("Assemble"):
-                    # For Assemble~ actions, provide contact point info, specified by
-                    # (atomic part supertype, string identifier) pair
-                    act_anno = {
-                        "utterance": f"# Action: {act_type}({act_params[0]},{act_params[1]})",
-                        "pointing": {}
-                    }
-                else:
-                    # No parameter info to communicate, just annotate action type
-                    act_anno = {
-                        "utterance": f"# Action: {act_type}()",
-                        "pointing": {}
-                    }
-                response.append(("Utter", act_anno))
-
+                # Agent has signaled it is paying attention to user's demonstration
                 if len(self.ongoing_demonstration) == 0:
                     # Last action executed, demonstration finished
-                    print(0)
+                    response.append((
+                    "Utter",
+                    {
+                        "utterance": f"This is a {self.target_concept}.",
+                        "pointing": { (0, 4): "/truck" }
+                    }
+                ))
+                else:
+                    # Keep popping and executing plan actions until plan is empty
+                    act_type, act_params = self.ongoing_demonstration.pop(0)
+
+                    # Execute physical action
+                    response.append((act_type, { "parameters": act_params }))
+                    # Annotate physical action to be executed for this step, communicated
+                    # to agent along with the action
+                    if act_type.startswith("PickUp"):
+                        # For PickUp~ actions, provide demonstrative reference by string path
+                        # to target GameObject (which will be converted into binary mask)
+                        offset = len(f"# Action: {act_type}")
+                        act_anno = {
+                            "utterance": f"# Action: {act_type}(target)",
+                            "pointing": { (offset+1, offset+7): "/" + act_params[0] }
+                        }
+                    elif act_type.startswith("Assemble"):
+                        # For Assemble~ actions, provide contact point info, specified by
+                        # (atomic part supertype, string identifier) pair
+                        act_anno = {
+                            "utterance": f"# Action: {act_type}({act_params[0]},{act_params[1]})",
+                            "pointing": {}
+                        }
+                    elif act_type.startswith("Inspect"):
+                        # For Inspect~ actions, provide integer index of (relative) viewpoint
+                        act_anno = {
+                            "utterance": f"# Action: {act_type}({act_params[0]})",
+                            "pointing": {}
+                        }
+                    else:
+                        # No parameter info to communicate, just annotate action type
+                        act_anno = {
+                            "utterance": f"# Action: {act_type}()",
+                            "pointing": {}
+                        }
+                    response.append(("Utter", act_anno))
 
             elif utt == "OK.":
-                if len(self.current_queue) > 0:
-                    # Remaining target concepts to test and teach
-                    response += self.initiate_dialogue()
-                else:
-                    # No further interaction needed
-                    pass
+                # No further interaction needed; effectively terminates current episode
+                pass
 
             else:
-                # Pass everything else
+                # Cannot parse this pattern of reaction
                 pass
 
         return response
@@ -700,7 +708,8 @@ def _sample_demo_plan(sampled_parts):
     ]
 
     # Now sample to instantiate the partial plan
-    plan = []; atomic_supertypes = {k[0] for k in sampled_parts}
+    plan = []; introduced_subtypes = set()
+    atomic_supertypes = {k[0] for k in sampled_parts}
     while len(partial_plan) > 0:
         # Sample (the index of) a subgoal whose preconditions are cleared
         subgoal_ind = random.sample([
@@ -733,12 +742,22 @@ def _sample_demo_plan(sampled_parts):
 
                 instance = random.sample(compatible_parts, 1)[0]
                 grounded_action = (action[0], (f"t_{instance[0]}_{instance[1]}",))
-                del sampled_parts[instance]
+                subtype = sampled_parts.pop(instance)
+
+                plan.append(grounded_action)
+
+                # Interleave the sampled plan with 'Inspect~' actions to allow 3D scanning
+                # of newly introduced parts, for each first occurrence of PickUp~ action
+                # involving a part subtype. Note that this implies any PickUp~ action not
+                # followed by an Inspect~ action involves a part subtype that is already
+                # introduced before in a previously executed PickUp~ action.
+                if subtype not in introduced_subtypes:
+                    introduced_subtypes.add(subtype)
+                    hand = "Left" if action[0].endswith("Left") else "Right"
+                    plan += [(f"Inspect{hand}", (str(i),)) for i in range(25)]
 
             else:
-                grounded_action = action
-
-            plan.append(grounded_action)
+                plan.append(action)
 
         # Remove the resultant subassembly from the preconditions of the
         # remaining subgoals in partial_plan

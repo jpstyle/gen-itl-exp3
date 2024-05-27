@@ -27,7 +27,8 @@ class SemanticParser:
             #   1) "Build a {truck_type}."
             #   2) "I will demonstrate how to build a {truck_type}."
             #   3) "# Action: {action_type}({action_args})"
-            #   4) ...
+            #   4) "This is a {concept_type}"
+            #   5) ...
             if re.match(r"Build a (.*)\.$", utt):
                 # 1) Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -126,6 +127,12 @@ class SemanticParser:
                     referents[f"x{ri}"]["dem_ref"] = crange
 
                 source = { "e0": utt }
+
+            elif re.match(r"This is a (.*)\.$", utt):
+                # 5) Providing a concept label of the demonstratively referenced
+                # object instance; may signal end of demonstration if the 'target
+                # concept' (as previously signaled by 2) above) instance is provided
+                print(0)
 
             else:
                 # Don't know how to process other patterns

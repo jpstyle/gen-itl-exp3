@@ -342,10 +342,11 @@ public class TeacherAgent : DialogueAgent
                 Assemble(leftPoint, rightPoint, productName, rightToLeft);
                 break;
             case 7:
-                // InspectLeft action, parameter: ()
-                break;
             case 8:
-                // InspectRight action, parameter: ()
+                // InspectLeftRight action, parameter: (view angle index)
+                var viewAngleIndex = Convert.ToInt32(actionParameterBuffer.Dequeue());
+                var onLeft = actionType % 2 == 1;
+                Inspect(viewAngleIndex, onLeft);
                 break;
         }
 
@@ -439,9 +440,7 @@ public class TeacherAgent : DialogueAgent
             xPos = _mainPartitionPosition.x + Random.Range(-0.21f, 0.21f);
             zPos = _mainPartitionPosition.z + Random.Range(-0.04f, 0.12f);
         }
-        activeHand.localEulerAngles = Vector3.zero;
         var volume = GetBoundingVolume(heldObj);
-        activeHand.localEulerAngles = fromLeft ? leftOriginalEuler : rightOriginalEuler;
         var yPos = _mainPartitionPosition.y + volume.extents.y + 0.06f;
         heldObj.transform.parent = null;
         heldObj.transform.position = new Vector3(xPos, yPos, zPos);
@@ -535,9 +534,7 @@ public class TeacherAgent : DialogueAgent
         Assert.IsNotNull(srcHeld); Assert.IsNotNull(tgtHeld);
 
         // Obtain pre-assembly bounding volume for later repositioning of children parts
-        tgtHand.localEulerAngles = Vector3.zero;
         var beforeVolume = GetBoundingVolume(tgtHeld);
-        tgtHand.localEulerAngles = rightToLeft ? leftOriginalEuler : rightOriginalEuler;
 
         // Merge the two subassemblies, 'releasing' from source hand by reassigning
         // parent transforms of parts in the source subassembly
@@ -546,9 +543,7 @@ public class TeacherAgent : DialogueAgent
         foreach (var tr in childrenParts) tr.parent = tgtHeld.transform;
 
         // Obtain post-assembly bounding volume for later repositioning of children parts
-        tgtHand.localEulerAngles = Vector3.zero;
         var afterVolume = GetBoundingVolume(tgtHeld);
-        tgtHand.localEulerAngles = rightToLeft ? leftOriginalEuler : rightOriginalEuler;
 
         // Finish merging by destroying source subassembly and renaming target subassembly
         // with the provided string name
@@ -563,7 +558,54 @@ public class TeacherAgent : DialogueAgent
 
         // Move back the source hand to the original pose
         srcHand.localPosition = rightToLeft ? rightOriginalPosition : leftOriginalPosition;
-        srcHand.localEulerAngles = rightToLeft ? rightOriginalEuler : leftOriginalEuler;
+        srcHand.localEulerAngles = Vector3.zero;
+    }
+
+    private void Inspect(int viewIndex, bool onLeft)
+    {
+        // Move the specified hand to 'observation' position, then rotate according to the
+        // specified viewing angle index. Index value of 24 indicates end of inspection,
+        // bring the hand back to the original position.
+        var activeHand = onLeft ? leftHand : rightHand;
+        var distance = Vector3.Distance(
+            relativeViewCenter.position, relativeViewPoint.position
+        );
+
+        if (viewIndex == 0)
+        {
+            // Need to do at the beginning of each inspection sequence
+            inspectOriginalRotation = relativeViewCenter.rotation;
+            activeHand.position = relativeViewCenter.position;
+        }
+
+        if (viewIndex < 24)
+        {
+            // Turn hand orientation to each direction where the imaginary viewer is supposed to be
+            if (viewIndex % 8 == 0)
+            {
+                // Adjust 'viewing height' (0~7: upper, 8~16: middle, 17~24: lower)
+                relativeViewPoint.localPosition = (viewIndex / 8) switch
+                {
+                    0 => distance * new Vector3(0f, 1 / Mathf.Sqrt(2), 1 / Mathf.Sqrt(2)),
+                    1 => distance * Vector3.forward,
+                    2 => distance * new Vector3(0f, -1 / Mathf.Sqrt(2), 1 / Mathf.Sqrt(2)),
+                    _ => relativeViewPoint.localPosition
+                };
+            }
+            if (viewIndex != 0)
+                // Skip (only) the first Inspect in the round
+                relativeViewCenter.Rotate(Vector3.up, 45f, Space.Self);
+            activeHand.LookAt(relativeViewPoint, relativeViewCenter.up);
+        }
+
+        if (viewIndex == 24)
+        {
+            // Back to default poses at the end of inspection
+            activeHand.localPosition = onLeft ? leftOriginalPosition : rightOriginalPosition;
+            activeHand.localEulerAngles = Vector3.zero;
+            relativeViewPoint.localPosition = Vector3.forward * distance;
+            relativeViewCenter.rotation = inspectOriginalRotation;
+        }
     }
 
     private static Bounds GetBoundingVolume(GameObject subassembly)

@@ -39,15 +39,17 @@ public class DialogueAgent : Agent
     // For visualizing handheld objects
     public Transform leftHand;
     public Transform rightHand;
-    // Canonical manipulator positions
+    // Key manipulator positions
     [HideInInspector]
     public Vector3 leftOriginalPosition;
     [HideInInspector]
-    public Vector3 leftOriginalEuler;
-    [HideInInspector]
     public Vector3 rightOriginalPosition;
     [HideInInspector]
-    public Vector3 rightOriginalEuler;
+    public Quaternion inspectOriginalRotation;
+
+    // For 3D structure inspection
+    public Transform relativeViewCenter;
+    public Transform relativeViewPoint;
 
     // Communication side channel to Python backend for requesting decisions
     protected string channelUuid;
@@ -85,8 +87,6 @@ public class DialogueAgent : Agent
 
         leftOriginalPosition = leftHand.localPosition;
         rightOriginalPosition = rightHand.localPosition;
-        leftOriginalEuler = leftHand.localEulerAngles;
-        rightOriginalEuler = rightHand.localEulerAngles;
 
         dialogueChannel.dialogueParticipants.Add(this);
     }
