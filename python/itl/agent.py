@@ -42,9 +42,6 @@ class ITLAgent:
         self.strat_generic = cfg.agent.strat_generic
         self.strat_assent = cfg.agent.strat_assent
 
-        # Show visual UI and plots
-        self.vis_ui_on = False
-
         # (Fields below would categorize as 'working memory' in conventional
         # cognitive architectures...)
 
@@ -59,17 +56,16 @@ class ITLAgent:
         # Snapshot of KB, to be taken at the beginning of every training episode
         self.kb_snap = copy.deepcopy(self.lt_mem.kb)
 
-        self.observation_mode = False
-        self.observation_record = None
+        self.observed_demo = None
 
-    def loop(self, v_usr_in=None, l_usr_in=None, pointing=None, new_vis=True):
+    def loop(self, v_usr_in=None, l_usr_in=None, pointing=None, new_env=False):
         """
         Single agent activity loop, called with inputs of visual scene, natural
         language utterances from user and affiliated gestures (demonstrative
         references by pointing in our case). new_vis flag indicates whether
         the visual scene input is new.
         """
-        self._vis_inp(usr_in=v_usr_in, new_vis=new_vis)
+        self._vis_inp(usr_in=v_usr_in, new_env=new_env)
         self._lang_inp(usr_in=l_usr_in, pointing=pointing)
         self._update_belief(pointing=pointing)
         act_out = self._act()
@@ -136,12 +132,11 @@ class ITLAgent:
                     module = getattr(self, module_name)
                     setattr(module, module_component, component_data)
 
-    def _vis_inp(self, usr_in, new_vis):
+    def _vis_inp(self, usr_in, new_env):
         """ Handle provided visual input """
-        self.vision.new_input_provided = new_vis
-        if self.vision.new_input_provided:
-            self.vision.previous_input = self.vision.latest_input
-            self.vision.latest_input = usr_in
+        if new_env:
+            self.vision.latest_inputs = []
+        self.vision.latest_inputs.append(usr_in)
 
     def _lang_inp(self, usr_in, pointing):
         """ Handle provided language input (from user) """
@@ -153,27 +148,20 @@ class ITLAgent:
 
         assert len(usr_in) == len(pointing)
 
-        if len(usr_in) == 0:
-            self.lang.new_input_provided = False
-        else:
-            self.lang.new_input_provided = True
-
+        if len(usr_in) > 0:
             parsed_input = self.lang.semantic.nl_parse(usr_in, pointing)
             self.lang.latest_input = parsed_input
+        else:
+            self.lang.latest_input = None
 
     def _update_belief(self, pointing):
         """ Form beliefs based on visual and/or language input """
-
-        if not (self.vision.new_input_provided or self.lang.new_input_provided):
-            # No information whatsoever to make any belief updates
-            return
-
         # Lasting storage of pointing info
         if pointing is None:
             pointing = {}
 
-        # For showing visual UI on only the first time
-        vis_ui_on = self.vis_ui_on
+        # Flag whether environment has 'changed'
+        new_env = len(self.vision.latest_inputs) == 1
 
         # Translated dialogue record and visual context from currently stored values
         # (scene may or may not change)
@@ -184,7 +172,7 @@ class ITLAgent:
         prev_context = (prev_vis_scene, prev_pr_prog, prev_kb)
 
         # Some cleaning steps needed whenever visual context changes
-        if self.vision.new_input_provided:
+        if len(self.vision.latest_inputs) == 1:
             # Refresh dialogue manager & symbolic reasoning module states
             self.lang.dialogue.refresh()
             self.symbolic.refresh()
@@ -208,40 +196,40 @@ class ITLAgent:
             ##                  Processing perceived inputs                  ##
             ###################################################################
 
-            if self.vision.new_input_provided and not self.observation_mode:
-                # Ground raw visual perception with scene graph generation module
-                self.vision.predict(
-                    self.vision.latest_input, self.lt_mem.exemplars,
-                    visualize=vis_ui_on, lexicon=self.lt_mem.lexicon
-                )
-                vis_ui_on = False
+            # Run visual prediction (only) when not in observation mode
+            if self.observed_demo is None:
+                if xb_updated:
+                    # Concept exemplar base updated, need reclassification while keeping
+                    # the discovered objects and embeddings intact
+                    self.vision.predict(
+                        None, self.lt_mem.exemplars, reclassify=True, visualize=False
+                    )
+                else:
+                    # Ground raw visual perception with scene graph generation module
+                    self.vision.predict(
+                        self.vision.latest_inputs[-1], self.lt_mem.exemplars,
+                        lexicon=self.lt_mem.lexicon
+                    )
 
-                # Inform the language module of the new visual context
-                self.lang.situate(self.vision.scene)
-
-            elif xb_updated and not self.observation_mode:
-                # Concept exemplar base updated, need reclassification while keeping
-                # the discovered objects and embeddings intact
-                self.vision.predict(
-                    None, self.lt_mem.exemplars, reclassify=True, visualize=False
-                )
-
-            if self.lang.new_input_provided:
+            if self.lang.latest_input is not None:
                 # Revert to pre-update dialogue state at the start of each loop iteration
                 self.lang.dialogue.record = self.lang.dialogue.record[:ti_last]
 
                 # Understand the user input in the context of the dialogue
                 self.lang.understand(self.lang.latest_input, pointing=pointing)
 
+            # Inform the language module of the current visual context
+            self.lang.situate(self.vision.scene)
+
             ents_updated = False
-            if self.vision.scene is not None and not self.observation_mode:
+            if self.vision.scene is not None and self.observed_demo is None:
                 # If a new entity is registered as a result of understanding the latest
                 # input, re-run vision module to update with new predictions for it
-                new_ents = set(self.lang.dialogue.referents["env"]) - set(self.vision.scene)
+                new_ents = set(self.lang.dialogue.referents["env"][-1]) - set(self.vision.scene)
                 new_ents.remove("_self"); new_ents.remove("_user")
                 if len(new_ents) > 0:
                     masks = {
-                        ent: self.lang.dialogue.referents["env"][ent]["mask"]
+                        ent: self.lang.dialogue.referents["env"][-1][ent]["mask"]
                         for ent in new_ents
                     }
 
@@ -256,15 +244,14 @@ class ITLAgent:
             ##       Sensemaking via synthesis of perception+knowledge       ##
             ###################################################################
 
-            if (self.vision.new_input_provided or ents_updated or xb_updated or kb_updated
-                and not self.observation_mode):
+            if self.observed_demo is None and (ents_updated or xb_updated or kb_updated):
                 # Sensemaking from vision input only
                 exported_kb = self.lt_mem.kb.export_reasoning_program()
                 visual_evidence = self.lt_mem.kb.visual_evidence_from_scene(self.vision.scene)
                 self.symbolic.sensemake_vis(exported_kb, visual_evidence)
                 self.lang.dialogue.sensemaking_v_snaps[ti_last] = self.symbolic.concl_vis
 
-            if self.lang.new_input_provided:
+            if self.lang.latest_input is not None:
                 # Reference & word sense resolution to connect vision & discourse
                 self.symbolic.resolve_symbol_semantics(
                     self.lang.dialogue, self.lt_mem.lexicon
@@ -308,23 +295,44 @@ class ITLAgent:
                 demonstrated_event = re.findall(r"t(\d+)c(\d+)", demonstrated_event)[0]
                 demo_ti = int(demonstrated_event[0])
                 demo_ci = int(demonstrated_event[1])
-                self.observation_mode = True
-                self.observation_record = (
-                    (demo_ti, demo_ci), [(self.vision.latest_input, None, None)]
-                )
+                demonstrated_event = translated[demo_ti][1][demo_ci][0][-1]
+                self.observed_demo = (demonstrated_event, (demo_ti, demo_ci))
                 break           # Break here without proceeding
 
-            if self.observation_mode:
+            if self.observed_demo is not None:
                 ###################################################################
-                ##           Record ongoing task demonstration by user           ##
+                ##          Recording ongoing task demonstration by user         ##
                 ###################################################################
-                self.observation_record[1].append(
-                    (
-                        self.vision.latest_input,
-                        self.symbolic.translate_dialogue_content(self.lang.dialogue)[-1][1],
-                        self.lang.dialogue.referents["env"]
-                    )
-                )
+
+                # Set of statements made by user at this time step
+                user_statements = set.union(*[set(lf[-1]) for lf, _, _ in translated[-1][1]])
+
+                # If a statement provides labeled instance of the 'target concept'
+                # of a "Build X" task, consider demonstration is finished
+                build_pred = self.lt_mem.lexicon.s2d[("va", "build")][0]
+                build_pred = f"{build_pred[0]}_{build_pred[1]}"
+                task_preds = {lit.name for lit in self.observed_demo[0]}
+
+                if ({lit.name for lit in user_statements} | {build_pred}) <= task_preds:
+                    # End of demonstration recognized; collect & learn from demo data
+                    user_annotations = [
+                        (ti, contents) for ti, (spk, contents) in enumerate(translated)
+                        if spk=="U"
+                    ]
+                    demo_ti = self.observed_demo[1][0]
+                    aligned_demo_data = [
+                        (img, contents, env_refs)
+                        for (ti, contents), img, env_refs in zip(
+                            user_annotations,
+                            self.vision.latest_inputs,
+                            self.lang.dialogue.referents["env"],
+                        )
+                        if ti >= demo_ti
+                    ]
+
+                    # Back to normal execution mode
+                    self.observed_demo = None
+
                 break
 
             else:
@@ -389,7 +397,7 @@ class ITLAgent:
 
                 # By default, treat lack of any negative acknowledgements to an agent's statement
                 # as positive acknowledgement
-                prev_or_curr = "prev" if self.vision.new_input_provided else "curr"
+                prev_or_curr = "prev" if new_env else "curr"
                 for (ti, ci), (speaker, (statement, _)) in prev_statements:
                     if speaker != "A": continue         # Not interested
 
@@ -433,7 +441,7 @@ class ITLAgent:
         # for our purpose right now; we will see later if we'll ever need to generalize
         # and implement the said procedure.)
 
-        if self.observation_mode:
+        if self.observed_demo is not None:
             # Agent currently in observation mode; just signal that agent is properly
             # recording user demonstration
             return_val = [("generate", ("# Observing", {}))]
@@ -503,8 +511,8 @@ class ITLAgent:
 
                 if num_resolved_items == 0 or len(self.planner.agenda) == 0:
                     # No resolvable agenda item any more, or stack clear
-                    if len(return_val) == 0 and self.lang.new_input_provided:
-                        # Nothing to utter, acknowledge any user input
+                    if len(return_val) == 0 and self.lang.latest_input is not None:
+                        # No specific reaction to utter, acknowledge any user input
                         self.planner.agenda.append(("acknowledge", None))
                     else:
                         # Break loop with return vals

@@ -754,7 +754,10 @@ def _sample_demo_plan(sampled_parts):
                 if subtype not in introduced_subtypes:
                     introduced_subtypes.add(subtype)
                     hand = "Left" if action[0].endswith("Left") else "Right"
-                    plan += [(f"Inspect{hand}", (str(i),)) for i in range(25)]
+                    plan += [
+                        (f"Inspect{hand}", (str(i), f"t_{instance[0]}_{instance[1]}"))
+                        for i in range(25)
+                    ]
 
             else:
                 plan.append(action)

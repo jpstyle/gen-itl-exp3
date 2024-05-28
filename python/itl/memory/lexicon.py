@@ -33,9 +33,14 @@ class Lexicon:
         # Specify the initial inventory of lexical entries that each agent starts with
         self.add(("vs", "have"), ("prel", 0))
         self.add(("va", "build"), ("arel", 0))
-        self.add(("va", "pick_up"), ("arel", 1))
-        self.add(("va", "drop"), ("arel", 2))
-        self.add(("va", "assemble"), ("arel", 3))
+        self.add(("va", "pick_up_left"), ("arel", 1))
+        self.add(("va", "pick_up_right"), ("arel", 2))
+        self.add(("va", "drop_left"), ("arel", 3))
+        self.add(("va", "drop_right"), ("arel", 4))
+        self.add(("va", "assemble_right_to_left"), ("arel", 5))
+        self.add(("va", "assemble_left_to_right"), ("arel", 6))
+        self.add(("va", "inspect_left"), ("arel", 7))
+        self.add(("va", "inspect_right"), ("arel", 8))
 
     def __repr__(self):
         return f"Lexicon(len={len(self.s2d)})"

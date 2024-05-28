@@ -30,8 +30,7 @@ class VisionModule:
         self.cfg = cfg
 
         self.scene = None
-        self.latest_input = None        # Latest raw input
-        self.previous_input = None      # Any input *before* current self.latest_input
+        self.latest_inputs = []         # Latest raw inputs
 
         # Inventory of distinct visual concepts that the module (and thus the agent
         # equipped with this module) is aware of, one per concept category. Right now
@@ -49,7 +48,7 @@ class VisionModule:
 
     def predict(
         self, image, exemplars, reclassify=False, masks=None, specs=None,
-        visualize=True, lexicon=None
+        visualize=False, lexicon=None
     ):
         """
         Model inference in either one of four modes:
@@ -93,8 +92,6 @@ class VisionModule:
             if ensemble:
                 # Full (ensemble) prediction
                 vis_embs, masks_out, scores = self.model(image)
-
-                self.latest_input = image         # Cache last input image
 
                 # Newly compose a scene graph with the output; filter patches to leave top-k
                 # detections
@@ -177,7 +174,7 @@ class VisionModule:
                     }
                     for conc_type in ["cls", "att"]
                 }
-            self.summ = visualize_sg_predictions(self.latest_input, self.scene, lexicon)
+            self.summ = visualize_sg_predictions(self.latest_inputs[-1], self.scene, lexicon)
 
     def _fs_conc_pred(self, exemplars, emb, conc_type):
         """

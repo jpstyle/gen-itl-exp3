@@ -13,12 +13,9 @@ class DialogueManager:
     def __init__(self):
 
         self.referents = {
-            "env": {},  # Sensed via physical perception
-            "dis": {}   # Introduced by dialogue
+            "env": [],          # Environment entities
+            "dis": {}           # Discourse referents
         }
-        self.referents["env"]["_self"] = None
-        self.referents["env"]["_user"] = None
-                # Agent self & (one) user always included as environment entity
 
         self.assignment_hard = {}   # Store fixed assignment by demonstrative+pointing, names, etc.
         self.referent_names = {}    # Store mapping from symbolic name to entity
@@ -66,9 +63,9 @@ class DialogueManager:
         if not already explicitly aware of it as object.
         """
         env_entities = {
-            k: v for k, v in self.referents["env"].items()
+            k: v for k, v in self.referents["env"][-1].items()
             if not (k == "_self" or k == "_user")
-        }       # Entities except self
+        }
 
         if len(env_entities) > 0:
             # First check if there's any existing high-IoU segmentation mask; by
@@ -84,7 +81,7 @@ class DialogueManager:
                 # Register the entity as a novel environment referent
                 pointed = f"o{len(env_ref_masks)}"
 
-                self.referents["env"][pointed] = {
+                self.referents["env"][-1][pointed] = {
                     "mask": dem_mask,
                     "area": dem_mask.sum().item()
                 }
@@ -93,7 +90,7 @@ class DialogueManager:
             # Register the entity as a novel environment referent
             pointed = "o0"
 
-            self.referents["env"][pointed] = {
+            self.referents["env"][-1][pointed] = {
                 "mask": dem_mask,
                 "area": dem_mask.sum().item()
             }

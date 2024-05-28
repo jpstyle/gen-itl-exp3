@@ -32,14 +32,14 @@ class LanguageModule:
         # Incorporate parsed scene graph into dialogue context
         for oi, obj in vis_scene.items():
             mask = obj["pred_mask"]
-            self.dialogue.referents["env"][oi] = {
+            self.dialogue.referents["env"][-1][oi] = {
                 "mask": mask,
                 "area": mask.sum().item()
             }
             self.dialogue.referent_names[oi] = oi
         
         # Register these indices as names, for starters
-        self.dialogue.referent_names = { i: i for i in self.dialogue.referents["env"] }
+        self.dialogue.referent_names.update({ i: i for i in self.dialogue.referents["env"][-1] })
 
     def understand(self, parses, pointing=None):
         """
@@ -52,6 +52,10 @@ class LanguageModule:
         """
         ti = len(self.dialogue.record)      # New dialogue turn index
         new_record = []                     # New dialogue record for the turn
+
+        # New environment entities info for current timeframe
+        self.dialogue.referents["env"].append({ "_self": None, "_user": None})
+            # Always include self and user
 
         # For indexing clauses in dialogue turn
         se2ci = defaultdict(lambda: len(se2ci))

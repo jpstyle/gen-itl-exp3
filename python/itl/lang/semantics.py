@@ -129,10 +129,25 @@ class SemanticParser:
                 source = { "e0": utt }
 
             elif re.match(r"This is a (.*)\.$", utt):
-                # 5) Providing a concept label of the demonstratively referenced
+                # 4) Providing a concept label of the demonstratively referenced
                 # object instance; may signal end of demonstration if the 'target
                 # concept' (as previously signaled by 2) above) instance is provided
-                print(0)
+                labeled_target = re.findall(r"This is a (.*)\.$", utt)[0]
+
+                clauses = {
+                    "e0": (
+                        None, set(), [],
+                        [
+                            ("n", labeled_target, ["x0"])
+                        ]
+                    )
+                }
+                referents = {
+                    "e0": { "mood": "." },
+                    "x0": { "source_evt": "e0", "dem_ref": (0, 4) }
+                }
+
+                source = { "e0": utt }
 
             else:
                 # Don't know how to process other patterns

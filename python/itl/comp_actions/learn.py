@@ -141,7 +141,7 @@ def identify_acknowledgement(agent, rule, prev_statements, prev_context):
     if rule_is_grounded and not rule_has_pred_referent:
         # Grounded event without constant predicate referents
 
-        if agent.vision.new_input_provided:
+        if len(agent.vision.latest_inputs) == 1:
             # Discussion about irrelevant contexts, can return early without doing anything
             return
 
@@ -304,7 +304,7 @@ def handle_mismatch(agent, mismatch):
     objs_to_add = list(objs_to_add)         # Assign arbitrary ordering
     _add_scene_and_exemplars(
         objs_to_add, pointers,
-        agent.vision.scene, agent.vision.latest_input, agent.lt_mem.exemplars
+        agent.vision.scene, agent.vision.latest_inputs[-1], agent.lt_mem.exemplars
     )
 
     # Mark as handled
@@ -391,7 +391,7 @@ def handle_acknowledgement(agent, acknowledgement_info):
     if ack_ind[0] == "prev":
         vis_raw = agent.vision.previous_input
     else:
-        vis_raw = agent.vision.latest_input
+        vis_raw = agent.vision.latest_inputs[-1]
 
     if polarity != True:
         # Nothing to do with negative acknowledgements
@@ -590,7 +590,7 @@ def handle_neologism(agent, novel_concepts, dialogue_state):
         objs_to_add = list(objs_to_add)         # Assign arbitrary ordering
         _add_scene_and_exemplars(
             objs_to_add, pointers,
-            agent.vision.scene, agent.vision.latest_input, agent.lt_mem.exemplars
+            agent.vision.scene, agent.vision.latest_inputs[-1], agent.lt_mem.exemplars
         )
 
     return xb_updated

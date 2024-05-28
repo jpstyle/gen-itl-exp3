@@ -75,26 +75,31 @@ class SymbolicReasonerModule:
 
         # Environmental referents
         occurring_atoms = set()
-        for ent in dialogue_state.referents["env"]:
+        for ent in dialogue_state.referents["env"][-1]:
             if ent not in occurring_atoms:
                 sm_prog.add_absolute_rule(Rule(head=Literal("env", wrap_args(ent))))
                 occurring_atoms.add(ent)
 
         # Discourse referents
         for rf, v in dialogue_state.referents["dis"].items():
-            # No need to assign if universally quantified or wh-quantified
-            if v.get("univ_quantified") or v.get("wh_quantified"): continue
+            # Only process unresolved value assignments
+            if rf in self.value_assignment: continue
             # No need to assign if not an entity referent
             if "x" not in rf: continue
+            # No need to assign if universally quantified or wh-quantified
+            if v.get("univ_quantified") or v.get("wh_quantified"): continue
 
             sm_prog.add_absolute_rule(Rule(head=Literal("dis", wrap_args(rf))))
             if v.get("referential"):
                 sm_prog.add_absolute_rule(Rule(head=Literal("referential", wrap_args(rf))))
 
         # Hard assignments by pointing, etc.
-        for ref, env in dialogue_state.assignment_hard.items():
+        for rf, env in dialogue_state.assignment_hard.items():
+            # Only process unresolved value assignments
+            if rf in self.value_assignment: continue
+
             sm_prog.add_absolute_rule(
-                Rule(body=[Literal("assign", [(ref, False), (env, False)], naf=True)])
+                Rule(body=[Literal("assign", [(rf, False), (env, False)], naf=True)])
             )
 
         # Understood dialogue record contents
@@ -207,7 +212,11 @@ class SymbolicReasonerModule:
         ])
 
         best_assignment = [atom.args for atom in opt_models[0] if atom.name == "assign"]
-        best_assignment = {args[0][0]: args[1][0] for args in best_assignment}
+        best_assignment = { args[0][0]: args[1][0] for args in best_assignment }
+        best_assignment.update({
+            rf: None for rf in dialogue_state.referents["dis"]
+            if rf not in best_assignment
+        })
 
         tok2sym_map = [atom.args[:2] for atom in opt_models[0] if atom.name == "pred_token"]
         tok2sym_map = {
@@ -236,7 +245,10 @@ class SymbolicReasonerModule:
         sense selection. Dismiss (replace with None) any utterances containing
         unresolved neologisms.
         """
-        a_map = lambda args: [self.value_assignment.get(arg, arg) for arg in args]
+        a_map = lambda args: [
+            self.value_assignment.get(arg, arg) or arg
+            for arg in args
+        ]
 
         # Recursive helper methods for encoding pre-translation tuples representing
         # literals into actual Literal objects

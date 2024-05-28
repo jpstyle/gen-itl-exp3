@@ -3,10 +3,12 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
+using UnityEngine.Assertions;
 using UnityEngine.Perception.GroundTruth;
 using Unity.MLAgents;
 using Unity.MLAgents.Sensors;
 using Unity.MLAgents.Policies;
+using Random = UnityEngine.Random;
 
 public class DialogueAgent : Agent
 // Communication with dialogue UI and communication with Python backend may be
@@ -65,13 +67,21 @@ public class DialogueAgent : Agent
     // Boolean flag indicating an Utter action is invoked as coroutine and currently
     // running; for preventing multiple invocation of Utter coroutine 
     private bool _uttering;
-
+    // Analogous flag for Act action
+    private bool _acting;
     // Analogous flag for CaptureMask method
     private bool _maskCapturing;
 
+    // Boolean flag indicating whether there is a pending request for decision to be
+    // made; set to true when a request is blocked by _uttering or _acting flag
+    private bool _decisionRequestPending;
+
     // For controlling minimal update interval, to allow visual inspection during runs
     private float _nextTimeToAct;
-    private const float TimeInterval = 0.5f;
+    private const float TimeInterval = 0.3f;
+
+    // Store workplace partition info for main work area
+    private readonly Vector3 _mainPartitionPosition = new(0f, 0.76f, 0.24f);
 
     public void Start()
     {
@@ -116,7 +126,7 @@ public class DialogueAgent : Agent
             hasToDo |= incomingMsgBuffer.Count > 0;
             hasToDo |= calibrationImageRequest != -1;
             hasToDo |= subtypeOrderingRequest;
-            if (!hasToDo) return;
+            if (!hasToDo & !_decisionRequestPending) return;
 
             // If unprocessed incoming messages exist, process and consult backend
             while (incomingMsgBuffer.Count > 0)
@@ -249,9 +259,42 @@ public class DialogueAgent : Agent
                 subtypeOrderingRequest = false;    // Reset flag
             }
 
-            // Now wait for decision
-            RequestDecision();
+            // Now wait for decision, if not currently undergoing some action execution
+            if (_uttering | _acting)
+                _decisionRequestPending = true;
+            else
+            {
+                RequestDecision();
+                _decisionRequestPending = false;
+            }
         }
+    }
+
+    protected IEnumerator CaptureAnnotations()
+    {
+        // If a coroutine invocation is still running, do not start another; else,
+        // set flag
+        if (_maskCapturing) yield break;
+        _maskCapturing = true;
+
+        // First send a request for a capture to the PerceptionCamera component of the
+        // Camera to which the CameraSensorComponent is attached
+        yield return null;      // Wait for a frame to render
+        _perCam.RequestCapture();
+        for (var i=0; i < 5; i++)
+            yield return null;
+        // Waiting several more frames to ensure annotations were captured (This is
+        // somewhat ad hoc indeed... but it works)
+
+        // Wait until annotations are ready in the storage endpoint for retrieval
+        yield return new WaitUntil(() => EnvEntity.annotationStorage.annotationsUpToDate);
+
+        // Finally, update segmentation masks of all EnvEntity instances based on the data
+        // stored in the endpoint
+        EnvEntity.UpdateAnnotationsAll();
+
+        // Reset flag on exit
+        _maskCapturing = false;
     }
 
     protected IEnumerator Utter()
@@ -312,13 +355,7 @@ public class DialogueAgent : Agent
                         );
 
                     if (foundEnt is null) throw new Exception("Invalid part type");
-
-                    var maskColors = foundEnt.masks[_cameraSensor.Camera.targetDisplay];
-                    var segMapBuffer = EnvEntity.annotationStorage.segMap;
-                    var screenMask = ColorsToMask(segMapBuffer, maskColors);
-                    responseMasks[range] = new EntityRef(
-                        MaskCoordinateSwitch(screenMask, true)
-                    );
+                    responseMasks[range] = GetMaskRef(foundEnt);
 
                     stringPointer += req.Length;
                     if (gtMaskRequests.Count > 0) stringPointer += 2;   // Account for ", " delimiter
@@ -369,31 +406,309 @@ public class DialogueAgent : Agent
         _uttering = false;
     }
 
-    protected IEnumerator CaptureAnnotations()
+    // ReSharper disable Unity.PerformanceAnalysis
+    protected IEnumerator Act(int actionType)
     {
         // If a coroutine invocation is still running, do not start another; else,
         // set flag
-        if (_maskCapturing) yield break;
-        _maskCapturing = true;
+        if (_acting) yield break;
+        _acting = true;
 
-        // First send a request for a capture to the PerceptionCamera component of the
-        // Camera to which the CameraSensorComponent is attached
-        yield return null;      // Wait for a frame to render
-        _perCam.RequestCapture();
-        for (var i=0; i < 5; i++)
+        // Coroutine that executes specified physical action
+        switch (actionType)
+        {
+            case 1:
+            case 2:
+                // PickUpLeft/Right action, parameter: (target object)
+                var targetName = actionParameterBuffer.Dequeue();
+                var targetEnt = EnvEntity.FindByObjectPath($"/{targetName}");
+                var withLeft = actionType % 2 == 1;
+                PickUp(targetEnt.gameObject, withLeft);
+                break;
+            case 3:
+            case 4:
+                // DropLeft/Right action, parameter: ()
+                var fromLeft = actionType % 2 == 1;
+                Drop(fromLeft);
+                break;
+            case 5:
+            case 6:
+                // AssembleRtoL/LtoR action, parameter: {contact point L, contact point R,
+                // resultant subassembly string name)
+                var leftPoint = actionParameterBuffer.Dequeue();
+                var rightPoint = actionParameterBuffer.Dequeue();
+                var productName = actionParameterBuffer.Dequeue();
+                var rightToLeft = actionType % 2 == 1;
+                Assemble(leftPoint, rightPoint, productName, rightToLeft);
+                break;
+            case 7:
+            case 8:
+                // InspectLeftRight action, parameter: (view angle index)
+                var viewAngleIndex = Convert.ToInt32(actionParameterBuffer.Dequeue());
+                var inspectedObjName = actionParameterBuffer.Dequeue();
+                var onLeft = actionType % 2 == 1;
+                Inspect(viewAngleIndex, inspectedObjName, onLeft);
+                break;
+        }
+
+        Assert.IsTrue(actionParameterBuffer.Count == 0);
+
+        // Waiting several more frames to ensure visual observations (containing action
+        // post-conditions) are properly captured
+        for (var i=0; i < 10; i++)
             yield return null;
-        // Waiting several more frames to ensure annotations were captured (This is
-        // somewhat ad hoc indeed... but it works)
-
-        // Wait until annotations are ready in the storage endpoint for retrieval
-        yield return new WaitUntil(() => EnvEntity.annotationStorage.annotationsUpToDate);
-
-        // Finally, update segmentation masks of all EnvEntity instances based on the data
-        // stored in the endpoint
-        EnvEntity.UpdateAnnotationsAll();
 
         // Reset flag on exit
-        _maskCapturing = false;
+        _acting = false;
+    }
+
+    protected IEnumerator UtterThenAct(int actionType)
+    {
+        // Coroutine that first invokes Utter(), waits until it finishes, and then
+        // execute specified physical action
+        // ReSharper disable once Unity.PerformanceCriticalCodeInvocation
+        yield return StartCoroutine(Utter());
+        yield return StartCoroutine(Act(actionType));
+    }
+
+    private void PickUp(GameObject targetObj, bool withLeft)
+    {
+        // Pick up a target object on the tabletop with the specified hand
+        var activeHand = withLeft ? leftHand : rightHand;
+
+        // Move target object to hand position, reassign hand as the parent,
+        // disable physics interaction
+        targetObj.transform.parent = activeHand.transform;
+        targetObj.transform.localPosition = Vector3.zero;
+        var objRigidbody = targetObj.GetComponent<Rigidbody>();
+        objRigidbody.isKinematic = true;
+        objRigidbody.detectCollisions = false;
+    }
+
+    private void Drop(bool fromLeft)
+    {
+        // Drop an object currently held in the specified hand onto the tabletop
+        var activeHand = fromLeft ? leftHand : rightHand;
+
+        // Get handle of object (implicit assumption; max one item can be held per
+        // manipulator)
+        GameObject heldObj = null;
+        foreach (Transform tr in activeHand.transform)
+        {
+            heldObj = tr.gameObject;
+            break;
+        }
+        Assert.IsNotNull(heldObj);
+
+        // Move target object above (y) some random x/z-position within the main
+        // work area partition, 'release' by nullifying the hand's child status,
+        float xPos, zPos;
+        if (heldObj.name == "truck")
+        {
+            // Assuming the tabletop is pretty much clear now...
+            xPos = 0f;
+            zPos = _mainPartitionPosition.z + 0.12f;
+        }
+        else
+        {
+            xPos = _mainPartitionPosition.x + Random.Range(-0.21f, 0.21f);
+            zPos = _mainPartitionPosition.z + Random.Range(-0.08f, 0.12f);
+        }
+        var volume = GetBoundingVolume(heldObj);
+        var yPos = _mainPartitionPosition.y + volume.extents.y + 0.06f;
+        heldObj.transform.parent = null;
+        heldObj.transform.position = new Vector3(xPos, yPos, zPos);
+
+        // Re-enable physics & fast-forward physics simulation until the object rests
+        // on the desktop
+        var objRigidbody = heldObj.GetComponent<Rigidbody>();
+        objRigidbody.isKinematic = false;
+        objRigidbody.detectCollisions = true;
+        Physics.simulationMode = SimulationMode.Script;
+        for (var i=0; i<2000; i++)
+        {
+            Physics.Simulate(Time.fixedDeltaTime);
+        }
+        Physics.simulationMode = SimulationMode.FixedUpdate;
+    }
+
+    private void Assemble(
+        string leftPoint, string rightPoint, string productName, bool rightToLeft
+    )
+    {
+        // Assemble two subassemblies held in each hand as guided by the specified
+        // target contact points, left-to-right or right-to-left
+        var leftTargetParsed = leftPoint.Split("/");
+        var rightTargetParsed = rightPoint.Split("/");
+
+        // Source & target hands and points appropriately determined by `rightToLeft` parameter
+        Transform srcHand, tgtHand;
+        string srcAtomicPart, tgtAtomicPart, srcPointName, tgtPointName;
+        if (rightToLeft)
+        {
+            srcHand = rightHand; tgtHand = leftHand;
+            srcAtomicPart = rightTargetParsed[0];
+            tgtAtomicPart = leftTargetParsed[0];
+            srcPointName = $"cp_{rightTargetParsed[1]}";
+            tgtPointName = $"cp_{leftTargetParsed[1]}";
+        }
+        else
+        {
+            srcHand = leftHand; tgtHand = rightHand;
+            srcAtomicPart = leftTargetParsed[0];
+            tgtAtomicPart = rightTargetParsed[0];
+            srcPointName = $"cp_{leftTargetParsed[1]}";
+            tgtPointName = $"cp_{rightTargetParsed[1]}";
+        }
+
+        Transform srcPoint = null; Transform tgtPoint = null;
+        foreach (var candidateEnt in srcHand.GetComponentsInChildren<EnvEntity>())
+        {
+            if (candidateEnt.gameObject.name != srcAtomicPart) continue;
+            foreach (Transform candidatePt in candidateEnt.gameObject.transform)
+            {
+                if (candidatePt.gameObject.name != srcPointName) continue;
+                srcPoint = candidatePt;
+                break;
+            }
+            if (srcPoint is not null) break;
+        }
+        foreach (var candidateEnt in tgtHand.GetComponentsInChildren<EnvEntity>())
+        {
+            if (candidateEnt.gameObject.name != tgtAtomicPart) continue;
+            foreach (Transform candidatePt in candidateEnt.gameObject.transform)
+            {
+                if (candidatePt.gameObject.name != tgtPointName) continue;
+                tgtPoint = candidatePt;
+                break;
+            }
+            if (tgtPoint is not null) break;
+        }
+        Assert.IsNotNull(srcPoint); Assert.IsNotNull(tgtPoint);
+
+        // Get relative pose (position & rotation) from source to target points, then
+        // move source hand to target pose (rotation first, translation next)
+        var relativeRotation = tgtPoint.rotation * Quaternion.Inverse(srcPoint.rotation);
+        srcHand.rotation = relativeRotation * srcHand.rotation;
+        var relativePosition = tgtPoint.position - srcPoint.position;
+        srcHand.position += relativePosition;
+
+        // Handles to subassembly objects held in source & target hands
+        GameObject srcHeld = null; GameObject tgtHeld = null;
+        foreach (Transform tr in srcHand.transform)
+        {
+            srcHeld = tr.gameObject;
+            break;
+        }
+        foreach (Transform tr in tgtHand.transform)
+        {
+            tgtHeld = tr.gameObject;
+            break;
+        }
+        Assert.IsNotNull(srcHeld); Assert.IsNotNull(tgtHeld);
+
+        // Obtain pre-assembly bounding volume for later repositioning of children parts
+        var beforeVolume = GetBoundingVolume(tgtHeld);
+
+        // Merge the two subassemblies, 'releasing' from source hand by reassigning
+        // parent transforms of parts in the source subassembly
+        var childrenParts = new List<Transform>();
+        foreach (Transform tr in srcHeld.transform) childrenParts.Add(tr);
+        foreach (var tr in childrenParts) tr.parent = tgtHeld.transform;
+
+        // Obtain post-assembly bounding volume for later repositioning of children parts
+        var afterVolume = GetBoundingVolume(tgtHeld);
+
+        // Finish merging by destroying source subassembly and renaming target subassembly
+        // with the provided string name
+        srcHeld.GetComponent<EnvEntity>().enabled = false;
+        Destroy(srcHeld);
+        tgtHeld.name = productName;
+
+        // Repositioning children prefabs in merged subassembly so the center of the
+        // bounding volume becomes origin of the local space
+        foreach (Transform child in tgtHeld.transform)
+            child.position += beforeVolume.center - afterVolume.center;
+
+        // Move back the source hand to the original pose
+        srcHand.localPosition = rightToLeft ? rightOriginalPosition : leftOriginalPosition;
+        srcHand.localEulerAngles = Vector3.zero;
+    }
+
+    private void Inspect(int viewIndex, string inspectedObjName, bool onLeft)
+    {
+        // Move the specified hand to 'observation' position, then rotate according to the
+        // specified viewing angle index. Index value of 24 indicates end of inspection,
+        // bring the hand back to the original position.
+        var activeHand = onLeft ? leftHand : rightHand;
+
+        GameObject heldObj = null;
+        foreach (Transform tr in activeHand.transform)
+        {
+            heldObj = tr.gameObject;
+            break;
+        }
+        Assert.IsNotNull(heldObj);
+        Assert.IsTrue(heldObj.name == inspectedObjName);
+
+        var distance = Vector3.Distance(
+            relativeViewCenter.position, relativeViewPoint.position
+        );
+
+        if (viewIndex == 0)
+        {
+            // Need to do at the beginning of each inspection sequence
+            inspectOriginalRotation = relativeViewCenter.rotation;
+            activeHand.position = relativeViewCenter.position;
+        }
+
+        if (viewIndex < 24)
+        {
+            // Turn hand orientation to each direction where the imaginary viewer is supposed to be
+            if (viewIndex % 8 == 0)
+            {
+                // Adjust 'viewing height' (0~7: upper, 8~16: middle, 17~24: lower)
+                var rx = (viewIndex / 8) switch
+                {
+                    0 => _cameraSensor.Camera.transform.eulerAngles.x - 30,
+                    1 => _cameraSensor.Camera.transform.eulerAngles.x,
+                    2 => _cameraSensor.Camera.transform.eulerAngles.x + 30,
+                    _ => relativeViewCenter.eulerAngles.x
+                };
+                relativeViewCenter.eulerAngles = new Vector3(rx, 0f, 0f);
+            }
+            else
+                relativeViewCenter.Rotate(Vector3.up, 45f, Space.Self);
+
+            activeHand.LookAt(relativeViewPoint, relativeViewCenter.up);
+        }
+
+        if (viewIndex == 24)
+        {
+            // Back to default poses at the end of inspection
+            activeHand.localPosition = onLeft ? leftOriginalPosition : rightOriginalPosition;
+            activeHand.localEulerAngles = Vector3.zero;
+            relativeViewPoint.localPosition = Vector3.forward * distance;
+            relativeViewCenter.rotation = inspectOriginalRotation;
+        }
+    }
+
+    protected static Bounds GetBoundingVolume(GameObject subassembly)
+    {
+        // Obtain encasing bounding volume of a subassembly GameObject (in world coordinates)
+        // Obtain bounding volume that encases all descendant meshes
+        var minCoords = Vector3.positiveInfinity;
+        var maxCoords = Vector3.negativeInfinity;
+        foreach (var mesh in subassembly.GetComponentsInChildren<MeshRenderer>())
+        {
+            // Update min/max coordinates of mesh bounds to obtain encasing volume later
+            var meshBounds = mesh.bounds;
+            minCoords = Vector3.Min(minCoords, meshBounds.min);
+            maxCoords = Vector3.Max(maxCoords, meshBounds.max);
+        }
+        var boundingVolume = new Bounds((minCoords + maxCoords) / 2, maxCoords - minCoords);
+
+        return boundingVolume;
     }
 
     // To be overridden in children classes; for packing & communicating information re.
@@ -496,6 +811,16 @@ public class DialogueAgent : Agent
         Destroy(rescaledSourceTexture);
 
         return targetMask;
+    }
+
+    private EntityRef GetMaskRef(EnvEntity ent)
+    {
+        var maskColors = ent.masks[_cameraSensor.Camera.targetDisplay];
+        var segMapBuffer = EnvEntity.annotationStorage.segMap;
+        var screenMask = ColorsToMask(segMapBuffer, maskColors);
+        var sensorMask = MaskCoordinateSwitch(screenMask, true);
+
+        return new EntityRef(sensorMask);
     }
 }
 

@@ -49,34 +49,6 @@ class VisualSceneAnalyzer(nn.Module):
             sam_model, cache_dir=os.path.join(assets_dir, "vision_models", "sam")
         )
 
-        # if "task" in self.cfg.vision:
-        #     if self.training:
-        #         # Freeze all parameters except those that need training
-        #         if self.cfg.vision.task == "rgb":
-        #             self.to_train_prefixes = [
-        #                 "embed_cls.", "embed_att.",
-        #                 "exs_prompt_encode_cls.", "exs_prompt_encode_att.",
-        #                 "exs_prompt_tag_cls.", "exs_prompt_tag_att.",
-        #                 "condition_cls_mult.", "condition_cls_add.",
-        #                 "sam.mask_decoder."
-        #             ]
-        #         elif self.cfg.vision.task == "rgb_segm_only":
-        #             self.to_train_prefixes = [
-        #                 "exs_prompt_encode_cls.", "exs_prompt_encode_att.",
-        #                 "exs_prompt_tag_cls.", "exs_prompt_tag_att.",
-        #                 "sam.mask_decoder."
-        #             ]
-        #         else:
-        #             raise NotImplementedError
-
-        #         for name, param in self.named_parameters():
-        #             param.requires_grad = any(
-        #                 name.startswith(train_param)
-        #                 for train_param in self.to_train_prefixes
-        #             )
-        #     else:
-        #         self.to_train_prefixes = []
-
         # For caching image embeddings for __forward__ inputs
         self.processed_img_cached = None
 

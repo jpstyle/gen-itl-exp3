@@ -110,7 +110,7 @@ def attempt_execute_command(agent, utt_pointer):
                 break
         else:
             # Referent denotes an environment entity
-            action_params[arg[0]] = agent.lang.dialogue.referents["env"][arg[0]]
+            action_params[arg[0]] = agent.lang.dialogue.referents["env"][-1][arg[0]]
 
     if command_executable:
         # Schedule to generate plan & execute towards fulfilling the command
@@ -214,10 +214,10 @@ def _answer_domain_Q(agent, utt_pointer, translated):
 
             # If new entities is registered as a result of visual search, update env
             # referent list
-            new_ents = set(agent.vision.scene) - set(agent.lang.dialogue.referents["env"])
+            new_ents = set(agent.vision.scene) - set(agent.lang.dialogue.referents["env"][-1])
             for ent in new_ents:
                 mask = agent.vision.scene[ent]["pred_mask"]
-                agent.lang.dialogue.referents["env"][ent] = {
+                agent.lang.dialogue.referents["env"][-1][ent] = {
                     "mask": mask,
                     "area": mask.sum().item()
                 }
@@ -304,7 +304,7 @@ def _answer_domain_Q(agent, utt_pointer, translated):
                 raise NotImplementedError
 
     # Fetch segmentation mask for the demonstratively referenced entity
-    dem_mask = agent.lang.dialogue.referents["env"][pred_var_to_ent_ref[qv]]["mask"]
+    dem_mask = agent.lang.dialogue.referents["env"][-1][pred_var_to_ent_ref[qv]]["mask"]
 
     # Push the translated answer to buffer of utterances to generate
     agent.lang.dialogue.to_generate.append(
@@ -547,7 +547,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
 
                     # Fetch mask for demonstrative reference and shift offset
                     dem_refs[(dem_offset, dem_offset+4)] = \
-                        agent.lang.dialogue.referents["env"][exps_lit.args[0][0]]["mask"]
+                        agent.lang.dialogue.referents["env"][-1][exps_lit.args[0][0]]["mask"]
                     dem_offset += len(reason_nl)
 
                 # Wrapping logical form (consequent part, to be precise) as needed
@@ -831,7 +831,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
 
                         # Add demonstrative reference and shift offset
                         dem_refs[(dem_offset, dem_offset+4)] = \
-                                agent.lang.dialogue.referents["env"][dem_ref]["mask"]
+                                agent.lang.dialogue.referents["env"][-1][dem_ref]["mask"]
                         dem_offset += len(reason_nl)
 
                     # Push the translated answer to buffer of utterances to generate; won't
