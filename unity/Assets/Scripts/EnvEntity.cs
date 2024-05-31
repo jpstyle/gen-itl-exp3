@@ -241,7 +241,7 @@ public class EnvEntity : MonoBehaviour
 
             for (var i = pathSplit.Length-1; i>=1; i--)
             {
-                if (traverser is not null && traverser.name == pathSplit[i])
+                if (traverser is not null && (pathSplit[i] == "*" || traverser.name == pathSplit[i]))
                 {
                     traverser = traverser.parent;
                 }

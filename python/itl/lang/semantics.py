@@ -97,12 +97,14 @@ class SemanticParser:
                 )
                 splits = [w[0].lower()+w[1:] for w in splits]
                 act_type = "_".join(splits)
+                # Unpack action parameters
+                act_params = act_params.split(",")
 
                 clauses = {
                     "e0": (
                         None, set(), [],
                         [
-                            ("va", act_type, ["e0", "x0", "x1"]),
+                            ("va", act_type, ["e0", "x0"] + [f"x{i+1}" for i in range(len(act_params))]),
                             ("sp", "pronoun1", ["x0"]),
                         ]
                     )
@@ -112,9 +114,8 @@ class SemanticParser:
                     "x0": { "source_evt": "e0" }
                 }
 
-                # Unpack action parameters, store original string values and attach
-                # demonstrative references where applicable
-                act_params = act_params.split(",")
+                # Store original parameter string values and attach demonstrative
+                # references where applicable
                 for pi, prm in enumerate(act_params):
                     ri = pi + 1
                     referents[f"x{ri}"] = {

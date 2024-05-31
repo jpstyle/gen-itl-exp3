@@ -78,7 +78,7 @@ public class DialogueAgent : Agent
 
     // For controlling minimal update interval, to allow visual inspection during runs
     private float _nextTimeToAct;
-    private const float TimeInterval = 0.3f;
+    private const float TimeInterval = 0.2f;
 
     // Store workplace partition info for main work area
     private readonly Vector3 _mainPartitionPosition = new(0f, 0.76f, 0.24f);
@@ -137,32 +137,8 @@ public class DialogueAgent : Agent
                 // (If any) Translate EnvEntity reference by UID to segmentation mask w.r.t.
                 // this agent's camera sensor
                 var demRefs = new Dictionary<(int, int), EntityRef>();
-                foreach (var (range, entUid) in incomingMessage.demonstrativeReferences)
-                {
-                    var refEnt = EnvEntity.FindByUid(entUid);
-                    float[] screenMask;
-                    if (refEnt.isBogus)
-                    {
-                        // Bogus entity, mask directly stores the bitmap
-                        screenMask = refEnt.masks[_cameraSensor.Camera.targetDisplay]
-                            .Select(c => c.a > 0f ? 1f : 0f).ToArray();
-                    }
-                    else
-                    {
-                        // Non-bogus entity, mask stores set of matching colors, which need to be
-                        // translated to bitmap
-                        
-                        // Retrieve referenced EnvEntity and fetch segmentation mask in absolute scale
-                        // w.r.t. this agent's camera's target display screen
-                        var maskColors = refEnt.masks[_cameraSensor.Camera.targetDisplay];
-                        var segMapBuffer = EnvEntity.annotationStorage.segMap;
-                        screenMask = ColorsToMask(segMapBuffer, maskColors);
-                        
-                    }
-                    demRefs[range] = new EntityRef(
-                        MaskCoordinateSwitch(screenMask, true)
-                    );
-                }
+                foreach (var (range, entMask) in incomingMessage.demonstrativeReferences)
+                    demRefs[range] = new EntityRef(entMask);
 
                 // Send message via side channel
                 backendMsgChannel.SendMessageToBackend(
@@ -355,7 +331,7 @@ public class DialogueAgent : Agent
                         );
 
                     if (foundEnt is null) throw new Exception("Invalid part type");
-                    responseMasks[range] = GetMaskRef(foundEnt);
+                    responseMasks[range] = new EntityRef(GetSensorMask(foundEnt));
 
                     stringPointer += req.Length;
                     if (gtMaskRequests.Count > 0) stringPointer += 2;   // Account for ", " delimiter
@@ -374,25 +350,30 @@ public class DialogueAgent : Agent
             if (demRefs is not null && demRefs.Count > 0)
             {
                 // Need to resolve demonstrative reference masks to corresponding EnvEntity (uid)
-                var demRefsResolved = new Dictionary<(int, int), string>();
+                var demRefsResolved = new Dictionary<(int, int), float[]>();
                 var targetDisplay = _cameraSensor.Camera.targetDisplay;
 
                 foreach (var (range, demRef) in demRefs)
                 {
+                    EnvEntity ent;
                     switch (demRef.refType)
                     {
                         case EntityRefType.Mask:
                             var screenMask = MaskCoordinateSwitch(demRef.maskRef, false);
                             // ReSharper disable once Unity.PerformanceCriticalCodeInvocation
-                            demRefsResolved[range] = EnvEntity.FindByMask(screenMask, targetDisplay).uid;
+                            ent = EnvEntity.FindByMask(screenMask, targetDisplay);
                             break;
                         case EntityRefType.String:
-                            demRefsResolved[range] = EnvEntity.FindByObjectPath(demRef.stringRef).uid;
+                            ent = EnvEntity.FindByObjectPath(demRef.stringRef);
                             break;
                         default:
                             // Shouldn't reach here but anyways
                             throw new Exception("Invalid reference data type?");
                     }
+
+                    // Obtain mask at the point of utterance; by the time listeners process
+                    // incoming messages, EnvEntity's GameObject may be already destroyed
+                    demRefsResolved[range] = GetSensorMask(ent);
                 }
 
                 dialogueChannel.CommitUtterance(dialogueParticipantID, utterance, demRefsResolved);
@@ -444,14 +425,18 @@ public class DialogueAgent : Agent
             case 7:
             case 8:
                 // InspectLeftRight action, parameter: (view angle index)
-                var viewAngleIndex = Convert.ToInt32(actionParameterBuffer.Dequeue());
                 var inspectedObjName = actionParameterBuffer.Dequeue();
+                var viewAngleIndex = Convert.ToInt32(actionParameterBuffer.Dequeue());
                 var onLeft = actionType % 2 == 1;
                 Inspect(viewAngleIndex, inspectedObjName, onLeft);
                 break;
         }
 
+        // All parameters consumed
         Assert.IsTrue(actionParameterBuffer.Count == 0);
+
+        // Changes made to environment, Perception cameras need capture again
+        EnvEntity.annotationStorage.annotationsUpToDate = false;
 
         // Waiting several more frames to ensure visual observations (containing action
         // post-conditions) are properly captured
@@ -638,7 +623,7 @@ public class DialogueAgent : Agent
     private void Inspect(int viewIndex, string inspectedObjName, bool onLeft)
     {
         // Move the specified hand to 'observation' position, then rotate according to the
-        // specified viewing angle index. Index value of 24 indicates end of inspection,
+        // specified viewing angle index. Index value of 16 indicates end of inspection,
         // bring the hand back to the original position.
         var activeHand = onLeft ? leftHand : rightHand;
 
@@ -662,28 +647,30 @@ public class DialogueAgent : Agent
             activeHand.position = relativeViewCenter.position;
         }
 
-        if (viewIndex < 24)
+        if (viewIndex < 16)
         {
             // Turn hand orientation to each direction where the imaginary viewer is supposed to be
-            if (viewIndex % 8 == 0)
+            if (viewIndex % 4 == 0)
             {
-                // Adjust 'viewing height' (0~7: upper, 8~16: middle, 17~24: lower)
-                var rx = (viewIndex / 8) switch
+                // Adjust 'viewing height' (0~3: upper-high, 4~7: upper-low, 8~11: lower-low, 12~15:
+                // lower-high)
+                var rx = (viewIndex / 4) switch
                 {
-                    0 => _cameraSensor.Camera.transform.eulerAngles.x - 30,
-                    1 => _cameraSensor.Camera.transform.eulerAngles.x,
-                    2 => _cameraSensor.Camera.transform.eulerAngles.x + 30,
+                    0 => _cameraSensor.Camera.transform.eulerAngles.x - 45f,
+                    1 => _cameraSensor.Camera.transform.eulerAngles.x - 22.5f,
+                    2 => _cameraSensor.Camera.transform.eulerAngles.x + 22.5f,
+                    3 => _cameraSensor.Camera.transform.eulerAngles.x + 45f,
                     _ => relativeViewCenter.eulerAngles.x
                 };
                 relativeViewCenter.eulerAngles = new Vector3(rx, 0f, 0f);
             }
             else
-                relativeViewCenter.Rotate(Vector3.up, 45f, Space.Self);
+                relativeViewCenter.Rotate(Vector3.up, 90f, Space.Self);
 
             activeHand.LookAt(relativeViewPoint, relativeViewCenter.up);
         }
 
-        if (viewIndex == 24)
+        if (viewIndex == 16)
         {
             // Back to default poses at the end of inspection
             activeHand.localPosition = onLeft ? leftOriginalPosition : rightOriginalPosition;
@@ -813,14 +800,28 @@ public class DialogueAgent : Agent
         return targetMask;
     }
 
-    private EntityRef GetMaskRef(EnvEntity ent)
+    private float[] GetSensorMask(EnvEntity ent)
     {
-        var maskColors = ent.masks[_cameraSensor.Camera.targetDisplay];
-        var segMapBuffer = EnvEntity.annotationStorage.segMap;
-        var screenMask = ColorsToMask(segMapBuffer, maskColors);
-        var sensorMask = MaskCoordinateSwitch(screenMask, true);
+        float[] entMask;
+        if (ent.isBogus)
+        {
+            // Bogus entity, mask directly stores the bitmap
+            entMask = ent.masks[_cameraSensor.Camera.targetDisplay]
+                .Select(c => c.a > 0f ? 1f : 0f).ToArray();
+        }
+        else
+        {
+            // Non-bogus entity, mask stores set of matching colors, which need to be
+            // translated to bitmap
 
-        return new EntityRef(sensorMask);
+            // Retrieve referenced EnvEntity and fetch segmentation mask in absolute scale
+            // w.r.t. this agent's camera's target display screen
+            var maskColors = ent.masks[_cameraSensor.Camera.targetDisplay];
+            var segMapBuffer = EnvEntity.annotationStorage.segMap;
+            entMask = ColorsToMask(segMapBuffer, maskColors);
+            entMask = MaskCoordinateSwitch(entMask, true);
+        }
+
+        return entMask;
     }
 }
-

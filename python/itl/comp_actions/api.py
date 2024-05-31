@@ -40,3 +40,5 @@ class CompositeActions:
         return handle_neologism(self.agent, novel_concepts, dialogue_state)
     def report_neologism(self, neologism):
         return report_neologism(self.agent, neologism)
+    def analyze_demonstration(self, demo):
+        return analyze_demonstration(self.agent, demo)

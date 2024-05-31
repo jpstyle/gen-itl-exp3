@@ -26,7 +26,6 @@ from collections import defaultdict
 from itertools import product
 
 import hydra
-import cv2 as cv
 import numpy as np
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
@@ -137,23 +136,9 @@ def main(cfg):
             [x_val, y_val, 0] for y_val, x_val in product(y_grid, x_grid)   # Row-major
         ], dtype=np.float32)] * len(calib_images)
 
-        points_2d = []
-        refinement_criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-        for img in calib_images:
-            # Find corners from image, then refine the 2d coordinates with grayscale version
-            gray = cv.cvtColor(img, cv.COLOR_RGB2GRAY)
-            found, corners = cv.findChessboardCorners(img, (7, 6), None)
-            if not found:
-                # Generally happens if the chessboard texture doesn't have 'border area'
-                raise ValueError("Calibration chessboard pattern not found")
-            corners = cv.cornerSubPix(gray, corners, (11, 11), (-1, -1), refinement_criteria)
-
-            points_2d.append(corners)
-
-        # Obtain camera calibration results
-        _, cam_K, distortion_coeffs, _, _ = cv.calibrateCamera(
-            points_3d, points_2d, gray.shape[::-1], None, None
-        )
+        # Camera intrinsics will be stored in vision module
+        student.vision.calibrate_camera(calib_images, points_3d)
+        
     else:
         # Skipping camera calibration step by using parameters obtained in advance...
         cam_K = np.array([
@@ -164,6 +149,7 @@ def main(cfg):
         distortion_coeffs = np.array([
             [0.00215, -0.00090, 0.00015, -0.00020, -0.00490]
         ])
+        student.vision.camera_intrinsics = (cam_K, distortion_coeffs)
 
     # Send end-of-request signal so that agent's default position is ensured and
     # chessboard pattern object is deactivated

@@ -215,7 +215,9 @@ class SymbolicReasonerModule:
         best_assignment = { args[0][0]: args[1][0] for args in best_assignment }
         best_assignment.update({
             rf: None for rf in dialogue_state.referents["dis"]
-            if rf not in best_assignment
+            if rf not in best_assignment and rf not in self.value_assignment
+                # List all unlisted discourse referents so that they are not included in
+                # the symbol grounding program again
         })
 
         tok2sym_map = [atom.args[:2] for atom in opt_models[0] if atom.name == "pred_token"]

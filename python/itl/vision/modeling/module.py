@@ -449,7 +449,7 @@ def _crop_exemplars_by_masks(exemplar_prompts):
 
 
 def _patch_matching(
-        cropped_images, cropped_masks, orig_size, device,
+        images, masks, orig_size, device,
         dino_model, dino_processor, dino_embs, dino_config
     ):
     """
@@ -461,12 +461,12 @@ def _patch_matching(
     # Process the cropped exemplar images with the image encoder module to obtain
     # patch-level embeddings
     lr_dim = 32; resize_target = lr_dim * dino_config.patch_size
-    cropped_images_processed = dino_processor.preprocess(
-        images=cropped_images,
+    images_processed = dino_processor.preprocess(
+        images=images,
         do_resize=True, size={ "shortest_edge": resize_target }, return_tensors="pt"
     )
     ex_dino_out = dino_model(
-        cropped_images_processed.pixel_values.to(device), return_dict=True
+        images_processed.pixel_values.to(device), return_dict=True
     )
     ex_patch_embs = ex_dino_out.last_hidden_state[:,1:]
 
@@ -478,7 +478,7 @@ def _patch_matching(
     # Flatten exemplar masks to 1 dimension
     ex_masks_flattened = [
         cv2.resize(msk, (lr_dim, lr_dim), interpolation=cv2.INTER_NEAREST_EXACT)
-        for msk in cropped_masks
+        for msk in masks
     ]
     ex_masks_flattened = np.concatenate([
         msk_resized.reshape(-1).astype(bool)

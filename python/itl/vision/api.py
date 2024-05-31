@@ -8,13 +8,19 @@ import os
 import logging
 from PIL import Image
 from itertools import product
+from collections import defaultdict
 
 import torch
+import pycolmap
+import cv2 as cv
 import numpy as np
+import torch.nn.functional as F
 from pycocotools import mask
+from scipy.optimize import linear_sum_assignment
 
 from .modeling import VisualSceneAnalyzer
 from .utils.visualize import visualize_sg_predictions
+from .utils.colmap_database import COLMAPDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,8 @@ class VisionModule:
         
         if torch.cuda.is_available():
             self.model = self.model.to("cuda")
+
+        self.camera_intrinsics = None
 
         self.confusions = set()
 
@@ -447,6 +455,216 @@ class VisionModule:
                 self.scene[oi]["pred_rel"][oj][0] = intersection_A / mask2_A
                 self.scene[oj]["pred_rel"][oi][0] = intersection_A / mask1_A
 
+    def reconstruct_3d_structure(self, images, masks, viewpoint_poses, con_graph):
+        """
+        Given lists of images & binary masks of an object viewed from different
+        viewpoints and the poses of the viewpoints, estimate the (approximate) 3D
+        structure of the object, represented as a point cloud. Also provided with
+        an undirected graph that represents pairs of images to be cross-referenced.
+
+        Steps: 1) Obtain patch-level features from the feature extraction module,
+        2) obtain matches between patches on feature basis, 3) invoke pycolmap's
+        geometric verification & point triangulation methods based on the matches.
+        """
+        assert len(images) == len(masks) == len(viewpoint_poses) == len(con_graph.nodes)
+
+        dino_config = self.model.dino.config
+        dino_processor = self.model.dino_processor
+        dino_model = self.model.dino
+
+        # Crop images & masks according to masks, effectively zooming in
+        image_extents = (images[0].width / 2, images[0].height / 2)
+        masks_extents = sum(masks.values()).nonzero()
+        x_min = masks_extents[1].min(); x_max = masks_extents[1].max()
+        y_min = masks_extents[0].min(); y_max = masks_extents[0].max()
+        x_extent = max(image_extents[0]-x_min, x_max-image_extents[0])
+        x_extent = min(x_extent * 1.05, image_extents[0])
+        y_extent = max(image_extents[1]-y_min, y_max-image_extents[1])
+        y_extent = min(y_extent * 1.05, image_extents[1])
+        x_min_z = int(image_extents[0]-x_extent)
+        x_max_z = int(image_extents[0]+x_extent)
+        y_min_z = int(image_extents[1]-y_extent)
+        y_max_z = int(image_extents[1]+y_extent)
+
+        zoomed_images = [
+            images[i].crop((x_min_z, y_min_z, x_max_z, y_max_z))
+            for i in range(len(images))
+        ]
+        zoomed_masks = [
+            masks[i][y_min_z:y_max_z, x_min_z:x_max_z]
+            for i in range(len(images))
+        ]
+
+        # Process zoomed images and extract features
+        height_lr = 36; resize_target = height_lr * dino_config.patch_size
+        images_processed = dino_processor.preprocess(
+            images=[zoomed_images[i] for i in range(len(images))],
+            do_resize=True, size={ "shortest_edge": resize_target }, return_tensors="pt"
+        )
+
+        with torch.no_grad():
+            # Iterating over all edges (image pairs), starting from ones involving
+            # lowest-degree nodes
+            node_unprocessed_neighbors = { n: set(con_graph.adj[n]) for n in con_graph.nodes }
+            rough_matches = {}        # To store inter-patch matches, later to be verified
+
+            # Extract patch-level features from the images and resize masks
+            features = dino_model(
+                images_processed.pixel_values.to(dino_model.device), return_dict=True
+            ).last_hidden_state[:,1:]
+            width_lr = int(features.shape[1] / height_lr)
+
+            masks_resized = [
+                cv.resize(
+                    zoomed_masks[i].astype(int), (width_lr, height_lr),
+                    interpolation=cv.INTER_NEAREST_EXACT
+                )
+                for i in range(len(masks))
+            ]
+            masks_flattened = [msk.reshape(-1).astype(bool) for msk in masks_resized]
+
+            # Iterate until no unprocessed edges are left
+            point_coords = defaultdict(dict)
+            while not all(len(neighbors)==0 for neighbors in node_unprocessed_neighbors.values()):
+                # Fetch a node with the currently lowest degree w.r.t. unprocessed neighbors
+                lowest_degree_nodes = sorted(
+                    [n for n in con_graph.nodes if len(node_unprocessed_neighbors[n]) > 0],
+                    key=lambda x: len(node_unprocessed_neighbors[x])
+                )
+                u = lowest_degree_nodes[0]
+                nonzero_inds_u = masks_flattened[u].nonzero()[0]
+
+                # Iterate over unprocessed connected neighbors
+                processed_edges = set()
+                for v in node_unprocessed_neighbors[u]:
+                    # Feature matching; first compute cosine similarities between patches
+                    features_nrm_u = F.normalize(features[u].reshape(-1, dino_config.hidden_size))
+                    features_nrm_v = F.normalize(features[v].reshape(-1, dino_config.hidden_size))
+                    S = (features_nrm_u @ features_nrm_v.t()).cpu()
+                    # Forward matching
+                    match_forward = linear_sum_assignment(S[masks_flattened[u]], maximize=True)
+                    # Reverse matching
+                    match_reverse = linear_sum_assignment(S.t()[match_forward[1]], maximize=True)
+                    # Mask filtering
+                    retain_inds = np.isin(match_reverse[1], nonzero_inds_u)
+                    # Fetch and unflatten matched patch indices
+                    matched_patches_u = np.stack([
+                        nonzero_inds_u[match_forward[0][retain_inds]] % width_lr,
+                        nonzero_inds_u[match_forward[0][retain_inds]] // width_lr,
+                        nonzero_inds_u[match_forward[0][retain_inds]]
+                    ], axis=1)
+                    matched_patches_v = np.stack([
+                        match_forward[1][retain_inds] % width_lr,
+                        match_forward[1][retain_inds] // width_lr,
+                        match_forward[1][retain_inds]
+                    ], axis=1)
+
+                    # Record matches
+                    ratio = zoomed_images[0].height / height_lr
+                    rough_matches[(u, v)] = []
+                    for (x_u, y_u, i_u), (x_v, y_v, i_v) in zip(matched_patches_u, matched_patches_v):
+                        rough_matches[(u, v)].append((i_u, i_v))
+                        point_coords[u][i_u] = np.array([
+                            [x_min_z + (x_u+0.5) * ratio, y_min_z + (y_u+0.5) * ratio]
+                        ])
+                        point_coords[v][i_v] = np.array([
+                            [x_min_z + (x_v+0.5) * ratio, y_min_z + (y_v+0.5) * ratio]
+                        ])
+
+                    processed_edges.add((u, v))
+
+                # Check off processed edges                
+                for u, v in processed_edges:
+                    node_unprocessed_neighbors[u].remove(v)
+                    node_unprocessed_neighbors[v].remove(u)
+
+        # Call pycolmap methods needed for 3D reconstruction; first prepare directory
+        # structure properly containing necessary data
+        colmap_path = os.path.join(self.cfg.paths.outputs_dir, "colmap")
+        os.makedirs(colmap_path, exist_ok=True)
+        # Create empty points3D.txt file
+        with open(os.path.join(colmap_path, "points3D.txt"), mode='w'): pass
+        # Create cameras.txt file and add camera info
+        with open(os.path.join(colmap_path, "cameras.txt"), mode='w') as cams_txt_f:
+            assert self.camera_intrinsics is not None
+            cam_K, distortion_coeffs = self.camera_intrinsics
+            fx = cam_K[0][0]; fy = cam_K[1][1]; cx = cam_K[0][2]; cy = cam_K[1][2]
+            k1, k2, p1, p2, *_ = distortion_coeffs[0]
+            line = "1 OPENCV 800 600 "
+            line += f"{fx:.5f} {fy:.5f} {cx:.5f} {cy:.5f} {k1:.5f} {k2:.5f} {p1:.5f} {p2:.5f}"
+            cams_txt_f.write(line + "\n")
+        # Create images.txt file and add image info
+        with open(os.path.join(colmap_path, "images.txt"), mode='w') as imgs_txt_f:
+            for id in images:
+                (qw, qx, qy, qz), (tx, ty, tz) = viewpoint_poses[id]
+                line = f"{id+1} {qw:.5f} {qx:.5f} {qy:.5f} {qz:.5f} "
+                line += f"{tx:.5f} {ty:.5f} {tz:.5f} 1 {id+1}.png"
+                imgs_txt_f.write(line + "\n\n")
+        # Create a subdirectory and save image files there
+        os.makedirs(os.path.join(colmap_path, "images"), exist_ok=True)
+        for id, img in images.items():
+            img.save(os.path.join(colmap_path, "images", f"{id+1}.png"))
+
+        # pycolmap reconstruction object
+        reconstruction = pycolmap.Reconstruction(colmap_path)
+
+        # Initialize a SQL database, populate with cameras, images and keypoints info
+        colmap_db = COLMAPDatabase(os.path.join(colmap_path, "database.db"))
+        colmap_db.create_tables()
+        for cam in reconstruction.cameras.values():
+            colmap_db.add_camera(
+                cam.model.value, cam.width, cam.height, cam.params,
+                camera_id=cam.camera_id, prior_focal_length=True    # Calibrated camera
+            )
+        for img in reconstruction.images.values():
+            qx, qy, qz, qw = img.cam_from_world.rotation.quat
+            txyz = img.cam_from_world.translation
+            colmap_db.add_image(
+                img.name, img.camera_id, prior_q=[qw, qx, qy, qz], prior_t=txyz,
+                image_id=img.image_id
+            )
+        n2db_map = defaultdict(dict); db2n_map = defaultdict(dict)
+        for n, points in point_coords.items():
+            colmap_db.add_keypoints(n+1, np.concatenate(list(points.values())))
+            for i_db, i_n in enumerate(points):
+                n2db_map[n][i_db] = i_n; db2n_map[n][i_n] = i_db
+
+        # Geometric verification by pycolmap two-view geometry estimation
+        for (u, v), matches in rough_matches.items():
+            # Verified matches stored as inlier_matches
+            two_view_geom = pycolmap.estimate_two_view_geometry(
+                reconstruction.cameras[1],
+                np.concatenate([
+                    point_coords[u][n2db_map[u][i]] for i in range(len(n2db_map[u]))
+                ]),
+                reconstruction.cameras[1],
+                np.concatenate([
+                    point_coords[v][n2db_map[v][i]] for i in range(len(n2db_map[v]))
+                ]),
+                np.array([[db2n_map[u][i_u], db2n_map[v][i_v]] for i_u, i_v in matches])
+            )
+
+            # Add matches data to colmap db
+            colmap_db.add_matches(u+1, v+1, two_view_geom.inlier_matches)
+
+            # Add verification results to colmap db
+            colmap_db.add_two_view_geometry(
+                u+1, v+1,
+                two_view_geom.inlier_matches,
+                F=two_view_geom.F, E=two_view_geom.E, H=two_view_geom.H
+            )
+
+        colmap_db.commit()
+
+        reconstructed_structure = pycolmap.triangulate_points(
+            reconstruction,
+            os.path.join(colmap_path, "database.db"),
+            os.path.join(colmap_path, "images"),
+            colmap_path
+        )
+
+        return
+
     def add_concept(self, conc_type):
         """
         Register a novel visual concept to the model, expanding the concept inventory of
@@ -461,6 +679,30 @@ class VisionModule:
         C = getattr(self.inventories, conc_type)
         setattr(self.inventories, conc_type, C+1)
         return C
+
+    def calibrate_camera(self, images, points_3d):
+        """
+        Compute camera intrinsic parameters from a set of chessboard images and 3d
+        coordinates of chessboard corners, store results in module
+        """
+        points_2d = []
+        refinement_criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        for img in images:
+            # Find corners from image, then refine the 2d coordinates with grayscale version
+            gray = cv.cvtColor(img, cv.COLOR_RGB2GRAY)
+            found, corners = cv.findChessboardCorners(img, (7, 6), None)
+            if not found:
+                # Generally happens if the chessboard texture doesn't have 'border area'
+                raise ValueError("Calibration chessboard pattern not found")
+            corners = cv.cornerSubPix(gray, corners, (11, 11), (-1, -1), refinement_criteria)
+
+            points_2d.append(corners)
+
+        # Obtain camera calibration results and store to module
+        _, cam_K, distortion_coeffs, _, _ = cv.calibrateCamera(
+            points_3d, points_2d, gray.shape[::-1], None, None
+        )
+        self.camera_intrinsics = (cam_K, distortion_coeffs)
 
 
 class VisualConceptInventory:

@@ -4,18 +4,51 @@ referring to belief updates that modify long-term memory
 """
 import re
 import math
+from math import sin, cos, radians, pi
 from itertools import permutations
 from collections import defaultdict
 
 import inflect
+import networkx as nx
 
 from ..lpmln import Literal
 from ..lpmln.utils import flatten_cons_ante, wrap_args
 
 
-EPS = 1e-10                  # Value used for numerical stabilization
-SR_THRES = 0.8               # Mismatch surprisal threshold
-U_IN_PR = 0.99               # How much the agent values information provided by the user
+EPS = 1e-10                 # Value used for numerical stabilization
+SR_THRES = 0.8              # Mismatch surprisal threshold
+U_IN_PR = 0.99              # How much the agent values information provided by the user
+
+# Pre-specified poses (quaternion & position pair) of 3D inspection viewpoints (total 16)
+R = 0.3
+H1 = 0.92388; H2 = 0.38268; L1 = 0.98079; L2 = 0.19509
+VP_POSES = [
+    ## (qw/qx/qy/qz quaternion, tx/ty/tz position); rotation first, then translation
+    # 'Lower-high' loop
+    ((H1, H2, 0, 0), (0, 0, R)),
+    ((H1*cos(pi/4), H2*cos(pi/4), H1*sin(pi/4), H2*sin(pi/4)), (0, 0, R)),
+    ((0, 0, H1, H2), (0, 0, R)),
+    ((H1*cos(3*pi/4), H2*cos(3*pi/4), H1*sin(3*pi/4), H2*sin(3*pi/4)), (0, 0, R)),
+    # 'Lower-low' loop
+    ((L1, L2, 0, 0), (0, 0, R)),
+    ((L1*cos(pi/4), L2*cos(pi/4), L1*sin(pi/4), L2*sin(pi/4)), (0, 0, R)),
+    ((0, 0, L1, L2), (0, 0, R)),
+    ((L1*cos(3*pi/4), L2*cos(3*pi/4), L1*sin(3*pi/4), L2*sin(3*pi/4)), (0, 0, R)),
+    # 'Upper-low' loop
+    ((L1, -L2, 0, 0), (0, 0, R)),
+    ((L1*cos(pi/4), -L2*cos(pi/4), L1*sin(pi/4), -L2*sin(pi/4)), (0, 0, R)),
+    ((0, 0, L1, -L2), (0, 0, R)),
+    ((L1*cos(3*pi/4), -L2*cos(3*pi/4), L1*sin(3*pi/4), -L2*sin(3*pi/4)), (0, 0, R)),
+    # 'Upper-high' loop
+    ((H1, -H2, 0, 0), (0, 0, R)),
+    ((H1*cos(pi/4), -H2*cos(pi/4), H1*sin(pi/4), -H2*sin(pi/4)), (0, 0, R)),
+    ((0, 0, H1, -H2), (0, 0, R)),
+    ((H1*cos(3*pi/4), -H2*cos(3*pi/4), H1*sin(3*pi/4), -H2*sin(3*pi/4)), (0, 0, R))
+]
+# Connectivity graph that represents pairs of 3D inspection images to be cross-referenced
+CON_GRAPH = nx.Graph()
+for i in range(4):
+    CON_GRAPH.add_edge(i, i+4); CON_GRAPH.add_edge(i+4, i+8); CON_GRAPH.add_edge(i+8, i+12)
 
 # Recursive helper methods for checking whether rule cons/ante is grounded (variable-
 # free), lifted (all variables), contains any predicate referent as argument, or uses
@@ -635,6 +668,89 @@ def report_neologism(agent, neologism):
             {}
         )
     )
+
+
+def analyze_demonstration(agent, demo_data):
+    """
+    Learn from demonstration; agent is provided with (full) demonstration represented
+    as a pre-segmented & annotated sequence of atomic actions along with time-aligned
+    visual observations. Learning outcomes to be extracted include: 2D, 3D features
+    of novel part concepts, structure (constituent parts and their arrangements and
+    contant constraints) of desired target goal concept, and any symbolic constraints
+    that apply among different concepts.
+    """
+    referents = agent.lang.dialogue.referents       # Shortcut for quick access
+
+    prev_img = None         # Stores previous steps' visual observations
+    prev_action = None      # Stores previous steps' action labeling
+    inspect_data = { "img": {}, "msk": {} }
+            # Buffer of 3d object instance views from inspect_~ actions
+
+    for img, annotations, env_refs in demo_data:
+        # Appropriately handle each annotation
+        for (_, _, ante, cons), raw, mood in annotations:
+            # Nothing to do with non-indicative annotations
+            if mood != ".": continue
+            # Nothing to do with initial declaration of demonstration
+            if raw.startswith("I will demonstrate"): continue
+
+            if ante is None:
+                # Non-quantified statement without antecedent
+                if raw.startswith("# Action:"):
+                    # Basic (non-NL) action annotation specifying atomic action type
+                    # and parameters
+                    for lit in cons:
+                        conc_type, conc_ind = lit.name.split("_")
+
+                        # Only address action concepts
+                        if conc_type != "arel": continue
+                        conc_ind = int(conc_ind)
+
+                        # Handle each action accordingly (actions 1~8 to be handled
+                        # in our scope)
+                        match conc_ind:
+                            case 1 | 2:
+                                # pick_up_~ action
+                                print(0)
+
+                            case 3 | 4:
+                                # drop_~ action
+                                print(0)
+
+                            case 5 | 6:
+                                # assemble_~ action
+                                print(0)
+
+                            case 7 | 8:
+                                # inspect_~ action
+                                viewed_obj = lit.args[2][0]
+                                view_ind = int(referents["dis"][lit.args[3][0]]["name"])
+                                if view_ind < 16:
+                                    inspect_data["img"][view_ind] = img
+                                if view_ind > 0:
+                                    inspect_data["msk"][view_ind-1] = env_refs[viewed_obj]["mask"]
+
+                        prev_action = (conc_ind, )
+
+                else:
+                    # Additional natural language annotation, providing labeling of
+                    # object instances of interest
+                    raise NotImplementedError
+            else:
+                # Quantified statement without antecedent; expecting a generic rule
+                # expressed in natural language in the scope of our experiment
+                raise NotImplementedError
+
+        if len(inspect_data["img"]) == 16 and len(inspect_data["msk"]) == 16:
+            # Reconstruct 3D structure of the inspected object instance
+            agent.vision.reconstruct_3d_structure(
+                inspect_data["img"], inspect_data["msk"], VP_POSES, CON_GRAPH
+            )
+
+            # Make way for a new one
+            inspect_data = { "img": {}, "msk": {} }
+
+        prev_img = img
 
 
 def _add_scene_and_exemplars(

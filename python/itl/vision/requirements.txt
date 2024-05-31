@@ -7,5 +7,6 @@ scikit-image
 matplotlib
 pycocotools
 pycolmap
+open3d-python
 hydra-core
 omegaconf

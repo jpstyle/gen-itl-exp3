@@ -330,6 +330,9 @@ class ITLAgent:
                         if ti >= demo_ti
                     ]
 
+                    # All parts of learning from demonstration take place here
+                    self.comp_actions.analyze_demonstration(aligned_demo_data)
+
                     # Back to normal execution mode
                     self.observed_demo = None
 

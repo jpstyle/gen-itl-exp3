@@ -11,7 +11,7 @@ public class DialogueChannel : ScriptableObject
     public List<DialogueAgent> dialogueParticipants;
 
     public void CommitUtterance(
-        string speaker, string inputString, Dictionary<(int, int), string> optionalDemRefs = null
+        string speaker, string inputString, Dictionary<(int, int), float[]> optionalDemRefs = null
     )
     {
         // Create a new record containing the utterance data
@@ -20,15 +20,15 @@ public class DialogueChannel : ScriptableObject
         inputRecord.utterance = inputString;
         if (optionalDemRefs is null)
         {
-            var empty = new Dictionary<(int, int), string>();
+            var empty = new Dictionary<(int, int), float[]>();
             inputRecord.demonstrativeReferences =
-                new ReadOnlyDictionary<(int, int), string>(empty);
+                new ReadOnlyDictionary<(int, int), float[]>(empty);
         }
         else
         {
             // Use provided demRefs, without refreshing current one in dialogue channel
             inputRecord.demonstrativeReferences =
-                new ReadOnlyDictionary<(int, int), string>(optionalDemRefs);
+                new ReadOnlyDictionary<(int, int), float[]>(optionalDemRefs);
         }
 
         // Broadcast the record to all audience members

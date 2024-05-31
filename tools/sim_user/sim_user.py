@@ -198,10 +198,10 @@ class SimulatedTeacher:
                     response.append((act_type, { "parameters": act_params }))
                     # Annotate physical action to be executed for this step, communicated
                     # to agent along with the action
+                    offset = len(f"# Action: {act_type}")
                     if act_type.startswith("PickUp"):
                         # For PickUp~ actions, provide demonstrative reference by string path
                         # to target GameObject (which will be converted into binary mask)
-                        offset = len(f"# Action: {act_type}")
                         act_anno = {
                             "utterance": f"# Action: {act_type}(target)",
                             "pointing": { (offset+1, offset+7): "/" + act_params[0] }
@@ -210,14 +210,21 @@ class SimulatedTeacher:
                         # For Assemble~ actions, provide contact point info, specified by
                         # (atomic part supertype, string identifier) pair
                         act_anno = {
-                            "utterance": f"# Action: {act_type}({act_params[0]},{act_params[1]})",
-                            "pointing": {}
+                            "utterance": f"# Action: {act_type}(target_l,target_r)",
+                            "pointing": {
+                                (offset+1, offset+9): "/Teacher Agent/Left Hand/*",
+                                (offset+10, offset+18): "/Teacher Agent/Right Hand/*"
+                            }
                         }
                     elif act_type.startswith("Inspect"):
                         # For Inspect~ actions, provide integer index of (relative) viewpoint
+                        hand = "Left" if act_type.endswith("Left") else "Right"
+                        path_prefix = f"/Teacher Agent/{hand} Hand"
                         act_anno = {
-                            "utterance": f"# Action: {act_type}({act_params[0]})",
-                            "pointing": {}
+                            "utterance": f"# Action: {act_type}(target,{act_params[1]})",
+                            "pointing": {
+                                (offset+1, offset+7): "/".join([path_prefix, "*"])
+                            }
                         }
                     else:
                         # No parameter info to communicate, just annotate action type
@@ -755,8 +762,8 @@ def _sample_demo_plan(sampled_parts):
                     introduced_subtypes.add(subtype)
                     hand = "Left" if action[0].endswith("Left") else "Right"
                     plan += [
-                        (f"Inspect{hand}", (str(i), f"t_{instance[0]}_{instance[1]}"))
-                        for i in range(25)
+                        (f"Inspect{hand}", (f"t_{instance[0]}_{instance[1]}", str(i)))
+                        for i in range(17)
                     ]
 
             else:
