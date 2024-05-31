@@ -4,7 +4,7 @@ referring to belief updates that modify long-term memory
 """
 import re
 import math
-from math import sin, cos, radians, pi
+from math import sin, cos, pi
 from itertools import permutations
 from collections import defaultdict
 
@@ -20,8 +20,8 @@ SR_THRES = 0.8              # Mismatch surprisal threshold
 U_IN_PR = 0.99              # How much the agent values information provided by the user
 
 # Pre-specified poses (quaternion & position pair) of 3D inspection viewpoints (total 16)
-R = 0.3
-H1 = 0.92388; H2 = 0.38268; L1 = 0.98079; L2 = 0.19509
+R = 0.3; theta_H = pi/4; theta_L = pi/8
+H1 = cos(theta_H/2); H2 = sin(theta_H/2); L1 = cos(theta_L/2); L2 = sin(theta_L/2)
 VP_POSES = [
     ## (qw/qx/qy/qz quaternion, tx/ty/tz position); rotation first, then translation
     # 'Lower-high' loop
@@ -49,6 +49,8 @@ VP_POSES = [
 CON_GRAPH = nx.Graph()
 for i in range(4):
     CON_GRAPH.add_edge(i, i+4); CON_GRAPH.add_edge(i+4, i+8); CON_GRAPH.add_edge(i+8, i+12)
+CON_GRAPH.add_edge(12, 13); CON_GRAPH.add_edge(1, 2)
+CON_GRAPH.add_edge(14, 15); CON_GRAPH.add_edge(3, 0)
 
 # Recursive helper methods for checking whether rule cons/ante is grounded (variable-
 # free), lifted (all variables), contains any predicate referent as argument, or uses
@@ -743,7 +745,7 @@ def analyze_demonstration(agent, demo_data):
 
         if len(inspect_data["img"]) == 16 and len(inspect_data["msk"]) == 16:
             # Reconstruct 3D structure of the inspected object instance
-            agent.vision.reconstruct_3d_structure(
+            reconstruction = agent.vision.reconstruct_3d_structure(
                 inspect_data["img"], inspect_data["msk"], VP_POSES, CON_GRAPH
             )
 

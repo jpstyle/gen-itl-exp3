@@ -5,6 +5,42 @@ from itertools import product
 import numpy as np
 
 
+def crop_images_by_masks(images, masks):
+    """
+    Crop each image by area specified by the corresponding mask (encasing bounding
+    box). Return cropped images along with cropped masks, and coordinates of
+    cropping box boundaries. Each image is a PIL.Image instance, each mask is
+    a two-dimensional binary mask (H * W)
+    """
+    assert len(images) == len(masks)
+    assert all(
+        img.width==masks[i].shape[1] and img.height==masks[i].shape[0]
+        for i, img in images.items()
+    )
+
+    cropped_images = []; cropped_masks = []; dimensions = []
+    for i, img in images.items():
+        # Get mask extents
+        msk = masks[i]
+        mask_extents = msk.nonzero()
+        x_min = mask_extents[1].min(); x_max = mask_extents[1].max()
+        y_min = mask_extents[0].min(); y_max = mask_extents[0].max()
+        crop_width = x_max - x_min; crop_height = y_max - y_min
+
+        # Bounding box extremities; 10% margin of width and height
+        left = max(0, int(x_min - crop_width*0.1))
+        right = min(img.width, int(x_max + crop_width*0.1))
+        top = max(0, int(y_min - crop_height*0.1))
+        bottom = min(img.height, int(y_max + crop_height*0.1))
+
+        # Append values to return lists
+        cropped_images.append(img.crop((left, top, right, bottom)))
+        cropped_masks.append(msk[top:bottom, left:right])
+        dimensions.append((left, right, top, bottom))
+
+    return cropped_images, cropped_masks, dimensions
+
+
 def masks_bounding_boxes(masks):
     """
     Axis-aligned bounding boxes (in xyxy format) from min/max indices for nonzero
@@ -61,15 +97,3 @@ def mask_nms(masks, scores, iou_thres):
         queue = queue[ious < iou_thres]
 
     return kept_indices
-
-
-def flatten_cfg(cfg_entry, prefix=None):
-    """ For flattening nested config dict using '.' as separator """
-    if isinstance(cfg_entry, dict):
-        return {
-            f"{prefix}.{in_k}" if prefix is not None else in_k: in_v
-            for k, v in cfg_entry.items()
-            for in_k, in_v in flatten_cfg(v, k).items()
-        }
-    else:
-        return { prefix: cfg_entry }
