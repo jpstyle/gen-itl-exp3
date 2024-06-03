@@ -32,9 +32,9 @@ RUN apt install -y x11-xserver-utils
 RUN useradd --create-home nonroot
 
 # Import the repository content
-RUN mkdir -p /home/nonroot/ns-arch-unity
+RUN mkdir -p /home/nonroot/semantic-assembler
 RUN mkdir -p /mnt/data_volume
-WORKDIR /home/nonroot/ns-arch-unity
+WORKDIR /home/nonroot/semantic-assembler
 COPY . .
 RUN chown -R nonroot /home/nonroot
 RUN chown -R nonroot /mnt/data_volume

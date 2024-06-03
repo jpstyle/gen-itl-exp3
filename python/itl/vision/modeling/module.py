@@ -4,7 +4,7 @@ import pickle
 from PIL import Image
 from itertools import product
 
-import cv2
+import cv2 as cv
 import numpy as np
 import torch
 import torch.nn as nn
@@ -477,7 +477,7 @@ def _patch_matching(
 
     # Flatten exemplar masks to 1 dimension
     ex_masks_flattened = [
-        cv2.resize(msk, (lr_dim, lr_dim), interpolation=cv2.INTER_NEAREST_EXACT)
+        cv.resize(msk, (lr_dim, lr_dim), interpolation=cv.INTER_NEAREST_EXACT)
         for msk in masks
     ]
     ex_masks_flattened = np.concatenate([

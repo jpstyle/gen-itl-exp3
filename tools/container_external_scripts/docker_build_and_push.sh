@@ -1,3 +1,3 @@
 #!/bin/bash
-docker build --tag jpstyle92/ns-arch-unity .
-docker push jpstyle92/ns-arch-unity
+docker build --tag jpstyle92/semantic-assembler .
+docker push jpstyle92/semantic-assembler

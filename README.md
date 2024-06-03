@@ -1,2 +1,2 @@
-# generic-assembler
+# semantic-assembler
 For the third dissertation chapter, extension of ns-arch-unity (ch. 2)

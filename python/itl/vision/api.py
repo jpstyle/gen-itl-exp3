@@ -22,7 +22,9 @@ from pycocotools import mask
 from scipy.optimize import linear_sum_assignment
 
 from .modeling import VisualSceneAnalyzer
-from .utils import crop_images_by_masks
+from .utils import (
+    crop_images_by_masks, quaternion_to_rotation_matrix
+)
 from .utils.visualize import visualize_sg_predictions
 from .utils.colmap_database import COLMAPDatabase
 
@@ -689,7 +691,30 @@ class VisionModule:
             colmap_out_path
         )
 
-        return reconstruction
+        # Rough initial filtering by estimated reconstruction error
+        points3d = [pt for pt in reconstruction.points3D.values() if pt.error < 5]
+
+        # Collect points and filter by 2D reprojection vs. masks
+        for msk, (quat, trns) in zip(masks.values(), viewpoint_poses):
+            # Project to 2D image coordinate from this viewing angle
+            cam_K, distortion_coeffs = self.camera_intrinsics
+            rmat = quaternion_to_rotation_matrix(quat)
+            projections = cv.projectPoints(
+                np.stack([p.xyz for p in points3d]),
+                cv.Rodrigues(rmat)[0], np.array(trns),
+                cam_K, distortion_coeffs
+            )[0]
+            projections = [prj[0] for prj in projections]
+
+            # We have ground truth segmentation masks, filter out points whose
+            # 2D reprojections fall out of the masks
+            points3d = [
+                pt for pt, (u, v) in zip(points3d, projections)
+                if (0 <= round(u) < msk.shape[1]) and (0 <= round(v) < msk.shape[0]) \
+                    and msk[round(v), round(u)]
+            ]
+
+        return points3d
 
     def add_concept(self, conc_type):
         """

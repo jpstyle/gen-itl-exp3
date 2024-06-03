@@ -20,30 +20,30 @@ SR_THRES = 0.8              # Mismatch surprisal threshold
 U_IN_PR = 0.99              # How much the agent values information provided by the user
 
 # Pre-specified poses (quaternion & position pair) of 3D inspection viewpoints (total 16)
-R = 0.3; theta_H = pi/4; theta_L = pi/8
+R = 0.3; Tr = (0, 0, R); theta_H = pi/4; theta_L = pi/8
 H1 = cos(theta_H/2); H2 = sin(theta_H/2); L1 = cos(theta_L/2); L2 = sin(theta_L/2)
 VP_POSES = [
     ## (qw/qx/qy/qz quaternion, tx/ty/tz position); rotation first, then translation
     # 'Lower-high' loop
-    ((H1, H2, 0, 0), (0, 0, R)),
-    ((H1*cos(pi/4), H2*cos(pi/4), H1*sin(pi/4), H2*sin(pi/4)), (0, 0, R)),
-    ((0, 0, H1, H2), (0, 0, R)),
-    ((H1*cos(3*pi/4), H2*cos(3*pi/4), H1*sin(3*pi/4), H2*sin(3*pi/4)), (0, 0, R)),
+    ((H1, H2, 0, 0), Tr),
+    ((H1*cos(pi/4), H2*cos(pi/4), H1*sin(pi/4), H2*sin(pi/4)), Tr),
+    ((0, 0, H1, H2), Tr),
+    ((H1*cos(3*pi/4), H2*cos(3*pi/4), H1*sin(3*pi/4), H2*sin(3*pi/4)), Tr),
     # 'Lower-low' loop
-    ((L1, L2, 0, 0), (0, 0, R)),
-    ((L1*cos(pi/4), L2*cos(pi/4), L1*sin(pi/4), L2*sin(pi/4)), (0, 0, R)),
-    ((0, 0, L1, L2), (0, 0, R)),
-    ((L1*cos(3*pi/4), L2*cos(3*pi/4), L1*sin(3*pi/4), L2*sin(3*pi/4)), (0, 0, R)),
+    ((L1, L2, 0, 0), Tr),
+    ((L1*cos(pi/4), L2*cos(pi/4), L1*sin(pi/4), L2*sin(pi/4)), Tr),
+    ((0, 0, L1, L2), Tr),
+    ((L1*cos(3*pi/4), L2*cos(3*pi/4), L1*sin(3*pi/4), L2*sin(3*pi/4)), Tr),
     # 'Upper-low' loop
-    ((L1, -L2, 0, 0), (0, 0, R)),
-    ((L1*cos(pi/4), -L2*cos(pi/4), L1*sin(pi/4), -L2*sin(pi/4)), (0, 0, R)),
-    ((0, 0, L1, -L2), (0, 0, R)),
-    ((L1*cos(3*pi/4), -L2*cos(3*pi/4), L1*sin(3*pi/4), -L2*sin(3*pi/4)), (0, 0, R)),
+    ((L1, -L2, 0, 0), Tr),
+    ((L1*cos(pi/4), -L2*cos(pi/4), L1*sin(pi/4), -L2*sin(pi/4)), Tr),
+    ((0, 0, L1, -L2), Tr),
+    ((L1*cos(3*pi/4), -L2*cos(3*pi/4), L1*sin(3*pi/4), -L2*sin(3*pi/4)), Tr),
     # 'Upper-high' loop
-    ((H1, -H2, 0, 0), (0, 0, R)),
-    ((H1*cos(pi/4), -H2*cos(pi/4), H1*sin(pi/4), -H2*sin(pi/4)), (0, 0, R)),
-    ((0, 0, H1, -H2), (0, 0, R)),
-    ((H1*cos(3*pi/4), -H2*cos(3*pi/4), H1*sin(3*pi/4), -H2*sin(3*pi/4)), (0, 0, R))
+    ((H1, -H2, 0, 0), Tr),
+    ((H1*cos(pi/4), -H2*cos(pi/4), H1*sin(pi/4), -H2*sin(pi/4)), Tr),
+    ((0, 0, H1, -H2), Tr),
+    ((H1*cos(3*pi/4), -H2*cos(3*pi/4), H1*sin(3*pi/4), -H2*sin(3*pi/4)), Tr)
 ]
 # Connectivity graph that represents pairs of 3D inspection images to be cross-referenced
 CON_GRAPH = nx.Graph()

@@ -41,6 +41,34 @@ def crop_images_by_masks(images, masks):
     return cropped_images, cropped_masks, dimensions
 
 
+def quaternion_to_rotation_matrix(quat):
+    """ Convert rotation quaternion to matrix representation """
+    qw, qx, qy, qz = quat
+
+    # First row
+    r11 = 2 * (qw * qw + qx * qx) - 1
+    r12 = 2 * (qx * qy - qw * qz)
+    r13 = 2 * (qx * qz + qw * qy)
+     
+    # Second row
+    r21 = 2 * (qx * qy + qw * qz)
+    r22 = 2 * (qw * qw + qy * qy) - 1
+    r23 = 2 * (qy * qz - qw * qx)
+     
+    # Third row
+    r31 = 2 * (qx * qz - qw * qy)
+    r32 = 2 * (qy * qz + qw * qx)
+    r33 = 2 * (qw * qw + qz * qz) - 1
+
+    rmat = np.array([
+        [r11, r12, r13],
+        [r21, r22, r23],
+        [r31, r32, r33]
+    ])
+
+    return rmat
+
+
 def masks_bounding_boxes(masks):
     """
     Axis-aligned bounding boxes (in xyxy format) from min/max indices for nonzero
