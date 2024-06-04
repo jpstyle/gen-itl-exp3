@@ -1,4 +1,4 @@
-FROM python:3.10.14
+FROM python:3.10.12
 
 SHELL ["/bin/bash", "-c"]
 
@@ -12,7 +12,6 @@ COPY python/itl/symbolic_reasoning/requirements.txt itl/symbolic_reasoning/
 COPY python/itl/action_planning/requirements.txt itl/action_planning/
 COPY python/itl/lpmln/requirements.txt itl/lpmln/
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir gdown
 
 # Some graphics related libraries needed
 RUN apt update && apt install -y libgl1

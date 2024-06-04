@@ -20,14 +20,14 @@ for filename in $(find "${ICD_SEARCH_LOCATIONS[@]}" -name "*nvidia*.json" 2> /de
 done
 
 # Uncomment to debug only with virtual display
-docker run -d --name $1 --gpus "device=$2" \
-    --volume $3:/mnt/data_volume \
-    ${ICD_MOUNTS[@]} \
-    jpstyle92/semantic-assembler "${@:5}"
-
-# Uncomment to debug with local (linux) machine display
 # docker run -d --name $1 --gpus "device=$2" \
 #     --volume $3:/mnt/data_volume \
-#     --env DISPLAY=$DISPLAY --volume /tmp/.X11-unix:/tmp/.X11-unix \
 #     ${ICD_MOUNTS[@]} \
-#     jpstyle92/semantic-assembler "${@:5}"
+#     jpstyle92/semantic-assembler "${@:4}"
+
+# Uncomment to debug with local (linux) machine display
+docker run -d --name $1 --gpus "device=$2" \
+    --volume $3:/mnt/data_volume \
+    --env DISPLAY=$DISPLAY --volume /tmp/.X11-unix:/tmp/.X11-unix \
+    ${ICD_MOUNTS[@]} \
+    jpstyle92/semantic-assembler "${@:4}"
