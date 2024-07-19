@@ -201,15 +201,10 @@ class ITLAgent:
                 if xb_updated:
                     # Concept exemplar base updated, need reclassification while keeping
                     # the discovered objects and embeddings intact
-                    self.vision.predict(
-                        None, self.lt_mem.exemplars, reclassify=True, visualize=False
-                    )
+                    self.vision.predict(None, self.lt_mem.exemplars, reclassify=True)
                 else:
                     # Ground raw visual perception with scene graph generation module
-                    self.vision.predict(
-                        self.vision.latest_inputs[-1], self.lt_mem.exemplars,
-                        lexicon=self.lt_mem.lexicon
-                    )
+                    self.vision.predict(self.vision.latest_inputs[-1], self.lt_mem.exemplars)
 
             if self.lang.latest_input is not None:
                 # Revert to pre-update dialogue state at the start of each loop iteration
@@ -234,9 +229,7 @@ class ITLAgent:
                     }
 
                     # Incrementally predict on the designated bbox
-                    self.vision.predict(
-                        None, self.lt_mem.exemplars, masks=masks, visualize=False
-                    )
+                    self.vision.predict(None, self.lt_mem.exemplars, masks=masks)
 
                     ents_updated = True     # Set flag for another round of sensemaking
 

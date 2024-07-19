@@ -407,7 +407,7 @@ def belief_propagation(reg_gr):
             atoms, factors = r
             full_atom = reg_gr.graph["atoms_map_inv"][list(atoms)[0]]
             if len(atoms) > 1 or len(factors) > 0: continue       # Temporary...?
-            if not full_atom.name.startswith("cls_"): continue    # Temporary...?
+            if not full_atom.name.startswith("pcls_"): continue   # Temporary...?
 
             # Factor potential products
             if len(factors) > 0:

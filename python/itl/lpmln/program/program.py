@@ -6,7 +6,6 @@ from collections import defaultdict
 from .compile import compile
 from .optimize import optimize
 from .split import split_program
-from ..literal import Literal
 from ..rule import Rule
 
 

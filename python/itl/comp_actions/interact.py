@@ -179,7 +179,7 @@ def _answer_domain_Q(agent, utt_pointer, translated):
     qv_to_dis_ref = {
         qv: f"x{ri}t{ti_new}c{ci_new}" for ri, (qv, _) in enumerate(q_vars)
     }
-    conc_type_to_pos = { "cls": "n" }
+    conc_type_to_pos = { "pcls": "n" }
 
     # Process any 'concept conjunctions' provided in the presupposition into a more
     # legible format, for easier processing right after
@@ -207,10 +207,7 @@ def _answer_domain_Q(agent, utt_pointer, translated):
     if len(agent.lt_mem.kb.entries) > 0:
         search_specs = _search_specs_from_kb(agent, question, restrictors, reg_gr_v)
         if len(search_specs) > 0:
-            agent.vision.predict(
-                None, agent.lt_mem.exemplars, specs=search_specs,
-                visualize=False, lexicon=agent.lt_mem.lexicon
-            )
+            agent.vision.predict(None, agent.lt_mem.exemplars, specs=search_specs)
 
             # If new entities is registered as a result of visual search, update env
             # referent list
@@ -327,7 +324,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
     ti_new = len(agent.lang.dialogue.record)
     ci_new = 0
 
-    conc_type_to_pos = { "cls": "n" }
+    conc_type_to_pos = { "pcls": "n" }
 
     if any(lit.name=="sp_expl" for lit in q_cons):
         # Answering why-question
@@ -476,7 +473,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
             evidence_atoms = {
                 Literal(f"v_{c_lit.name}", c_lit.args)
                 for conjunction in exps_instances for c_lit in conjunction
-                if c_lit.name.startswith("cls") or c_lit.name.startswith("att")
+                if c_lit.name.startswith("pcls")
             }       # Considering visual evidence for class & attributes concepts only
 
             # Manually select 'competitor' events that could've been the answer
@@ -620,7 +617,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
                         evidence_atoms = {
                             Literal(f"v_{c_lit.name}", c_lit.args)
                             for conjunction in exps_instances for c_lit in conjunction
-                            if c_lit.name.startswith("cls") or c_lit.name.startswith("att")
+                            if c_lit.name.startswith("pcls")
                         }
                         evidence_atoms = {
                             evd_atm for evd_atm in evidence_atoms
@@ -706,13 +703,13 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
                                 C = getattr(agent.vision.inventories, conc_type)
 
                                 match conc_type:
-                                    case "cls" | "att":
+                                    case "pcls":
                                         arg1 = h_lit.args[0][0]
                                         if field not in scene_new[arg1]:
                                             scene_new[arg1][field] = np.zeros(C)
                                         scene_new[arg1][field][conc_ind] = HIGH
 
-                                    case "rel":
+                                    case "prel":
                                         assert len(h_lit.args) == 2
 
                                         arg1 = h_lit.args[0][0]; arg2 = h_lit.args[1][0]
@@ -753,7 +750,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
                                 evidence_likelihoods = {
                                     Literal(f"v_{h_lit.name}", h_lit.args): None
                                     for h_lit in hyp_instance
-                                    if h_lit.name.startswith("cls") or h_lit.name.startswith("att")
+                                    if h_lit.name.startswith("pcls")
                                 }
                                 selected_cf_expl = (evidence_likelihoods, template)
                                 break
@@ -892,7 +889,7 @@ def _search_specs_from_kb(agent, question, restrictors, ref_reg_gr):
             # type of questions
             kb_query_preds = frozenset([
                 pred for pred in agent.lt_mem.kb.entries_by_pred 
-                if pred.startswith("cls")
+                if pred.startswith("pcls")
             ])
             # Filter further by provided restrictors if applicable
             if q_lit.args[0][0] in restrictors:
@@ -936,7 +933,7 @@ def _search_specs_from_kb(agent, question, restrictors, ref_reg_gr):
                 for lits in relevant_literals
             ]
 
-            # Collect search spec candidates. We will disregard attribute concepts as
+            # Collect search spec candidates. We will disregard 'adjectival' concepts as
             # search spec elements, noticing that it is usually sufficient and generalizable
             # to provide object class info only as specs for searching potentially relevant,
             # yet unrecognized entities in a scene. This is more of a heuristic for now --
@@ -944,7 +941,8 @@ def _search_specs_from_kb(agent, question, restrictors, ref_reg_gr):
             specs = [
                 {
                     tgt_lit: (
-                        {rl for rl in rel_lits if not rl.name.startswith("att_")},
+                        # {rl for rl in rel_lits if not rl.name.startswith("att_")},
+                        rel_lits,
                         {la: qa for la, qa in zip(tgt_lit.args, kb_query_args)}
                     )
                     for tgt_lit, rel_lits in lits.items()
@@ -1016,19 +1014,19 @@ def _search_specs_from_kb(agent, question, restrictors, ref_reg_gr):
             # If not isomorphic after replacing all cls predicates with the same
             # dummy predicate, the pair is not groupable
             is_cls_si = [
-                lit.name.startswith("cls_") or lit.name.startswith("disj_")
+                lit.name.startswith("pcls_") or lit.name.startswith("disj_")
                 for lit in final_specs[si][1]
             ]
             is_cls_sj = [
-                lit.name.startswith("cls_")  or lit.name.startswith("disj_")
+                lit.name.startswith("pcls_")  or lit.name.startswith("disj_")
                 for lit in final_specs[sj][1]
             ]
             spec_subs_si = [
-                lit.substitute(preds={ lit.name: "cls_dummy" }) if is_cls else lit
+                lit.substitute(preds={ lit.name: "pcls_dummy" }) if is_cls else lit
                 for lit, is_cls in zip(final_specs[si][1], is_cls_si)
             ]
             spec_subs_sj = [
-                lit.substitute(preds={ lit.name: "cls_dummy" }) if is_cls else lit
+                lit.substitute(preds={ lit.name: "pcls_dummy" }) if is_cls else lit
                 for lit, is_cls in zip(final_specs[sj][1], is_cls_sj)
             ]
             entail_dir, mapping = Literal.entailing_mapping_btw(spec_subs_si, spec_subs_sj)
@@ -1065,9 +1063,9 @@ def _search_specs_from_kb(agent, question, restrictors, ref_reg_gr):
                     # filtered out above
                     assert lit_si.name != lit_sj.name
 
-                    cls_conc_si = lit_si.name if lit_si.name.startswith("cls_") \
+                    cls_conc_si = lit_si.name if lit_si.name.startswith("pcls_") \
                         else final_specs[si][2][lit_si.name][0]
-                    cls_conc_sj = lit_sj.name if lit_sj.name.startswith("cls_") \
+                    cls_conc_sj = lit_sj.name if lit_sj.name.startswith("pcls_") \
                         else final_specs[sj][2][lit_sj.name][0]
                     closest_common_supertype = nx.lowest_common_ancestor(
                         taxonomy_graph, cls_conc_si, cls_conc_sj
@@ -1078,9 +1076,9 @@ def _search_specs_from_kb(agent, question, restrictors, ref_reg_gr):
                         break
                     else:
                         # Common supertype identified, record relevant info
-                        elem_concs_si = {lit_si.name} if lit_si.name.startswith("cls_") \
+                        elem_concs_si = {lit_si.name} if lit_si.name.startswith("pcls_") \
                             else final_specs[si][2][lit_si.name][1]
-                        elem_concs_sj = {lit_sj.name} if lit_sj.name.startswith("cls_") \
+                        elem_concs_sj = {lit_sj.name} if lit_sj.name.startswith("pcls_") \
                             else final_specs[sj][2][lit_sj.name][1]
                         grouping_supertypes.append(
                             (closest_common_supertype, elem_concs_si | elem_concs_sj)
@@ -1122,8 +1120,8 @@ def _search_specs_from_kb(agent, question, restrictors, ref_reg_gr):
 
                         lit_si = final_specs[si][1][i_si]
                         lit_sj = final_specs[sj][1][i_sj]
-                        is_elem_si = lit_si.name.startswith("cls_")
-                        is_elem_sj = lit_sj.name.startswith("cls_")
+                        is_elem_si = lit_si.name.startswith("pcls_")
+                        is_elem_sj = lit_sj.name.startswith("pcls_")
 
                         if is_elem_si and is_elem_sj:
                             # Case 1: Both predicates elementary concepts, need to

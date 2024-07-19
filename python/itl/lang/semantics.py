@@ -26,7 +26,7 @@ class SemanticParser:
             # this experiment:
             #   1) "Build a {truck_type}."
             #   2) "I will demonstrate how to build a {truck_type}."
-            #   3) "# Action: {action_type}({action_args})"
+            #   3) "# Action/Feedback: {action_type}({parameters})"
             #   4) "This is a {concept_type}"
             #   5) ...
             if re.match(r"Build a (.*)\.$", utt):
@@ -85,10 +85,14 @@ class SemanticParser:
 
                 source = { "e0": utt, "e1": "# to-infinitive phrase" }
 
-            elif re.match(r"# Action: (.*)\((.*)\)$", utt):
-                # 3) User provided annotation of an action in the ongoing demonstration;
-                # while not free-form NL input, abuse & exploit the formalism
-                act_anno = re.findall(r"# Action: (.*)\((.*)\)$", utt)[0]
+            elif re.match(r"# Action: (.*)\((.*)\)$", utt) or \
+                re.match(r"# Effect: (.*)\((.*)\)$", utt):
+                # 3) Annotation of intent or effect of an action in the ongoing
+                # demonstration; while not free-form NL input, abuse & exploit the formalism
+                if utt.startswith("# Action:"):
+                    act_anno = re.findall(r"# Action: (.*)\((.*)\)$", utt)[0]
+                else:
+                    act_anno = re.findall(r"# Effect: (.*)\((.*)\)$", utt)[0]
                 act_type, act_params = act_anno
 
                 # Unpack PascalCased action type and snake_case it

@@ -78,7 +78,7 @@ public class DialogueAgent : Agent
 
     // For controlling minimal update interval, to allow visual inspection during runs
     private float _nextTimeToAct;
-    private const float TimeInterval = 0.2f;
+    private const float TimeInterval = 0.1f;
 
     // Store workplace partition info for main work area
     private readonly Vector3 _mainPartitionPosition = new(0f, 0.76f, 0.24f);
@@ -571,12 +571,35 @@ public class DialogueAgent : Agent
         }
         Assert.IsNotNull(srcPoint); Assert.IsNotNull(tgtPoint);
 
+        // Left & right manipulator pose before movement, in camera coordinate
+        var camTr = _cameraSensor.Camera.transform;
+        var posLeft = camTr.InverseTransformPoint(leftHand.position);
+        var rotLeft = Quaternion.Inverse(camTr.rotation) * leftHand.rotation;
+        var leftString = $"{posLeft.ToString()},{rotLeft.ToString()}";
+        leftString = leftString.Replace("(", "").Replace(")", "").Replace(", ", "/");
+        var posRight = camTr.InverseTransformPoint(rightHand.position);
+        var rotRight = Quaternion.Inverse(camTr.rotation) * rightHand.rotation;
+        var rightString = $"{posRight.ToString()},{rotRight.ToString()}";
+        rightString = rightString.Replace("(", "").Replace(")", "").Replace(", ", "/");
+
         // Get relative pose (position & rotation) from source to target points, then
         // move source hand to target pose (rotation first, translation next)
         var relativeRotation = tgtPoint.rotation * Quaternion.Inverse(srcPoint.rotation);
         srcHand.rotation = relativeRotation * srcHand.rotation;
         var relativePosition = tgtPoint.position - srcPoint.position;
         srcHand.position += relativePosition;
+
+        // Pose of moved manipulator after movement, in camera coordinate
+        var posAfter = camTr.InverseTransformPoint(srcHand.position);
+        var rotAfter = Quaternion.Inverse(camTr.rotation) * srcHand.rotation;
+        var afterString = $"{posAfter.ToString()},{rotAfter.ToString()}";
+        afterString = afterString.Replace("(", "").Replace(")", "").Replace(", ", "/");
+
+        // Queue manipulator pose change information to message to backend; pose (position,
+        // quaternion) before, pose after
+        var directionString = rightToLeft ? "RightToLeft" : "LeftToRight";
+        var actionEffect = $"# Effect: Assemble{directionString}({leftString},{rightString},{afterString})";
+        dialogueChannel.CommitUtterance(dialogueParticipantID, actionEffect);
 
         // Handles to subassembly objects held in source & target hands
         GameObject srcHeld = null; GameObject tgtHeld = null;

@@ -4,15 +4,25 @@ referring to belief updates that modify long-term memory
 """
 import re
 import math
+import torch
 from math import sin, cos, pi
 from itertools import permutations
 from collections import defaultdict
 
 import inflect
+import cv2 as cv
+import open3d as o3d
+import numpy as np
 import networkx as nx
+import torch.nn.functional as F
+from scipy.optimize import linear_sum_assignment
 
 from ..lpmln import Literal
 from ..lpmln.utils import flatten_cons_ante, wrap_args
+from ..vision.utils import (
+    blur_and_grayscale, visual_prompt_by_mask, crop_images_by_masks,
+    quaternion_to_rotation_matrix, xyzw2wxyz, flip_position_y, flip_quaternion_y
+)
 
 
 EPS = 1e-10                 # Value used for numerical stabilization
@@ -322,7 +332,7 @@ def handle_mismatch(agent, mismatch):
             args = [a for a, _ in atom.args]
 
             match conc_type:
-                case "cls" | "att":
+                case "pcls":
                     if agent.vision.scene[args[0]]["exemplar_ind"] is None:
                         # New exemplar, mask & vector of the object should be added
                         objs_to_add.add(args[0])
@@ -331,13 +341,13 @@ def handle_mismatch(agent, mismatch):
                         # Exemplar present in storage, only add pointer
                         ex_ind = agent.vision.scene[args[0]]["exemplar_ind"]
                         pointers[(conc_type, conc_ind, pol)].add(ex_ind)
-                case "rel":
+                case "prel":
                     raise NotImplementedError   # Step back for relation prediction...
                 case _:
                     raise ValueError("Invalid concept type")
 
     objs_to_add = list(objs_to_add)         # Assign arbitrary ordering
-    _add_scene_and_exemplars(
+    _add_scene_and_exemplars_2d(
         objs_to_add, pointers,
         agent.vision.scene, agent.vision.latest_inputs[-1], agent.lt_mem.exemplars
     )
@@ -368,7 +378,7 @@ def handle_confusion(agent, confusion):
     conc_inds = list(conc_inds)
 
     # For now we are only interested in disambiguating class (noun) concepts
-    assert conc_type == "cls"
+    assert conc_type == "pcls"
 
     # Prepare logical form of the concept-diff question to ask
     q_vars = ((f"X2t{ti_new}c{ci_new}", False),)
@@ -510,7 +520,7 @@ def handle_acknowledgement(agent, acknowledgement_info):
     for lit in lits_to_learn:
         conc_type, conc_ind = lit.name.split("_")
         conc_ind = int(conc_ind)
-        if conc_type == "rel": continue         # Relations are not neurally predicted
+        if conc_type == "prel": continue         # Relations are not neurally predicted
 
         pol = "pos" if not lit.naf else "neg"
 
@@ -524,7 +534,7 @@ def handle_acknowledgement(agent, acknowledgement_info):
             pointers[(conc_type, conc_ind, pol)].add(ex_ind)
 
     objs_to_add = list(objs_to_add)         # Assign arbitrary ordering
-    _add_scene_and_exemplars(
+    _add_scene_and_exemplars_2d(
         objs_to_add, pointers,
         vis_scene, vis_raw, agent.lt_mem.exemplars
     )
@@ -606,8 +616,8 @@ def handle_neologism(agent, novel_concepts, dialogue_state):
                     case _:
                         raise ValueError("Invalid concept type")
 
-                # Register this instance as a handled mismatch, so that add_exs() won't
-                # be called upon this one during this loop again by handle_mismatch()
+                # Register this instance as a handled mismatch, so that add_exs_2d()
+                # won't be called upon this one during this loop again by handle_mismatch()
                 stm = ((Literal(f"{conc_type}_{conc_ind}", wrap_args(*args)),), None)
                 agent.symbolic.mismatches.append([stm, None, True])
 
@@ -623,7 +633,7 @@ def handle_neologism(agent, novel_concepts, dialogue_state):
 
     if len(objs_to_add) > 0 or len(pointers) > 0:
         objs_to_add = list(objs_to_add)         # Assign arbitrary ordering
-        _add_scene_and_exemplars(
+        _add_scene_and_exemplars_2d(
             objs_to_add, pointers,
             agent.vision.scene, agent.vision.latest_inputs[-1], agent.lt_mem.exemplars
         )
@@ -681,13 +691,18 @@ def analyze_demonstration(agent, demo_data):
     contant constraints) of desired target goal concept, and any symbolic constraints
     that apply among different concepts.
     """
-    referents = agent.lang.dialogue.referents       # Shortcut for quick access
+    # Shortcuts
+    referents = agent.lang.dialogue.referents
+    value_assignment = agent.symbolic.value_assignment
 
     prev_img = None         # Stores previous steps' visual observations
-    prev_action = None      # Stores previous steps' action labeling
     inspect_data = { "img": {}, "msk": {} }
             # Buffer of 3d object instance views from inspect_~ actions
 
+    # Sequentially process each demonstration step
+    current_held = [None, None]; current_assembly_info = None
+    nonatomic_subassemblies = set(); subassembly_labeling = {}
+    vision_2d_data = {}; vision_3d_data = {}; assembly_sequence = []
     for img, annotations, env_refs in demo_data:
         # Appropriately handle each annotation
         for (_, _, ante, cons), raw, mood in annotations:
@@ -699,7 +714,7 @@ def analyze_demonstration(agent, demo_data):
             if ante is None:
                 # Non-quantified statement without antecedent
                 if raw.startswith("# Action:"):
-                    # Basic (non-NL) action annotation specifying atomic action type
+                    # Non-NL annotation of action intent specifying atomic action type
                     # and parameters
                     for lit in cons:
                         conc_type, conc_ind = lit.name.split("_")
@@ -710,21 +725,44 @@ def analyze_demonstration(agent, demo_data):
 
                         # Handle each action accordingly (actions 1~8 to be handled
                         # in our scope)
+                        left_or_right = (conc_ind-1) % 2
                         match conc_ind:
                             case 1 | 2:
-                                # pick_up_~ action
-                                print(0)
+                                # pick_up_~ action; track the held object and record 2d
+                                # visual data (image + mask)
+                                target_info = [
+                                    rf_dis for rf_dis, rf_env in value_assignment.items()
+                                    if rf_dis.startswith(lit.args[0][0]) and rf_env == lit.args[2][0]
+                                ][0]
+                                target_info = referents["dis"][target_info]
+                                current_held[left_or_right] = target_info["name"]
+
+                                if target_info["name"] not in nonatomic_subassemblies:
+                                    # Atomic part type to be remembered, record (image, mask)
+                                    # pair by the name index
+                                    data = (prev_img, env_refs["o0"]["mask"])
+                                    vision_2d_data[target_info["name"]] = data
 
                             case 3 | 4:
                                 # drop_~ action
-                                print(0)
+                                lastly_dropped = current_held[left_or_right]
+                                current_held[left_or_right] = None
 
                             case 5 | 6:
-                                # assemble_~ action
-                                print(0)
+                                # assemble_~ action; record 2d visual data (image + masks)
+                                # and assembly action info, then remember non-atomic subassemblies
+                                # (distinguished by string name handle)
+                                current_assembly_info = [
+                                    current_held[left_or_right], current_held[left_or_right+1 % 2],
+                                    prev_img, env_refs["o0"]["mask"], env_refs["o1"]["mask"]
+                                ]
+                                current_held[left_or_right] = referents["dis"][lit.args[4][0]]["name"]
+                                current_held[left_or_right+1 % 2] = None
+
+                                nonatomic_subassemblies.add(current_held[left_or_right])
 
                             case 7 | 8:
-                                # inspect_~ action
+                                # inspect_~ action; collect all views for 3D reconstruction
                                 viewed_obj = lit.args[2][0]
                                 view_ind = int(referents["dis"][lit.args[3][0]]["name"])
                                 if view_ind < 16:
@@ -732,30 +770,279 @@ def analyze_demonstration(agent, demo_data):
                                 if view_ind > 0:
                                     inspect_data["msk"][view_ind-1] = env_refs[viewed_obj]["mask"]
 
-                        prev_action = (conc_ind, )
+                elif raw.startswith("# Effect:"):
+                    # Non-NL annotation of action effect specifying atomic action type
+                    # and parameters
+                    for lit in cons:
+                        conc_type, conc_ind = lit.name.split("_")
+
+                        # Only address action concepts
+                        if conc_type != "arel": continue
+                        conc_ind = int(conc_ind)
+
+                        # Handle each action accordingly (actions 1~8 to be handled
+                        # in our scope)
+                        left_or_right = (conc_ind-1) % 2
+                        match conc_ind:
+                            case 5 | 6:
+                                # assemble_~ action; record manipulator poses
+                                parse_values = lambda ai: tuple(
+                                    float(v) for v in referents["dis"][lit.args[ai][0]]["name"].split("/")
+                                )
+                                mnp_pose_left = (
+                                    parse_values(2), xyzw2wxyz(parse_values(3))
+                                )
+                                mnp_pose_right = (
+                                    parse_values(4), xyzw2wxyz(parse_values(5))
+                                )
+                                mnp_pose_moved = (
+                                    parse_values(6), xyzw2wxyz(parse_values(7))
+                                )
+                                current_assembly_info += [
+                                    "RToL" if left_or_right==0 else "LToR",
+                                    mnp_pose_left, mnp_pose_right, mnp_pose_moved
+                                ]
+                                assembly_sequence.append(tuple(current_assembly_info))
+
+                                current_assembly_info = None
 
                 else:
                     # Additional natural language annotation, providing labeling of
                     # object instances of interest
-                    raise NotImplementedError
+                    subassembly_labeling[lastly_dropped] = cons[0].name
+
             else:
-                # Quantified statement without antecedent; expecting a generic rule
+                # Quantified statement with antecedent; expecting a generic rule
                 # expressed in natural language in the scope of our experiment
                 raise NotImplementedError
 
         if len(inspect_data["img"]) == 16 and len(inspect_data["msk"]) == 16:
             # Reconstruct 3D structure of the inspected object instance
-            reconstruction = agent.vision.reconstruct_3d_structure(
-                inspect_data["img"], inspect_data["msk"], VP_POSES, CON_GRAPH
-            )
+            # for mpl in [1, 1.5, 2]:
+            for mpl in [1, 1.5]:
+                # Try at most three times, increasing the 'resolution multiplier'
+                # value each time the obtained point cloud doesn't have enough points
+                reconstruction = agent.vision.reconstruct_3d_structure(
+                    inspect_data["img"], inspect_data["msk"], VP_POSES, CON_GRAPH,
+                    resolution_multiplier=mpl
+                )
+                point_cloud = reconstruction[0]
 
-            # Make way for a new one
+                # Break if enough points obtained
+                if len(point_cloud.points) >= 1000: break
+
+            vision_3d_data[current_held[left_or_right]] = reconstruction
+
+            # Make way for new data
             inspect_data = { "img": {}, "msk": {} }
 
         prev_img = img
 
+    # Process gathered data, 2D/3D vision and assembly contact points
 
-def _add_scene_and_exemplars(
+    # Process 3D vision data first, registering new pcls concepts and storing
+    # reconstructed structure data in XB
+    inst2conc_map = {}
+    for instance_name, reconstruction in vision_3d_data.items():
+        point_cloud, views, descriptors = reconstruction
+
+        # Assumption: All concepts for which 3D data is acquired are novel to
+        # the learner agent and should be newly registered)
+        new_conc_ind = agent.vision.add_concept("pcls")
+
+        # Store the reconstructed structure info in XB
+        agent.lt_mem.exemplars.add_exs_3d(new_conc_ind, point_cloud, views, descriptors)
+
+        # Track corresponding concepts
+        inst2conc_map[instance_name] = new_conc_ind
+
+    # Further process vision 2D data to obtain instance-level embeddings
+    vision_2d_data = {
+        instance_name: (
+            image, mask, bg_image := blur_and_grayscale(image),
+            visual_prompt_by_mask(image, bg_image, [mask])
+        )
+        for instance_name, (image, mask) in vision_2d_data.items()
+    }
+    vis_model = agent.vision.model; vis_model.eval()
+    with torch.no_grad():
+        for instance_name, (image, mask, bg_image, vis_prompt) in vision_2d_data.items():
+            vp_processed = vis_model.dino_processor(images=vis_prompt, return_tensors="pt")
+            vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
+            vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
+            f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
+            vision_2d_data[instance_name] = (image, mask, f_vec)
+    # Add 2D vision data in XB, based on the newly assigned pcls concept indices
+    for instance_name, (image, mask, f_vec) in vision_2d_data.items():
+        if instance_name not in inst2conc_map:
+            # Cannot exactly specify which concept this instance classifies as, skip
+            continue
+
+        exemplars = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
+        pointers = {
+            ("pcls", inst2conc_map[inst], "pos" if inst==instance_name else "neg"): {
+                # (Whether object is newly added to XB, index 0 as only one is newly
+                # added each time)
+                (True, 0)
+            }
+            for inst in vision_2d_data if inst in inst2conc_map
+        }
+        agent.lt_mem.exemplars.add_exs_2d(
+            scene_img=image, exemplars=exemplars, pointers=pointers
+        )
+
+    # Finally process assembly data; estimate pose of assembled parts in hand,
+    # infer 3D locations of 'contact points' based on manipulator pose difference,
+    # and topological structure of (sub)assemblies
+    cam_K, distortion_coeffs = agent.vision.camera_intrinsics
+    with torch.no_grad():
+        for assembly_step in assembly_sequence:
+            # Unpacking assembly step information
+            targets = assembly_step[:2]
+            image, *masks = assembly_step[2:5]
+            direction, *poses, pose_moved = assembly_step[5:9]
+            foo = assembly_step[9:]
+
+            # Extract patch-level features as guided by masks
+            zoomed_images, zoomed_masks, crop_dims = crop_images_by_masks(
+                { 0: image, 1: image }, masks       # 0: Left, 1: Right
+            )
+            patch_features, lr_masks, lr_dims = vis_model.lr_features_from_masks(
+                zoomed_images, zoomed_masks, 900, 2
+            )
+            D = patch_features[0].shape[-1]
+
+            # Run below once for left target and right target
+            lr_zipped = zip(
+                targets, patch_features, lr_masks, lr_dims,
+                zoomed_images, crop_dims, poses
+            )       # Zipping data for left side and right side
+            for zip_data in lr_zipped:
+                # Length unpacking split into multiple lines...
+                tgt, pth_ft = zip_data[:2]
+                lr_msk, (lr_w, lr_h) = zip_data[2:4]
+                z_img, (cr_x, _, cr_y, _), mnp_pose = zip_data[4:]
+
+                # Unpack manipulator pose info, while accounting for Unity vs. vision
+                # libraries y-axis difference
+                mnp_position = flip_position_y(mnp_pose[0])
+                mnp_rotation = flip_quaternion_y(mnp_pose[1])
+
+                # Need to know which concept's instance the target object is
+                if tgt in inst2conc_map:
+                    conc_ind = inst2conc_map[tgt]
+                else:
+                    # TEMPORARY TEST
+                    conc_ind = 1
+
+                msk_flattened = lr_msk.reshape(-1)
+                nonzero_inds = msk_flattened.nonzero()[0]
+
+                # Scale ratio between zoomed image vs. low-res feature map
+                x_ratio = z_img.width / lr_w
+                y_ratio = z_img.height / lr_h
+
+                # Compare against keypoint descriptors stored in XB, per each view
+                point_cloud, views, descriptors = agent.lt_mem.exemplars.object_3d[conc_ind]
+                pose_estimation_results = []
+                for vi, view_info in views.items():
+                    # Fetch keypoint descriptors
+                    keypoints = sorted(view_info["visible_keypoints"])
+                    kp_features = torch.tensor([descriptors[pi][vi] for pi in keypoints])
+                    kp_features = kp_features.to(pth_ft.device)
+
+                    # Compute cosine similarities between patches
+                    features_nrm_1 = F.normalize(pth_ft.reshape(-1, D))
+                    features_nrm_2 = F.normalize(kp_features)
+                    S = (features_nrm_1 @ features_nrm_2.t()).cpu()
+
+                    # (u,v)-coordinates of keypoints at the initial extrinsic guess
+                    rmat_guess = quaternion_to_rotation_matrix(view_info["cam_quaternion"])
+                    tvec_guess = np.array(mnp_position)
+                    tr_mat = np.concatenate(
+                        [
+                            np.concatenate([rmat_guess, np.array([tvec_guess]).T], axis=1),
+                            np.array([[0.0, 0.0, 0.0, 1.0]])
+                        ]
+                    )
+                    tr_pcl = o3d.geometry.PointCloud(point_cloud).transform(tr_mat)
+                    kp_guess_projections = cv.projectPoints(
+                        np.array([tr_pcl.points[pi] for pi in keypoints]),
+                        np.array([0.0] * 3), np.array([0.0] * 3),
+                        cam_K, distortion_coeffs
+                    )[0][:,0,:]
+
+                    # Proximity scores (w.r.t. to guessed keypoint projection) computed
+                    # with RBF kernel; for giving slight advantages to pixels close to
+                    # initial guess projections
+                    uv_coords = np.stack([
+                        np.tile((np.arange(lr_w)*x_ratio + cr_x)[None], [lr_h, 1]),
+                        np.tile((np.arange(lr_h)*y_ratio + cr_y)[:,None], [1, lr_w])
+                    ], axis=-1)
+                    sigma = 10
+                    proximity = np.linalg.norm(
+                        uv_coords[:,:,None] - kp_guess_projections[None,None], axis=-1
+                    )
+                    proximity = np.exp(-np.square(proximity) / (2 * (sigma ** 2)))
+
+                    # Forward matching
+                    agg_scores = S + 0.5 * proximity.reshape(-1, len(keypoints))
+                    match_forward = linear_sum_assignment(
+                        agg_scores[msk_flattened], maximize=True
+                    )
+
+                    # Extract 2D-3D correspondence based on the match
+                    points_2d = [
+                        (i % lr_w, i // lr_w) for i in nonzero_inds[match_forward[0]]
+                    ]
+                    points_2d = np.array([
+                        (cr_x + lr_x * x_ratio, cr_y + lr_y * y_ratio)
+                        for lr_x, lr_y in points_2d
+                    ])
+                    points_3d = np.array([
+                        point_cloud.points[keypoints[i]] for i in match_forward[1]
+                    ])
+
+                    # Pose estimation by PnP with USAC (MAGSAC)
+                    output_valid, rvec, tvec, _ = cv.solvePnPRansac(
+                        points_3d, points_2d, cam_K, distortion_coeffs,
+                        flags=cv.USAC_MAGSAC
+                    )
+                    if output_valid:
+                        # Evaluate estimated pose by obtaining mean similarity
+                        # scores at reprojected keypoints
+                        reprojections = cv.projectPoints(
+                            points_3d, rvec, tvec, cam_K, distortion_coeffs
+                        )[0][:,0,:]
+                        dists_to_reprojs = np.linalg.norm(
+                            uv_coords[:,:,None] - reprojections[None,None], axis=-1
+                        )
+                        dists_to_reprojs = dists_to_reprojs.reshape(-1, len(keypoints))
+                        reproj_coords = np.unravel_index(
+                            dists_to_reprojs.argmin(axis=0), (lr_h, lr_w)
+                        )
+                        reproj_score_inds = reproj_coords + (np.arange(len(keypoints)),)
+                        reproj_scores = S.reshape(lr_h, lr_w, -1)[reproj_score_inds]
+                        # Only consider keypoints whose reprojections fall into the
+                        # low-res mask; accounts for occlusions
+                        within_mask_inds = [
+                            lr_msk[(reproj_coords[0][i], reproj_coords[1][i])]
+                            for i in range(len(keypoints))
+                        ]
+                        reproj_scores = reproj_scores[within_mask_inds]
+
+                        # Store pose estimation results along with pose evaluation score
+                        pose_estimation_results.append(
+                            (rvec, tvec, reproj_scores.mean().item())
+                        )
+
+                # Select the best pose estimation result with highest score
+                print(0)
+
+            print(0)
+
+
+def _add_scene_and_exemplars_2d(
         objs_to_add, pointers, current_scene, current_raw_img, ex_mem
     ):
     """
@@ -791,7 +1078,7 @@ def _add_scene_and_exemplars(
         }
         for conc_spec, objs in pointers.items()
     }
-    added_inds = ex_mem.add_exs(
+    added_inds = ex_mem.add_exs_2d(
         scene_img=scene_img, exemplars=exemplars, pointers=pointers
     )
 

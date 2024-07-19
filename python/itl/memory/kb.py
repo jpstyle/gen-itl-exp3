@@ -491,7 +491,7 @@ class KnowledgeBase:
                 int(name.strip(f"{conc_type}_")) for name in preds_in_kb
                 if name.startswith(conc_type)
             }
-            for conc_type in ["cls", "att", "rel"]
+            for conc_type in ["pcls", "prel"]
         }
 
         # Helper method for adding rules that implement the choices and evidence
@@ -525,33 +525,23 @@ class KnowledgeBase:
             # Object classes
             if "pred_cls" in obj:
                 classes = set(np.where(obj["pred_cls"] > SCORE_THRES)[0])
-                classes |= preds_in_kb["cls"] & \
+                classes |= preds_in_kb["pcls"] & \
                     set(np.where(obj["pred_cls"] > LOWER_THRES)[0])
                 for c in classes:
-                    pred = f"cls_{c}"; args = [(oi, False)]
+                    pred = f"pcls_{c}"; args = [(oi, False)]
                     likelihood = float(obj["pred_cls"][c])
-                    add_evidence(pred, args, likelihood)
-
-            # Object attributes
-            if "pred_att" in obj:
-                attributes = set(np.where(obj["pred_att"] > SCORE_THRES)[0])
-                attributes |= preds_in_kb["att"] & \
-                    set(np.where(obj["pred_att"] > LOWER_THRES)[0])
-                for a in attributes:
-                    pred = f"att_{a}"; args = [(oi, False)]
-                    likelihood = float(obj["pred_att"][a])
                     add_evidence(pred, args, likelihood)
 
             # Object relations
             if "pred_rel" in obj:
                 relations = {
                     oj: set(np.where(per_obj > SCORE_THRES)[0]) | \
-                        (preds_in_kb["rel"] & set(np.where(per_obj > LOWER_THRES)[0]))
+                        (preds_in_kb["prel"] & set(np.where(per_obj > LOWER_THRES)[0]))
                     for oj, per_obj in obj["pred_rel"].items()
                 }
                 for oj, per_obj in relations.items():
                     for r in per_obj:
-                        pred = f"rel_{r}"; args = [(oi, False), (oj, False)]
+                        pred = f"prel_{r}"; args = [(oi, False), (oj, False)]
                         likelihood = float(obj["pred_rel"][oj][r])
                         add_evidence(pred, args, likelihood)
 

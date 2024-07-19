@@ -308,7 +308,7 @@ def main(cfg):
                                         logger.info(f"T> {TAB}{utterance}")
                                     if utterance.startswith("I will demonstrate how to"):
                                         # Purely for logging purpose
-                                        logger.info(f"T> {TAB}[Demonstrating a valid action sequence...]")
+                                        logger.info(f"T> {TAB}[Demonstrating a full action sequence...]")
                                 else:
                                     # Physical actions for demonstration; set discrete action
                                     # type and send string parameters via channel

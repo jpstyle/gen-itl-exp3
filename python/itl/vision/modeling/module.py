@@ -1,7 +1,5 @@
 import os
-import gzip
-import pickle
-from PIL import Image
+from math import sqrt
 from itertools import product
 
 import cv2 as cv
@@ -9,17 +7,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tqdm import tqdm
-from PIL import ImageFilter
 from scipy.optimize import linear_sum_assignment
-from skimage.morphology import opening, closing, dilation
+from skimage.morphology import opening, closing
 from skimage.measure import label
 from sklearn.cluster import KMeans
 from torchvision.ops import masks_to_boxes, box_convert
 from transformers import AutoImageProcessor, Dinov2Model, SamProcessor, SamModel
 
+from ..utils import blur_and_grayscale, visual_prompt_by_mask
 
-BLUR_RADIUS = 5                 # Gaussian blur kernel radius for background image
 
 class VisualSceneAnalyzer(nn.Module):
     """
@@ -123,8 +119,7 @@ class VisualSceneAnalyzer(nn.Module):
             )
 
             # Background image prepared via greyscale + gaussian blur
-            bg_image = image.convert("L").convert("RGB")
-            bg_image = bg_image.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
+            bg_image = blur_and_grayscale(image)
 
             # Cache image and processing results
             self.processed_img_cached = (
@@ -210,7 +205,7 @@ class VisualSceneAnalyzer(nn.Module):
         if len(masks_all) > 0:
             # Non-empty list of segmentation masks
             masks_all = np.stack(masks_all)
-            visual_prompts = self._visual_prompt_by_mask(image, bg_image, masks_all)
+            visual_prompts = visual_prompt_by_mask(image, bg_image, masks_all)
 
             # Pass through vision encoder to obtain visual embeddings corresponding to each mask
             vis_embs = []
@@ -293,108 +288,76 @@ class VisualSceneAnalyzer(nn.Module):
 
         return final_masks
 
-    def _visual_prompt_by_mask(self, image, bg_image, masks):
+    def lr_features_from_masks(self, images, masks, lr_mask_area, resolution_multiplier):
         """
-        'Visual prompt engineering' (cf. CLIPSeg paper) factored out for readability
+        Helper method factored out for extracting patch-level features at a 'low'
+        resolution; control feature resolution by determining the low-res dimensions
+        such that the masked areas come close to a desired value (as specified by
+        `lr_mask_area` parameter). Return patch-level features & corresponding masks
+        at the lower resolution along with the low-res dimensions.
+
+        (`resolution_multiplier`, if set larger than 1, produces features and masks
+        at a finer resolution by bilinear interpolation. Essentially a workaround
+        for not being able to process larger images with feature extractor, limited
+        by VRAM size.)
         """
-        # Obtain visual prompts to process by mixing image & bg_image per each mask...
-        images_mixed = [
-            (image * msk[:,:,None] + bg_image * (1-msk[:,:,None])).astype("uint8")
-            for msk in masks
+        # Shortcuts
+        dino_config = self.dino.config
+        dino_processor = self.dino_processor
+        dino = self.dino
+
+        # Process zoomed images and extract features
+        resize_multipliers = [
+            sqrt(lr_mask_area / z_msk.sum()) * dino_config.patch_size
+            for z_msk in masks
+        ]
+        images_processed = [
+            dino_processor.preprocess(
+                images=[z_img], do_resize=True,
+                size={ "shortest_edge": int(mpl * min(z_img.width, z_img.height)) },
+                return_tensors="pt"
+            )
+            for z_img, mpl in zip(images, resize_multipliers)
         ]
 
-        # ... then cropping with some context & square pad as needed
-        visual_prompts = []
-        for i, msk in enumerate(masks):
-            nonzero_y, nonzero_x = msk.nonzero()
-            x1 = nonzero_x.min(); x2 = nonzero_x.max(); w = x2-x1
-            y1 = nonzero_y.min(); y2 = nonzero_y.max(); h = y2-y1
+        patch_features = []; lr_masks = []; lr_dims = []
+        for pr_img, z_msk in zip(images_processed, masks):
+            # Extract patch-level features from the images and resize masks
+            features = dino(
+                pr_img.pixel_values.to(dino.device), return_dict=True
+            ).last_hidden_state[:,1:]
 
-            pad_ratio = 1/16          # Relative size to one side
-            if w >= h:
-                w_pad = int(w*pad_ratio)
-                target_size = w + 2*w_pad
-                h_pad = (target_size-h) // 2
-                # w_pad = int(w*pad_ratio)
-                # h_pad = w_pad
+            # Get base low-resolution dimensions
+            pr_width = pr_img.pixel_values.shape[-1]
+            pr_height = pr_img.pixel_values.shape[-2]
+            if pr_width >= pr_height:
+                # Zoomed image width wider
+                lr_height = int(pr_height / dino_config.patch_size)
+                lr_width = int(features.shape[1] / lr_height)
             else:
-                h_pad = int(h*pad_ratio)
-                target_size = h + 2*h_pad
-                w_pad = (target_size-w) // 2
-                # h_pad = int(h*pad_ratio)
-                # w_pad = h_pad
+                # Zoomed image height taller
+                lr_width = int(pr_width / dino_config.patch_size)
+                lr_height = int(features.shape[1] / lr_width)
 
-            x1_crp = max(0, x1-w_pad); x2_crp = min(image.width, x2+w_pad)
-            y1_crp = max(0, y1-h_pad); y2_crp = min(image.height, y2+h_pad)
-            pad_spec = (
-                -min(0, x1-w_pad), max(image.width, x2+w_pad) - image.width,
-                -min(0, y1-h_pad), max(image.height, y2+h_pad) - image.height
+            if resolution_multiplier != 1:
+                # Resizing according to the resolution multiplier
+                features = features.reshape(1, lr_height, lr_width, -1)
+                features = F.interpolate(
+                    features.permute(0,3,1,2),
+                    scale_factor=resolution_multiplier, mode="bilinear"
+                ).permute(0,2,3,1)
+                lr_height, lr_width = features.shape[1:3]
+            mask_resized = cv.resize(
+                z_msk.astype(int), (lr_width, lr_height),
+                interpolation=cv.INTER_NEAREST_EXACT
             )
 
-            # Draw contour as guided by mask
-            contour = dilation(dilation(msk)) & ~msk
-            images_mixed[i][contour] = [255,0,0]
+            # Store results
+            patch_features.append(features)
+            lr_masks.append(mask_resized.astype(bool))
+            lr_dims.append((lr_width, lr_height))
 
-            cropped = torch.tensor(images_mixed[i][y1_crp:y2_crp, x1_crp:x2_crp])
-            cropped = F.pad(cropped.permute(2,0,1), pad_spec)
-            visual_prompts.append(cropped)
-        
-        return visual_prompts
-
-    def cache_image_encodings(self):
-        """
-        Preprocess dataset images with the image encoder and store to local disk
-        in advance, so that image encoding is not bottlenecked by the computationally
-        demanding process (but rather than by file I/O, which can be mitigated by
-        using multiple workers in dataloaders)
-        """
-        # Data input directory
-        dataset_path = self.cfg.vision.data.path
-        images_path = os.path.join(dataset_path, "images")
-
-        # Embedding cache output directory
-        cache_path = self.cfg.paths.cache_dir
-        os.makedirs(cache_path, exist_ok=True)
-
-        # Dataset name (e.g., 'vaw')
-        d_name = self.cfg.vision.data.name
-
-        # Need to move to cuda as this method is not handled by pytorch lightning Trainer
-        if torch.cuda.is_available():
-            self.cuda()
-
-        # Process each image in images_path
-        all_images = os.listdir(images_path)
-        pbar = tqdm(all_images, total=len(all_images))
-        pbar.set_description("Pre-computing image embs")
-
-        for img in pbar:
-            # Load raw image
-            image_raw = Image.open(f"{images_path}/{img}")
-            image_id = img.split(".")[0]
-
-            # Load and preprocess raw image
-            processed_input = self.sam_processor(
-                image_raw,
-                return_tensors="pt"
-            ).to(self.sam.device)
-
-            # Obtain image embeddings from the raw pixel values
-            with torch.no_grad():
-                img_embs = self.sam.get_image_embeddings(processed_input["pixel_values"])
-                img_embs = img_embs.cpu().numpy()
-
-            # Save embedding (along with metadata like original size, reshaped size)
-            # as compressed file
-            with gzip.open(f"{cache_path}/{d_name}_{image_id}.gz", "wb") as enc_f:
-                # Replace raw pixel values with the computed embeddings, then save
-                processed_input["embedding"] = img_embs
-                processed_input["original_sizes"] = \
-                    processed_input["original_sizes"][0].tolist()
-                processed_input["reshaped_input_sizes"] = \
-                    processed_input["reshaped_input_sizes"][0].tolist()
-                del processed_input["pixel_values"]
-                pickle.dump(processed_input, enc_f)
+        return patch_features, lr_masks, lr_dims
 
 
 def _crop_exemplars_by_masks(exemplar_prompts):
@@ -447,7 +410,6 @@ def _crop_exemplars_by_masks(exemplar_prompts):
     return cropped_images, cropped_masks
 
 
-
 def _patch_matching(
         images, masks, orig_size, device,
         dino_model, dino_processor, dino_embs, dino_config
@@ -485,6 +447,7 @@ def _patch_matching(
         for msk_resized in ex_masks_flattened
     ])
 
+    # TODO: Use refactored util method for patch matching
     # Forward matching
     match_forward = linear_sum_assignment(S[ex_masks_flattened], maximize=True)
     # Reverse matching

@@ -6,29 +6,22 @@ Segment Anything Model (SAM).
 """
 import os
 import shutil
-import pathlib
-import logging
-from math import sqrt
 from PIL import Image
 from itertools import product
 from collections import defaultdict
 
 import torch
-import pycolmap
 import cv2 as cv
 import numpy as np
-import torch.nn.functional as F
+import open3d as o3d
 from pycocotools import mask
-from scipy.optimize import linear_sum_assignment
+from sklearn.metrics import pairwise_distances
 
 from .modeling import VisualSceneAnalyzer
 from .utils import (
-    crop_images_by_masks, quaternion_to_rotation_matrix
+    crop_images_by_masks, quaternion_to_rotation_matrix, masked_patch_match, xyzw2wxyz
 )
-from .utils.visualize import visualize_sg_predictions
-from .utils.colmap_database import COLMAPDatabase
-
-logger = logging.getLogger(__name__)
+from .utils.colmap.reconstruction import reconstruct_with_known_poses
 
 
 DEF_CON = 0.6       # Default confidence value in absence of binary concept classifier
@@ -60,31 +53,28 @@ class VisionModule:
 
         self.confusions = set()
 
-    def predict(
-        self, image, exemplars, reclassify=False, masks=None, specs=None,
-        visualize=False, lexicon=None
-    ):
+    def predict(self, image, exemplars, reclassify=False, masks=None, specs=None):
         """
         Model inference in either one of four modes:
-            1) full scene graph generation mode, where the module is only given
+            (1) full scene graph generation mode, where the module is only given
                 an image and needs to return its estimation of the full scene
                 graph for the input
-            2) concept reclassification mode, where the scene objects and their
+            (2) concept reclassification mode, where the scene objects and their
                 visual embeddings are preserved intact and only the concept tests
                 are run again (most likely called when agent exemplar base is updated)
-            3) instance classification mode, where a number of masks are given
+            (3) instance classification mode, where a number of masks are given
                 along with the image and category predictions are made for only
                 those instances
-            4) instance search mode, where a specification is provided in the
+            (4) instance search mode, where a specification is provided in the
                 form of FOL formula with a variable and best fitting instance(s)
                 should be searched
 
-        3) and 4) are 'incremental' in the sense that they should add to an existing
+        (3) and (4) are 'incremental' in the sense that they should add to an existing
         scene graph which is already generated with some previous execution of this
         method.
         
-        Provide reclassify=True to run in 2) mode. Provide masks arg to run in 3) mode,
-        or spec arg to run in 4) mode. All prediction modes are mutually exclusive in
+        Provide reclassify=True to run in (2) mode. Provide masks arg to run in (3) mode,
+        or spec arg to run in (4) mode. All prediction modes are mutually exclusive in
         the sense that only one of their corresponding 'flags' should be active.
         """
         masks_provided = masks is not None
@@ -114,8 +104,7 @@ class VisionModule:
                         "vis_emb": vis_embs[i],
                         "pred_mask": masks_out[i],
                         "pred_objectness": scores[i],
-                        "pred_cls": self._fs_conc_pred(exemplars, vis_embs[i], "cls"),
-                        "pred_att": self._fs_conc_pred(exemplars, vis_embs[i], "att"),
+                        "pred_cls": self._fs_conc_pred(exemplars, vis_embs[i], "pcls"),
                         "pred_rel": {
                             f"o{j}": np.zeros(self.inventories.rel)
                             for j in range(self.K) if i != j
@@ -145,8 +134,7 @@ class VisionModule:
                 # Concept reclassification with the same set of objects
                 for obj_i in self.scene.values():
                     vis_emb = obj_i["vis_emb"]
-                    obj_i["pred_cls"] = self._fs_conc_pred(exemplars, vis_emb, "cls")
-                    obj_i["pred_att"] = self._fs_conc_pred(exemplars, vis_emb, "att")
+                    obj_i["pred_cls"] = self._fs_conc_pred(exemplars, vis_emb, "pcls")
 
             else:
                 # Incremental scene graph expansion
@@ -179,17 +167,6 @@ class VisionModule:
                 # Update visual scene
                 self._incremental_scene_update(incr_preds, new_objs, exemplars)
 
-        if visualize:
-            if lexicon is not None:
-                lexicon = {
-                    conc_type: {
-                        ci: lexicon.d2s[(ci, conc_type)][0][0].split("/")[0]
-                        for ci in range(getattr(self.inventories, conc_type))
-                    }
-                    for conc_type in ["cls", "att"]
-                }
-            self.summ = visualize_sg_predictions(self.latest_inputs[-1], self.scene, lexicon)
-
     def _fs_conc_pred(self, exemplars, emb, conc_type):
         """
         Helper method factored out for few-shot concept probability estimation
@@ -199,9 +176,9 @@ class VisionModule:
             # Non-empty concept inventory, most cases
             predictions = []
             for ci in range(conc_inventory_count):
-                if exemplars.binary_classifiers[conc_type][ci] is not None:
+                if exemplars.binary_classifiers_2d[conc_type][ci] is not None:
                     # Binary classifier induced from pos/neg exemplars exists
-                    clf = exemplars.binary_classifiers[conc_type][ci]
+                    clf = exemplars.binary_classifiers_2d[conc_type][ci]
                     pred = clf.predict_proba(emb[None])[0]
                     pred = max(min(pred[1], 0.99), 0.01)    # Soften absolute certainty)
                     predictions.append(pred)
@@ -242,23 +219,23 @@ class VisionModule:
                         conc_ind = int(conc_ind)
 
                         match conc_type:
-                            case "cls" | "att":
+                            case "pcls":
                                 # Fetch set of positive exemplars
-                                pos_exs_inds = exemplars.exemplars_pos[conc_type][conc_ind]
+                                pos_exs_inds = exemplars.object_2d_pos[conc_type][conc_ind]
                                 pos_exs_info = [
                                     (
-                                        exemplars.scenes[scene_id][0],
+                                        exemplars.scenes_2d[scene_id][0],
                                         mask.decode(
-                                            exemplars.scenes[scene_id][1][obj_id]["mask"]
+                                            exemplars.scenes_2d[scene_id][1][obj_id]["mask"]
                                         ).astype(bool),
-                                        exemplars.scenes[scene_id][1][obj_id]["f_vec"]
+                                        exemplars.scenes_2d[scene_id][1][obj_id]["f_vec"]
                                     )
                                     for scene_id, obj_id in pos_exs_inds
                                 ]
-                                bin_clf = exemplars.binary_classifiers[conc_type][conc_ind]
+                                bin_clf = exemplars.binary_classifiers_2d[conc_type][conc_ind]
                                 disj_cond.append((pos_exs_info, bin_clf))
 
-                            case "rel":
+                            case "prel":
                                 # Relations are not neurally predicted, nor used for search
                                 # (for now, at least...)
                                 continue
@@ -275,23 +252,23 @@ class VisionModule:
                     conc_ind = int(conc_ind)
 
                     match conc_type:
-                        case "cls" | "att":
+                        case "pcls":
                             # Fetch set of positive exemplars
-                            pos_exs_inds = exemplars.exemplars_pos[conc_type][conc_ind]
+                            pos_exs_inds = exemplars.object_2d_pos[conc_type][conc_ind]
                             pos_exs_info = [
                                 (
-                                    exemplars.scenes[scene_id][0],
+                                    exemplars.scenes_2d[scene_id][0],
                                     mask.decode(
-                                        exemplars.scenes[scene_id][1][obj_id]["mask"]
+                                        exemplars.scenes_2d[scene_id][1][obj_id]["mask"]
                                     ).astype(bool),
-                                    exemplars.scenes[scene_id][1][obj_id]["f_vec"]
+                                    exemplars.scenes_2d[scene_id][1][obj_id]["f_vec"]
                                 )
                                 for scene_id, obj_id in pos_exs_inds
                             ]
-                            bin_clf = exemplars.binary_classifiers[conc_type][conc_ind]
+                            bin_clf = exemplars.binary_classifiers_2d[conc_type][conc_ind]
                             search_conds.append([(pos_exs_info, bin_clf)])
 
-                        case "rel":
+                        case "prel":
                             # Relations are not neurally predicted, nor used for search
                             # (for now, at least...)
                             continue
@@ -326,11 +303,11 @@ class VisionModule:
                     conc_ind = int(conc_ind)
 
                     match conc_type:
-                        case "cls" | "att":
+                        case "pcls":
                             # Use the returned scores as compatibility scores
                             comp_scores = torch.tensor(scores, device=self.model.device)
 
-                        case "rel":
+                        case "prel":
                             # Compatibility scores geometric relations, which are not neurally
                             # predicted int the current module implementation
 
@@ -416,8 +393,7 @@ class VisionModule:
                 "vis_emb": vis_emb,
                 "pred_mask": msk,
                 "pred_objectness": score,
-                "pred_cls": self._fs_conc_pred(exemplars, vis_emb, "cls"),
-                "pred_att": self._fs_conc_pred(exemplars, vis_emb, "att"),
+                "pred_cls": self._fs_conc_pred(exemplars, vis_emb, "pcls"),
                 "pred_rel": {
                     **{
                         oj: np.zeros(self.inventories.rel)
@@ -461,269 +437,14 @@ class VisionModule:
                 self.scene[oi]["pred_rel"][oj][0] = intersection_A / mask2_A
                 self.scene[oj]["pred_rel"][oi][0] = intersection_A / mask1_A
 
-    def reconstruct_3d_structure(self, images, masks, viewpoint_poses, con_graph):
-        """
-        Given lists of images & binary masks of an object viewed from different
-        viewpoints and the poses of the viewpoints, estimate the (approximate) 3D
-        structure of the object, represented as a point cloud. Also provided with
-        an undirected graph that represents pairs of images to be cross-referenced.
-
-        Steps: 1) Obtain patch-level features from the feature extraction module,
-        2) obtain matches between patches on feature basis, 3) invoke pycolmap's
-        geometric verification & point triangulation methods based on the matches.
-        """
-        assert len(images) == len(masks) == len(viewpoint_poses) == len(con_graph.nodes)
-
-        dino_config = self.model.dino.config
-        dino_processor = self.model.dino_processor
-        dino_model = self.model.dino
-
-        # Crop images & masks according to masks, effectively zooming in
-        zoomed_images, zoomed_masks, crop_dims = crop_images_by_masks(images, masks)
-
-        # Process zoomed images and extract features
-        lr_area = 2400      # Rough target area of low-res feature maps
-        resize_multipliers = [
-            sqrt(lr_area / (z_img.width * z_img.height)) * dino_config.patch_size
-            for z_img in zoomed_images
-        ]
-        images_processed = [
-            dino_processor.preprocess(
-                images=[z_img], do_resize=True,
-                size={ "shortest_edge": int(mpl * min(z_img.width, z_img.height)) },
-                return_tensors="pt"
-            )
-            for z_img, mpl in zip(zoomed_images, resize_multipliers)
-        ]
-
-        with torch.no_grad():
-            # Iterating over all edges (image pairs), starting from ones involving
-            # lowest-degree nodes
-            node_unprocessed_neighbors = { n: set(con_graph.adj[n]) for n in con_graph.nodes }
-            rough_matches = {}        # To store inter-patch matches, later to be verified
-
-            patch_features = []; masks_flattened = []; lr_dims = []
-            for pr_img, z_msk in zip(images_processed, zoomed_masks):
-                # Extract patch-level features from the images and resize masks
-                features = dino_model(
-                    pr_img.pixel_values.to(dino_model.device), return_dict=True
-                ).last_hidden_state[:,1:]
-                patch_features.append(features)
-
-                pr_width = pr_img.pixel_values.shape[-1]
-                pr_height = pr_img.pixel_values.shape[-2]
-                if pr_width >= pr_height:
-                    # Zoomed image width wider
-                    lr_height = int(pr_height / dino_config.patch_size)
-                    lr_width = int(features.shape[1] / lr_height)
-                else:
-                    # Zoomed image height taller
-                    lr_width = int(pr_width / dino_config.patch_size)
-                    lr_height = int(features.shape[1] / lr_width)
-                lr_dims.append((lr_width, lr_height))
-
-                mask_resized = cv.resize(
-                    z_msk.astype(int), (lr_width, lr_height),
-                    interpolation=cv.INTER_NEAREST_EXACT
-                )
-                masks_flattened.append(mask_resized.reshape(-1).astype(bool))
-
-            # Iterate until no unprocessed edges are left
-            point_coords = defaultdict(dict)
-            while not all(len(neighbors)==0 for neighbors in node_unprocessed_neighbors.values()):
-                # Fetch a node with the currently lowest degree w.r.t. unprocessed neighbors
-                lowest_degree_nodes = sorted(
-                    [n for n in con_graph.nodes if len(node_unprocessed_neighbors[n]) > 0],
-                    key=lambda x: len(node_unprocessed_neighbors[x])
-                )
-                u = lowest_degree_nodes[0]
-                nonzero_inds_u = masks_flattened[u].nonzero()[0]
-
-                # Iterate over unprocessed connected neighbors
-                processed_edges = set()
-                for v in node_unprocessed_neighbors[u]:
-                    # Feature matching; first compute cosine similarities between patches
-                    features_nrm_u = F.normalize(
-                        patch_features[u].reshape(-1, dino_config.hidden_size)
-                    )
-                    features_nrm_v = F.normalize(
-                        patch_features[v].reshape(-1, dino_config.hidden_size)
-                    )
-                    S = (features_nrm_u @ features_nrm_v.t()).cpu()
-                    # Forward matching
-                    match_forward = linear_sum_assignment(S[masks_flattened[u]], maximize=True)
-                    # Reverse matching
-                    match_reverse = linear_sum_assignment(S.t()[match_forward[1]], maximize=True)
-                    # Mask filtering
-                    retain_inds = np.isin(match_reverse[1], nonzero_inds_u)
-                    # Fetch and unflatten matched patch indices
-                    matched_patches_u = np.stack([
-                        nonzero_inds_u[match_forward[0][retain_inds]] % lr_dims[u][0],
-                        nonzero_inds_u[match_forward[0][retain_inds]] // lr_dims[u][0],
-                        nonzero_inds_u[match_forward[0][retain_inds]]
-                    ], axis=1)
-                    matched_patches_v = np.stack([
-                        match_forward[1][retain_inds] % lr_dims[v][0],
-                        match_forward[1][retain_inds] // lr_dims[v][0],
-                        match_forward[1][retain_inds]
-                    ], axis=1)
-
-                    # Record matches
-                    x_ratio_u = zoomed_images[u].width / lr_dims[u][0]
-                    y_ratio_u = zoomed_images[u].height / lr_dims[u][1]
-                    x_ratio_v = zoomed_images[v].width / lr_dims[v][0]
-                    y_ratio_v = zoomed_images[v].height / lr_dims[v][1]
-                    rough_matches[(u, v)] = []
-                    for (x_u, y_u, i_u), (x_v, y_v, i_v) in zip(matched_patches_u, matched_patches_v):
-                        rough_matches[(u, v)].append((i_u, i_v))
-                        point_coords[u][i_u] = np.array([[
-                            crop_dims[u][0] + (x_u+0.5) * x_ratio_u,
-                            crop_dims[u][2] + (y_u+0.5) * y_ratio_u
-                        ]])
-                        point_coords[v][i_v] = np.array([[
-                            crop_dims[v][0] + (x_v+0.5) * x_ratio_v,
-                            crop_dims[v][2] + (y_v+0.5) * y_ratio_v
-                        ]])
-
-                    processed_edges.add((u, v))
-
-                # Check off processed edges                
-                for u, v in processed_edges:
-                    node_unprocessed_neighbors[u].remove(v)
-                    node_unprocessed_neighbors[v].remove(u)
-
-        # Call pycolmap methods needed for 3D reconstruction; first prepare directory
-        # structure properly containing necessary data
-        colmap_in_path = os.path.join(self.cfg.paths.outputs_dir, "colmap_in")
-        colmap_out_path = os.path.join(self.cfg.paths.outputs_dir, "colmap_out")
-        if os.path.exists(colmap_in_path):
-            for path in pathlib.Path(colmap_in_path).glob("**/*"):
-                if path.is_file(): path.unlink()
-                elif path.is_dir(): shutil.rmtree(path)
-        else:
-            os.makedirs(colmap_in_path, exist_ok=True)
-        if os.path.exists(colmap_out_path):
-            for path in pathlib.Path(colmap_out_path).glob("**/*"):
-                if path.is_file(): path.unlink()
-                elif path.is_dir(): shutil.rmtree(path)
-        else:
-            os.makedirs(colmap_out_path, exist_ok=True)
-
-        # Create empty points3D.txt file
-        with open(os.path.join(colmap_in_path, "points3D.txt"), mode='w'): pass
-        # Create cameras.txt file and add camera info
-        with open(os.path.join(colmap_in_path, "cameras.txt"), mode='w') as cams_txt_f:
-            assert self.camera_intrinsics is not None
-            cam_K, distortion_coeffs = self.camera_intrinsics
-            fx = cam_K[0][0]; fy = cam_K[1][1]; cx = cam_K[0][2]; cy = cam_K[1][2]
-            k1, k2, p1, p2, *_ = distortion_coeffs[0]
-            line = "1 OPENCV 800 600 "
-            line += f"{fx:.5f} {fy:.5f} {cx:.5f} {cy:.5f} {k1:.5f} {k2:.5f} {p1:.5f} {p2:.5f}"
-            cams_txt_f.write(line + "\n")
-        # Create images.txt file and add image info
-        with open(os.path.join(colmap_in_path, "images.txt"), mode='w') as imgs_txt_f:
-            for id in images:
-                (qw, qx, qy, qz), (tx, ty, tz) = viewpoint_poses[id]
-                line = f"{id+1} {qw:.5f} {qx:.5f} {qy:.5f} {qz:.5f} "
-                line += f"{tx:.5f} {ty:.5f} {tz:.5f} 1 {id+1}.png"
-                imgs_txt_f.write(line + "\n\n")
-        # Create a subdirectory and save image files there
-        os.makedirs(os.path.join(colmap_in_path, "images"), exist_ok=True)
-        for id, img in images.items():
-            img.save(os.path.join(colmap_in_path, "images", f"{id+1}.png"))
-
-        # pycolmap reconstruction object
-        reconstruction_template = pycolmap.Reconstruction(colmap_in_path)
-
-        # Initialize a SQL database, populate with cameras, images and keypoints info
-        colmap_db = COLMAPDatabase(os.path.join(colmap_in_path, "database.db"))
-        colmap_db.create_tables()
-        for cam in reconstruction_template.cameras.values():
-            colmap_db.add_camera(
-                cam.model.value, cam.width, cam.height, cam.params,
-                camera_id=cam.camera_id, prior_focal_length=True    # Calibrated camera
-            )
-        for img in reconstruction_template.images.values():
-            qx, qy, qz, qw = img.cam_from_world.rotation.quat
-            txyz = img.cam_from_world.translation
-            colmap_db.add_image(
-                img.name, img.camera_id, prior_q=[qw, qx, qy, qz], prior_t=txyz,
-                image_id=img.image_id
-            )
-        n2db_map = defaultdict(dict); db2n_map = defaultdict(dict)
-        for n, points in point_coords.items():
-            colmap_db.add_keypoints(n+1, np.concatenate(list(points.values())))
-            for i_db, i_n in enumerate(points):
-                n2db_map[n][i_db] = i_n; db2n_map[n][i_n] = i_db
-
-        # Geometric verification by pycolmap two-view geometry estimation
-        for (u, v), matches in rough_matches.items():
-            # Verified matches stored as inlier_matches
-            two_view_geom = pycolmap.estimate_two_view_geometry(
-                reconstruction_template.cameras[1],
-                np.concatenate([
-                    point_coords[u][n2db_map[u][i]] for i in range(len(n2db_map[u]))
-                ]),
-                reconstruction_template.cameras[1],
-                np.concatenate([
-                    point_coords[v][n2db_map[v][i]] for i in range(len(n2db_map[v]))
-                ]),
-                np.array([[db2n_map[u][i_u], db2n_map[v][i_v]] for i_u, i_v in matches])
-            )
-
-            # Add matches data to colmap db
-            colmap_db.add_matches(u+1, v+1, two_view_geom.inlier_matches)
-
-            # Add verification results to colmap db
-            colmap_db.add_two_view_geometry(
-                u+1, v+1,
-                two_view_geom.inlier_matches,
-                F=two_view_geom.F, E=two_view_geom.E, H=two_view_geom.H
-            )
-
-        colmap_db.commit()
-
-        # Final step: point triangulation
-        reconstruction = pycolmap.triangulate_points(
-            reconstruction_template,
-            os.path.join(colmap_in_path, "database.db"),
-            os.path.join(colmap_in_path, "images"),
-            colmap_out_path
-        )
-
-        # Rough initial filtering by estimated reconstruction error
-        points3d = [pt for pt in reconstruction.points3D.values() if pt.error < 5]
-
-        # Collect points and filter by 2D reprojection vs. masks
-        for msk, (quat, trns) in zip(masks.values(), viewpoint_poses):
-            # Project to 2D image coordinate from this viewing angle
-            cam_K, distortion_coeffs = self.camera_intrinsics
-            rmat = quaternion_to_rotation_matrix(quat)
-            projections = cv.projectPoints(
-                np.stack([p.xyz for p in points3d]),
-                cv.Rodrigues(rmat)[0], np.array(trns),
-                cam_K, distortion_coeffs
-            )[0]
-            projections = [prj[0] for prj in projections]
-
-            # We have ground truth segmentation masks, filter out points whose
-            # 2D reprojections fall out of the masks
-            points3d = [
-                pt for pt, (u, v) in zip(points3d, projections)
-                if (0 <= round(u) < msk.shape[1]) and (0 <= round(v) < msk.shape[0]) \
-                    and msk[round(v), round(u)]
-            ]
-
-        return points3d
-
     def add_concept(self, conc_type):
         """
-        Register a novel visual concept to the model, expanding the concept inventory of
-        corresponding category type (class/attribute/relation). Note that visual concepts
-        are not inseparably attached to some linguistic symbols; such connections are rather
+        Register a novel visual concept to the model, expanding the concept inventory
+        of corresponding category type (pcls, prel). Note that visual concepts are not
+        inseparably attached to some linguistic symbols; such connections are rather
         incidental and should be established independently (consider synonyms, homonyms).
-        Plus, this should allow more flexibility for, say, multilingual agents, though there
-        is no plan to address that for now...
+        Plus, this should allow more flexibility for, say, multilingual agents, though
+        there is no plan to address that for now...
 
         Returns the index of the newly added concept.
         """
@@ -754,6 +475,181 @@ class VisionModule:
             points_3d, points_2d, gray.shape[::-1], None, None
         )
         self.camera_intrinsics = (cam_K, distortion_coeffs)
+
+    def reconstruct_3d_structure(
+        self, images, masks, viewpoint_poses, con_graph, resolution_multiplier=1
+    ):
+        """
+        Given lists of images & binary masks of an object viewed from different
+        viewpoints and the poses of the viewpoints, estimate the (approximate) 3D
+        structure of the object, represented as a point cloud. Also provided with
+        an undirected graph that represents pairs of images to be cross-referenced.
+
+        Steps: (1) Obtain patch-level features from the feature extraction module,
+        (2) obtain matches between patches on feature basis, (3) invoke pycolmap's
+        geometric verification & point triangulation methods based on the matches.
+        """
+        assert len(images) == len(masks) == len(viewpoint_poses) == len(con_graph.nodes)
+
+        # Crop images & masks according to masks, effectively zooming in
+        zoomed_images, zoomed_masks, crop_dims = crop_images_by_masks(images, masks)
+
+        self.model.eval()
+        with torch.no_grad():
+            # Obtain (flattened) patch-level features and corresponding masks extracted from
+            # the zoomed images
+            lr_mask_area = 900
+            patch_features, lr_masks, lr_dims = self.model.lr_features_from_masks(
+                zoomed_images, zoomed_masks, lr_mask_area, resolution_multiplier
+            )
+            D = patch_features[0].shape[-1]
+
+            # Iterating over all edges (image pairs), starting from ones involving lowest-degree
+            # nodes, until no unprocessed edges are left
+            node_unprocessed_neighbors = { n: set(con_graph.adj[n]) for n in con_graph.nodes }
+            rough_matches = {}        # To store initial inter-patch matches, verified later
+            point_coords = defaultdict(dict)
+            while not all(len(neighbors)==0 for neighbors in node_unprocessed_neighbors.values()):
+                # Fetch a node with the currently lowest degree w.r.t. unprocessed neighbors
+                lowest_degree_nodes = sorted(
+                    [n for n in con_graph.nodes if len(node_unprocessed_neighbors[n]) > 0],
+                    key=lambda x: len(node_unprocessed_neighbors[x])
+                )
+                u = lowest_degree_nodes[0]
+
+                # Iterate over unprocessed connected neighbors
+                processed_edges = set()
+                for v in node_unprocessed_neighbors[u]:
+                    # Bidirectional matches between masked patches indexed by u vs. v
+                    matched_patches_u, matched_patches_v = masked_patch_match(
+                        patch_features[u], patch_features[v],
+                        lr_masks[u], lr_dims[u][0], lr_dims[v][0]
+                    )
+
+                    # Record matches
+                    x_ratio_u = zoomed_images[u].width / lr_dims[u][0]
+                    y_ratio_u = zoomed_images[u].height / lr_dims[u][1]
+                    x_ratio_v = zoomed_images[v].width / lr_dims[v][0]
+                    y_ratio_v = zoomed_images[v].height / lr_dims[v][1]
+                    rough_matches[(u, v)] = []
+                    for (i_u, x_u, y_u), (i_v, x_v, y_v) in zip(matched_patches_u, matched_patches_v):
+                        rough_matches[(u, v)].append((i_u, i_v))
+                        point_coords[u][i_u] = np.array([[
+                            crop_dims[u][0] + x_u * x_ratio_u,
+                            crop_dims[u][2] + y_u * y_ratio_u
+                        ]])
+                        point_coords[v][i_v] = np.array([[
+                            crop_dims[v][0] + x_v * x_ratio_v,
+                            crop_dims[v][2] + y_v * y_ratio_v
+                        ]])
+
+                    processed_edges.add((u, v))
+
+                # Check off processed edges                
+                for u, v in processed_edges:
+                    node_unprocessed_neighbors[u].remove(v)
+                    node_unprocessed_neighbors[v].remove(u)
+
+        assert self.camera_intrinsics is not None
+        reconstruction, colmap2patch_map = reconstruct_with_known_poses(
+            point_coords, rough_matches, viewpoint_poses, self.camera_intrinsics,
+            images, self.cfg.paths.outputs_dir
+        )
+        # COLMAP temporary working directory cleanup
+        colmap_path = os.path.join(self.cfg.paths.outputs_dir, "colmap")
+        shutil.rmtree(colmap_path)
+
+        # Rough initial filtering by estimated reconstruction error
+        points3d = [
+            (pi, pt) for pi, pt in reconstruction.points3D.items()
+            if pt.error < 5
+        ]
+
+        # Collect points and filter by 2D reprojection vs. masks
+        for msk, (quat, trns) in zip(masks.values(), viewpoint_poses):
+            # Project to 2D image coordinate from this viewing angle
+            cam_K, distortion_coeffs = self.camera_intrinsics
+            rmat = quaternion_to_rotation_matrix(quat)
+            projections = cv.projectPoints(
+                np.stack([pt.xyz for _, pt in points3d]),
+                cv.Rodrigues(rmat)[0], np.array(trns),
+                cam_K, distortion_coeffs
+            )[0]
+            projections = [prj[0] for prj in projections]
+
+            # We have ground truth segmentation masks, filter out points whose
+            # 2D reprojections fall out of the masks
+            points3d = [
+                (pi, pt) for (pi, pt), (u, v) in zip(points3d, projections)
+                if (0 <= round(u) < msk.shape[1]) and (0 <= round(v) < msk.shape[0]) \
+                    and msk[round(v), round(u)]
+            ]
+        points3d = dict(points3d)
+
+        # Organize reconstruction output into return values
+
+        # Format as Open3d point cloud data structure
+        reindex_map = dict(enumerate(sorted(points3d)))
+        reindex_map_inv = { v: k for k, v in reindex_map.items() }
+        reindexed_points = np.array([
+            points3d[reindex_map[i]].xyz for i in range(len(reindex_map))
+        ])
+        # reindexed_points[:,1] = -reindexed_points[:,1]
+            # y-axis faces downward in COLMAP, upward in Unity; adjust by flipping
+            # y coordinates of the points
+        point_cloud = o3d.geometry.PointCloud(
+            points=o3d.utility.Vector3dVector(reindexed_points)
+        )
+        # # Estimate normals for FPFH feature computation
+        # point_cloud.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=60))
+
+        # Storing 2d-visual features from deep vision model in XB would require
+        # to much space; select keypoints from ISS shape descriptors and add in
+        # some randomly downsampled points
+        avg_nn_dist = np.array(point_cloud.compute_nearest_neighbor_distance()).mean()
+        keypoints = np.concatenate([
+            np.asarray(o3d.geometry.keypoint.compute_iss_keypoints(
+                point_cloud, salient_radius=avg_nn_dist*2, non_max_radius=avg_nn_dist*2
+            ).points),
+            np.asarray(point_cloud.random_down_sample(0.1).points)
+        ])
+        keypoints = o3d.geometry.PointCloud(points=o3d.utility.Vector3dVector(keypoints))
+        keypoints.remove_duplicated_points()
+        # Finding the indices of the keypoints in the original point cloud
+        pdists = pairwise_distances(keypoints.points, point_cloud.points)
+        kp_inds = pdists.argmin(axis=1).tolist()
+
+        # Collect view info and point descriptors
+        views = {}; descriptors = defaultdict(dict)
+        for i, (_, img) in enumerate(sorted(reconstruction.images.items())):
+            views[i] = {
+                "cam_quaternion": xyzw2wxyz(img.cam_from_world.rotation.quat),
+                "cam_position": img.cam_from_world.translation,
+                "visible_points": set(), "visible_keypoints": set()
+            }
+
+            # Fetch 2d visual features (while registering as visible at each view)
+            for p2i, p2d in enumerate(img.points2D):
+                p3i = p2d.point3D_id
+                if p3i not in reindex_map_inv: continue     # Ignore invalid p2ds
+                p3i_reind = reindex_map_inv[p3i]
+
+                patch_index = colmap2patch_map[i][p2i]
+                views[i]["visible_points"].add(p3i_reind)
+                if p3i_reind in kp_inds:
+                    # Store descriptor only if a keypoint
+                    views[i]["visible_keypoints"].add(p3i_reind)
+                    fetched_features = patch_features[i].reshape(-1, D)[patch_index]
+                    descriptors[p3i_reind][i] = fetched_features.cpu().numpy()
+
+        descriptors = dict(descriptors)
+
+        # descriptors["fpfh"] = o3d.pipelines.registration.compute_fpfh_feature(
+        #     point_cloud, o3d.geometry.KDTreeSearchParamKNN(knn=60)
+        # )
+        # descriptors["fpfh"] = np.transpose(descriptors["fpfh"].data)
+
+        return point_cloud, views, descriptors
 
 
 class VisualConceptInventory:

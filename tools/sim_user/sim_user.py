@@ -202,28 +202,35 @@ class SimulatedTeacher:
                     if act_type.startswith("PickUp"):
                         # For PickUp~ actions, provide demonstrative reference by string path
                         # to target GameObject (which will be converted into binary mask)
+                        target = act_params[0]
+                        crange = (offset+1, offset+1+len(target))
                         act_anno = {
-                            "utterance": f"# Action: {act_type}(target)",
-                            "pointing": { (offset+1, offset+7): "/" + act_params[0] }
+                            "utterance": f"# Action: {act_type}({target})",
+                            "pointing": { crange: "/" + act_params[0] }
                         }
                     elif act_type.startswith("Assemble"):
                         # For Assemble~ actions, provide contact point info, specified by
                         # (atomic part supertype, string identifier) pair
+                        target_l, target_r, subassembly = act_params
+                        crange_l = (offset+1, offset+1+len(target_l))
+                        crange_r = (crange_l[1]+1, crange_l[1]+1+len(target_r))
                         act_anno = {
-                            "utterance": f"# Action: {act_type}(target_l,target_r)",
+                            "utterance": f"# Action: {act_type}({target_l},{target_r},{subassembly})",
                             "pointing": {
-                                (offset+1, offset+9): "/Teacher Agent/Left Hand/*",
-                                (offset+10, offset+18): "/Teacher Agent/Right Hand/*"
+                                crange_l: "/Teacher Agent/Left Hand/*",
+                                crange_r: "/Teacher Agent/Right Hand/*"
                             }
                         }
                     elif act_type.startswith("Inspect"):
                         # For Inspect~ actions, provide integer index of (relative) viewpoint
                         hand = "Left" if act_type.endswith("Left") else "Right"
                         path_prefix = f"/Teacher Agent/{hand} Hand"
+                        target, view_ind = act_params
+                        crange = (offset+1, offset+1+len(target))
                         act_anno = {
-                            "utterance": f"# Action: {act_type}(target,{act_params[1]})",
+                            "utterance": f"# Action: {act_type}({target},{view_ind})",
                             "pointing": {
-                                (offset+1, offset+7): "/".join([path_prefix, "*"])
+                                crange: "/".join([path_prefix, "*"])
                             }
                         }
                     else:
