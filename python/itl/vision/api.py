@@ -19,7 +19,7 @@ from sklearn.metrics import pairwise_distances
 
 from .modeling import VisualSceneAnalyzer
 from .utils import (
-    crop_images_by_masks, quaternion_to_rotation_matrix, masked_patch_match, xyzw2wxyz
+    crop_images_by_masks, quat2rmat, masked_patch_match, xyzw2wxyz
 )
 from .utils.colmap.reconstruction import reconstruct_with_known_poses
 
@@ -104,7 +104,7 @@ class VisionModule:
                         "vis_emb": vis_embs[i],
                         "pred_mask": masks_out[i],
                         "pred_objectness": scores[i],
-                        "pred_cls": self._fs_conc_pred(exemplars, vis_embs[i], "pcls"),
+                        "pred_cls": self.fs_conc_pred(exemplars, vis_embs[i], "pcls"),
                         "pred_rel": {
                             f"o{j}": np.zeros(self.inventories.rel)
                             for j in range(self.K) if i != j
@@ -134,7 +134,7 @@ class VisionModule:
                 # Concept reclassification with the same set of objects
                 for obj_i in self.scene.values():
                     vis_emb = obj_i["vis_emb"]
-                    obj_i["pred_cls"] = self._fs_conc_pred(exemplars, vis_emb, "pcls")
+                    obj_i["pred_cls"] = self.fs_conc_pred(exemplars, vis_emb, "pcls")
 
             else:
                 # Incremental scene graph expansion
@@ -167,25 +167,31 @@ class VisionModule:
                 # Update visual scene
                 self._incremental_scene_update(incr_preds, new_objs, exemplars)
 
-    def _fs_conc_pred(self, exemplars, emb, conc_type):
+    def fs_conc_pred(self, exemplars, emb, conc_type):
         """
         Helper method factored out for few-shot concept probability estimation
         """
+        bin_clfs = exemplars.binary_classifiers_2d[conc_type]
+
         conc_inventory_count = getattr(self.inventories, conc_type)
         if conc_inventory_count > 0:
             # Non-empty concept inventory, most cases
             predictions = []
             for ci in range(conc_inventory_count):
-                if exemplars.binary_classifiers_2d[conc_type][ci] is not None:
-                    # Binary classifier induced from pos/neg exemplars exists
-                    clf = exemplars.binary_classifiers_2d[conc_type][ci]
-                    pred = clf.predict_proba(emb[None])[0]
-                    pred = max(min(pred[1], 0.99), 0.01)    # Soften absolute certainty)
-                    predictions.append(pred)
+                if ci in bin_clfs:
+                    if bin_clfs[ci] is not None:
+                        # Binary classifier induced from pos/neg exemplars exists
+                        clf = bin_clfs[ci]
+                        pred = clf.predict_proba(emb[None])[0]
+                        pred = max(min(pred[1], 0.99), 0.01)    # Soften absolute certainty)
+                        predictions.append(pred)
+                    else:
+                        # No binary classifier exists due to lack of either positive
+                        # or negative exemplars, fall back to default estimation
+                        predictions.append(DEF_CON)
                 else:
-                    # No binary classifier exists due to lack of either positive
-                    # or negative exemplars, fall back to default estimation
-                    predictions.append(DEF_CON)
+                    # Not a concept to be visually recognized
+                    predictions.append(0.0)
             return np.stack(predictions)
         else:
             # Empty concept inventory, likely at the very beginning of training
@@ -393,7 +399,7 @@ class VisionModule:
                 "vis_emb": vis_emb,
                 "pred_mask": msk,
                 "pred_objectness": score,
-                "pred_cls": self._fs_conc_pred(exemplars, vis_emb, "pcls"),
+                "pred_cls": self.fs_conc_pred(exemplars, vis_emb, "pcls"),
                 "pred_rel": {
                     **{
                         oj: np.zeros(self.inventories.rel)
@@ -498,7 +504,7 @@ class VisionModule:
         with torch.no_grad():
             # Obtain (flattened) patch-level features and corresponding masks extracted from
             # the zoomed images
-            lr_mask_area = 900
+            lr_mask_area = 800
             patch_features, lr_masks, lr_dims = self.model.lr_features_from_masks(
                 zoomed_images, zoomed_masks, lr_mask_area, resolution_multiplier
             )
@@ -569,7 +575,7 @@ class VisionModule:
         for msk, (quat, trns) in zip(masks.values(), viewpoint_poses):
             # Project to 2D image coordinate from this viewing angle
             cam_K, distortion_coeffs = self.camera_intrinsics
-            rmat = quaternion_to_rotation_matrix(quat)
+            rmat = quat2rmat(quat)
             projections = cv.projectPoints(
                 np.stack([pt.xyz for _, pt in points3d]),
                 cv.Rodrigues(rmat)[0], np.array(trns),
@@ -594,29 +600,28 @@ class VisionModule:
         reindexed_points = np.array([
             points3d[reindex_map[i]].xyz for i in range(len(reindex_map))
         ])
-        # reindexed_points[:,1] = -reindexed_points[:,1]
-            # y-axis faces downward in COLMAP, upward in Unity; adjust by flipping
-            # y coordinates of the points
         point_cloud = o3d.geometry.PointCloud(
             points=o3d.utility.Vector3dVector(reindexed_points)
         )
-        # # Estimate normals for FPFH feature computation
-        # point_cloud.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=60))
 
         # Storing 2d-visual features from deep vision model in XB would require
-        # to much space; select keypoints from ISS shape descriptors and add in
-        # some randomly downsampled points
+        # to much space; select randomly downsampled points
+        random_points = point_cloud.farthest_point_down_sample(
+            int(len(point_cloud.points) / 2)
+        )
+        # Also toss in some ISS-based keypoints
         avg_nn_dist = np.array(point_cloud.compute_nearest_neighbor_distance()).mean()
-        keypoints = np.concatenate([
-            np.asarray(o3d.geometry.keypoint.compute_iss_keypoints(
-                point_cloud, salient_radius=avg_nn_dist*2, non_max_radius=avg_nn_dist*2
-            ).points),
-            np.asarray(point_cloud.random_down_sample(0.1).points)
+        iss_keypoints = o3d.geometry.keypoint.compute_iss_keypoints(
+            point_cloud, salient_radius=avg_nn_dist*2, non_max_radius=avg_nn_dist*2
+        )
+        # Remove any potential redundancy
+        ds_points = np.concatenate([
+            np.asarray(random_points.points), np.asarray(iss_keypoints.points)
         ])
-        keypoints = o3d.geometry.PointCloud(points=o3d.utility.Vector3dVector(keypoints))
-        keypoints.remove_duplicated_points()
-        # Finding the indices of the keypoints in the original point cloud
-        pdists = pairwise_distances(keypoints.points, point_cloud.points)
+        ds_points = o3d.geometry.PointCloud(points=o3d.utility.Vector3dVector(ds_points))
+        ds_points.remove_duplicated_points()
+        # Finding the indices of the downsampled points in the original point cloud
+        pdists = pairwise_distances(ds_points.points, point_cloud.points)
         kp_inds = pdists.argmin(axis=1).tolist()
 
         # Collect view info and point descriptors
@@ -625,7 +630,7 @@ class VisionModule:
             views[i] = {
                 "cam_quaternion": xyzw2wxyz(img.cam_from_world.rotation.quat),
                 "cam_position": img.cam_from_world.translation,
-                "visible_points": set(), "visible_keypoints": set()
+                "visible_points": set(), "visible_feature_points": set()
             }
 
             # Fetch 2d visual features (while registering as visible at each view)
@@ -637,8 +642,8 @@ class VisionModule:
                 patch_index = colmap2patch_map[i][p2i]
                 views[i]["visible_points"].add(p3i_reind)
                 if p3i_reind in kp_inds:
-                    # Store descriptor only if a keypoint
-                    views[i]["visible_keypoints"].add(p3i_reind)
+                    # Store descriptor only if a downsampled point
+                    views[i]["visible_feature_points"].add(p3i_reind)
                     fetched_features = patch_features[i].reshape(-1, D)[patch_index]
                     descriptors[p3i_reind][i] = fetched_features.cpu().numpy()
 

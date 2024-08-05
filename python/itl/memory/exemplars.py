@@ -44,7 +44,6 @@ class Exemplars:
         return f"Exemplars({desc_2d},{desc_3d})"
 
     def add_exs_2d(self, scene_img, exemplars, pointers):
-
         # Return value; storage indices ((scene_id, object_id)) of any new added exemplars
         added_inds = []
 
@@ -127,6 +126,22 @@ class Exemplars:
 
         return added_inds
 
-    def add_exs_3d(self, conc_ind, point_cloud, views, descriptors):
-        # Simply store the provided info
-        self.object_3d[conc_ind] = (point_cloud, views, descriptors)
+    def add_exs_3d(
+            self, conc_ind, point_cloud, views, descriptors, contact_points=None
+        ):
+        if conc_ind in self.object_3d:
+            # Entry exists; interpret intent as adding contact points
+            if contact_points is not None:
+                for cp_conc_ind, poses in contact_points.items():
+                    self.object_3d[conc_ind][3][cp_conc_ind] |= poses
+        else:
+            # New entry
+            if contact_points is None:
+                contact_points = defaultdict(set)
+            else:
+                contact_points = defaultdict(set, contact_points)
+
+            # Store the provided info
+            self.object_3d[conc_ind] = (
+                point_cloud, views, descriptors, contact_points
+            )

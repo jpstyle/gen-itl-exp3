@@ -1,8 +1,10 @@
 """
 Miscellaneous utility methods that don't classify into other files in utils
 """
+from math import sqrt
 from itertools import product
 
+import cv2 as cv
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -105,7 +107,7 @@ def crop_images_by_masks(images, masks):
     return cropped_images, cropped_masks, dimensions
 
 
-def quaternion_to_rotation_matrix(quat):
+def quat2rmat(quat):
     """ Convert rotation quaternion to matrix representation """
     qw, qx, qy, qz = quat
 
@@ -132,11 +134,50 @@ def quaternion_to_rotation_matrix(quat):
 
     return rmat
 
+def rmat2quat(rmat):
+    """ Convert rotation matrix to quaternion representation (Shepperds's method) """
+    r11, r12, r13 = rmat[0].tolist()
+    r21, r22, r23 = rmat[1].tolist()
+    r31, r32, r33 = rmat[2].tolist()
+
+    w_mag = sqrt((1 + r11 + r22 + r33) / 4)
+    x_mag = sqrt((1 + r11 - r22 - r33) / 4)
+    y_mag = sqrt((1 - r11 + r22 - r33) / 4)
+    z_mag = sqrt((1 - r11 - r22 + r33) / 4)
+    magnitudes = [w_mag, x_mag, y_mag, z_mag]
+
+    match magnitudes.index(max(magnitudes)):
+        case 0:
+            qw = w_mag
+            qx = (r32 - r23) / (4 * qw)
+            qy = (r13 - r31) / (4 * qw)
+            qz = (r21 - r12) / (4 * qw)
+        case 1:
+            qx = x_mag
+            qw = (r32 - r23) / (4 * qx)
+            qy = (r12 + r21) / (4 * qx)
+            qz = (r13 + r31) / (4 * qx)
+        case 2:
+            qy = y_mag
+            qw = (r13 - r31) / (4 * qy)
+            qx = (r12 + r21) / (4 * qy)
+            qz = (r23 + r32) / (4 * qy)
+        case 3:
+            qz = z_mag
+            qw = (r21 - r12) / (4 * qz)
+            qx = (r13 + r31) / (4 * qz)
+            qy = (r23 + r32) / (4 * qz)
+
+    quat = (qw, qx, qy, qz)
+
+    return quat
+
 
 def xyzw2wxyz(quat):
     """
     Quaternions in Unity are represented in (x,y,z,w) form; 'shifting' to (w,x,y,z)
     """
+    assert len(quat) == 4
     if isinstance(quat, np.ndarray):
         return np.concatenate([quat[-1:], quat[:-1]])
     else:
@@ -154,6 +195,40 @@ def flip_position_y(pos):
 def flip_quaternion_y(quat):
     """ Analogous method for flipping rotation quaternion """
     return (quat[0], -quat[1], quat[2], -quat[3])       # Entry order: wxyz
+
+
+def transformation_matrix(rotation, translation):
+    """
+    Compile rotation vector and translation vector into a single 4*4 matrix
+    representing the transformation. Rotation may be in Rodrigues vector
+    format or 3*3 matrix format.
+    """
+    rotation = np.asarray(rotation)
+    translation = np.asarray(translation)
+
+    # Convert into 3*3 rotation matrix...
+    if rotation.shape == (4,):
+        # From quaternion
+        rotation = quat2rmat(rotation)
+    elif rotation.shape == (3, 1):
+        # From Rodrigues vector
+        rotation = cv.Rodrigues(rotation)[0]
+
+    # Make sure translation vector is in (3,1) shape
+    if len(translation.shape) == 1:
+        translation = translation[None].T
+    if translation.shape == (1, 3):
+        translation = translation.T
+
+    # Collect into [[R|t],[0|1]] matrix (4*4)
+    tr_mat = np.concatenate(
+        [
+            np.concatenate([rotation, translation], axis=1),
+            np.array([[0.0, 0.0, 0.0, 1.0]])
+        ]
+    )
+
+    return tr_mat
 
 
 def masks_bounding_boxes(masks):
