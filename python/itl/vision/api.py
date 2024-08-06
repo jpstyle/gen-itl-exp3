@@ -15,6 +15,7 @@ import cv2 as cv
 import numpy as np
 import open3d as o3d
 from pycocotools import mask
+from sklearn.decomposition import PCA
 from sklearn.metrics import pairwise_distances
 
 from .modeling import VisualSceneAnalyzer
@@ -510,51 +511,64 @@ class VisionModule:
             )
             D = patch_features[0].shape[-1]
 
-            # Iterating over all edges (image pairs), starting from ones involving lowest-degree
-            # nodes, until no unprocessed edges are left
-            node_unprocessed_neighbors = { n: set(con_graph.adj[n]) for n in con_graph.nodes }
-            rough_matches = {}        # To store initial inter-patch matches, verified later
-            point_coords = defaultdict(dict)
-            while not all(len(neighbors)==0 for neighbors in node_unprocessed_neighbors.values()):
-                # Fetch a node with the currently lowest degree w.r.t. unprocessed neighbors
-                lowest_degree_nodes = sorted(
-                    [n for n in con_graph.nodes if len(node_unprocessed_neighbors[n]) > 0],
-                    key=lambda x: len(node_unprocessed_neighbors[x])
+        # Storing full 2d-visual features from deep vision model in XB would
+        # require too much space; apply dimensionality reduction by PCA (specific
+        # to each view) and store analysis results
+        dim_reducs = [
+            PCA(n_components=48).fit(pth_ft[0][lr_msk].cpu())
+            for pth_ft, lr_msk in zip(patch_features, lr_masks)
+        ]
+
+        # Flatten patch features
+        patch_features = [
+            pth_ft.cpu().numpy().reshape(-1, D) for pth_ft in patch_features
+        ]
+
+        # Iterating over all edges (image pairs), starting from ones involving lowest-degree
+        # nodes, until no unprocessed edges are left
+        node_unprocessed_neighbors = { n: set(con_graph.adj[n]) for n in con_graph.nodes }
+        rough_matches = {}        # To store initial inter-patch matches, verified later
+        point_coords = defaultdict(dict)
+        while not all(len(neighbors)==0 for neighbors in node_unprocessed_neighbors.values()):
+            # Fetch a node with the currently lowest degree w.r.t. unprocessed neighbors
+            lowest_degree_nodes = sorted(
+                [n for n in con_graph.nodes if len(node_unprocessed_neighbors[n]) > 0],
+                key=lambda x: len(node_unprocessed_neighbors[x])
+            )
+            u = lowest_degree_nodes[0]
+
+            # Iterate over unprocessed connected neighbors
+            processed_edges = set()
+            for v in node_unprocessed_neighbors[u]:
+                # Bidirectional matches between masked patches indexed by u vs. v
+                matched_patches_u, matched_patches_v = masked_patch_match(
+                    patch_features[u], patch_features[v],
+                    lr_masks[u].reshape(-1), lr_dims[u][0], lr_dims[v][0]
                 )
-                u = lowest_degree_nodes[0]
 
-                # Iterate over unprocessed connected neighbors
-                processed_edges = set()
-                for v in node_unprocessed_neighbors[u]:
-                    # Bidirectional matches between masked patches indexed by u vs. v
-                    matched_patches_u, matched_patches_v = masked_patch_match(
-                        patch_features[u], patch_features[v],
-                        lr_masks[u], lr_dims[u][0], lr_dims[v][0]
-                    )
+                # Record matches
+                x_ratio_u = zoomed_images[u].width / lr_dims[u][0]
+                y_ratio_u = zoomed_images[u].height / lr_dims[u][1]
+                x_ratio_v = zoomed_images[v].width / lr_dims[v][0]
+                y_ratio_v = zoomed_images[v].height / lr_dims[v][1]
+                rough_matches[(u, v)] = []
+                for (i_u, x_u, y_u), (i_v, x_v, y_v) in zip(matched_patches_u, matched_patches_v):
+                    rough_matches[(u, v)].append((i_u, i_v))
+                    point_coords[u][i_u] = np.array([[
+                        crop_dims[u][0] + x_u * x_ratio_u,
+                        crop_dims[u][2] + y_u * y_ratio_u
+                    ]])
+                    point_coords[v][i_v] = np.array([[
+                        crop_dims[v][0] + x_v * x_ratio_v,
+                        crop_dims[v][2] + y_v * y_ratio_v
+                    ]])
 
-                    # Record matches
-                    x_ratio_u = zoomed_images[u].width / lr_dims[u][0]
-                    y_ratio_u = zoomed_images[u].height / lr_dims[u][1]
-                    x_ratio_v = zoomed_images[v].width / lr_dims[v][0]
-                    y_ratio_v = zoomed_images[v].height / lr_dims[v][1]
-                    rough_matches[(u, v)] = []
-                    for (i_u, x_u, y_u), (i_v, x_v, y_v) in zip(matched_patches_u, matched_patches_v):
-                        rough_matches[(u, v)].append((i_u, i_v))
-                        point_coords[u][i_u] = np.array([[
-                            crop_dims[u][0] + x_u * x_ratio_u,
-                            crop_dims[u][2] + y_u * y_ratio_u
-                        ]])
-                        point_coords[v][i_v] = np.array([[
-                            crop_dims[v][0] + x_v * x_ratio_v,
-                            crop_dims[v][2] + y_v * y_ratio_v
-                        ]])
+                processed_edges.add((u, v))
 
-                    processed_edges.add((u, v))
-
-                # Check off processed edges                
-                for u, v in processed_edges:
-                    node_unprocessed_neighbors[u].remove(v)
-                    node_unprocessed_neighbors[v].remove(u)
+            # Check off processed edges                
+            for u, v in processed_edges:
+                node_unprocessed_neighbors[u].remove(v)
+                node_unprocessed_neighbors[v].remove(u)
 
         assert self.camera_intrinsics is not None
         reconstruction, colmap2patch_map = reconstruct_with_known_poses(
@@ -604,33 +618,35 @@ class VisionModule:
             points=o3d.utility.Vector3dVector(reindexed_points)
         )
 
-        # Storing 2d-visual features from deep vision model in XB would require
-        # to much space; select randomly downsampled points
-        random_points = point_cloud.farthest_point_down_sample(
-            int(len(point_cloud.points) / 2)
-        )
-        # Also toss in some ISS-based keypoints
-        avg_nn_dist = np.array(point_cloud.compute_nearest_neighbor_distance()).mean()
-        iss_keypoints = o3d.geometry.keypoint.compute_iss_keypoints(
-            point_cloud, salient_radius=avg_nn_dist*2, non_max_radius=avg_nn_dist*2
-        )
-        # Remove any potential redundancy
-        ds_points = np.concatenate([
-            np.asarray(random_points.points), np.asarray(iss_keypoints.points)
-        ])
-        ds_points = o3d.geometry.PointCloud(points=o3d.utility.Vector3dVector(ds_points))
-        ds_points.remove_duplicated_points()
-        # Finding the indices of the downsampled points in the original point cloud
-        pdists = pairwise_distances(ds_points.points, point_cloud.points)
-        kp_inds = pdists.argmin(axis=1).tolist()
+        # # Storing full 2d-visual features from deep vision model in XB would require
+        # # too much space; select randomly downsampled points
+        # random_points = point_cloud.farthest_point_down_sample(
+        #     int(len(point_cloud.points) / 2)
+        # )
+        # # Also toss in some ISS-based keypoints
+        # avg_nn_dist = np.array(point_cloud.compute_nearest_neighbor_distance()).mean()
+        # iss_keypoints = o3d.geometry.keypoint.compute_iss_keypoints(
+        #     point_cloud, salient_radius=avg_nn_dist*2, non_max_radius=avg_nn_dist*2
+        # )
+        # # Remove any potential redundancy
+        # ds_points = np.concatenate([
+        #     np.asarray(random_points.points), np.asarray(iss_keypoints.points)
+        # ])
+        # ds_points = o3d.geometry.PointCloud(points=o3d.utility.Vector3dVector(ds_points))
+        # ds_points.remove_duplicated_points()
+        # # Finding the indices of the downsampled points in the original point cloud
+        # pdists = pairwise_distances(ds_points.points, point_cloud.points)
+        # kp_inds = pdists.argmin(axis=1).tolist()
 
         # Collect view info and point descriptors
-        views = {}; descriptors = defaultdict(dict)
+        views = {}
+        descriptors_full = defaultdict(dict); descriptors_reduc = defaultdict(dict)
         for i, (_, img) in enumerate(sorted(reconstruction.images.items())):
             views[i] = {
                 "cam_quaternion": xyzw2wxyz(img.cam_from_world.rotation.quat),
                 "cam_position": img.cam_from_world.translation,
-                "visible_points": set(), "visible_feature_points": set()
+                "visible_points": set(),#, "visible_feature_points": set()
+                "pca": dim_reducs[i]
             }
 
             # Fetch 2d visual features (while registering as visible at each view)
@@ -638,21 +654,18 @@ class VisionModule:
                 p3i = p2d.point3D_id
                 if p3i not in reindex_map_inv: continue     # Ignore invalid p2ds
                 p3i_reind = reindex_map_inv[p3i]
+                views[i]["visible_points"].add(p3i_reind)
 
                 patch_index = colmap2patch_map[i][p2i]
-                views[i]["visible_points"].add(p3i_reind)
-                if p3i_reind in kp_inds:
-                    # Store descriptor only if a downsampled point
-                    views[i]["visible_feature_points"].add(p3i_reind)
-                    fetched_features = patch_features[i].reshape(-1, D)[patch_index]
-                    descriptors[p3i_reind][i] = fetched_features.cpu().numpy()
+                descriptors_full[p3i_reind][i] = patch_features[i][patch_index]
 
-        descriptors = dict(descriptors)
+            # Applying dimensionality reduction to the descriptors
+            for p3i, per_view in descriptors_full.items():
+                if i in per_view:
+                    fvec_reduc = views[i]["pca"].transform(per_view[i][None])[0]
+                    descriptors_reduc[p3i][i] = fvec_reduc
 
-        # descriptors["fpfh"] = o3d.pipelines.registration.compute_fpfh_feature(
-        #     point_cloud, o3d.geometry.KDTreeSearchParamKNN(knn=60)
-        # )
-        # descriptors["fpfh"] = np.transpose(descriptors["fpfh"].data)
+        descriptors = dict(descriptors_reduc)
 
         return point_cloud, views, descriptors
 

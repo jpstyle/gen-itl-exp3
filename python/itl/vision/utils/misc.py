@@ -297,24 +297,23 @@ def masked_patch_match(features_1, features_2, mask_1, width_1, width_2):
     Applicable where the first patch has corresponding 'ground-truth' mask
     info (provided as `masks_1` parameter), which serves to filter out invalid
     correspondences.
-    """
-    # Flatten the provided features and corresponding masks
-    assert features_1.shape[-1] == features_2.shape[-1]
-    D = features_1.shape[-1]
-    features_1 = features_1.reshape(-1, D)
-    features_2 = features_2.reshape(-1, D)
 
-    mask_1 = mask_1.reshape(-1)
+    Assume input features and mask are flattened so that their shape is (H*W, D).
+    """
+    assert features_1.shape[-1] == features_2.shape[-1]
+
+    # Nonzero indices of the provided (flattened) mask
     nonzero_inds_1 = mask_1.nonzero()[0]
 
     # Compute cosine similarities between patches
-    features_nrm_1 = F.normalize(features_1)
-    features_nrm_2 = F.normalize(features_2)
-    S = (features_nrm_1 @ features_nrm_2.t()).cpu()
+    normalize = lambda fts: fts / np.linalg.norm(fts, axis=1, keepdims=True)
+    features_nrm_1 = normalize(features_1)
+    features_nrm_2 = normalize(features_2)
+    S = features_nrm_1 @ features_nrm_2.T
     # Forward matching
     match_forward = linear_sum_assignment(S[mask_1], maximize=True)
     # Reverse matching
-    match_reverse = linear_sum_assignment(S.t()[match_forward[1]], maximize=True)
+    match_reverse = linear_sum_assignment(S.T[match_forward[1]], maximize=True)
     # Mask filtering
     retain_inds = np.isin(match_reverse[1], nonzero_inds_1)
     # Fetch and unflatten matched patch indices

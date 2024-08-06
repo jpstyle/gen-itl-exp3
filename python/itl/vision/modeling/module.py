@@ -339,14 +339,13 @@ class VisualSceneAnalyzer(nn.Module):
                 lr_width = int(pr_width / dino_config.patch_size)
                 lr_height = int(features.shape[1] / lr_width)
 
-            if resolution_multiplier != 1:
-                # Resizing according to the resolution multiplier
-                features = features.reshape(1, lr_height, lr_width, -1)
-                features = F.interpolate(
-                    features.permute(0,3,1,2),
-                    scale_factor=resolution_multiplier, mode="bilinear"
-                ).permute(0,2,3,1)
-                lr_height, lr_width = features.shape[1:3]
+            # Resizing according to the resolution multiplier
+            features = features.reshape(1, lr_height, lr_width, -1)
+            features = F.interpolate(
+                features.permute(0,3,1,2),
+                scale_factor=resolution_multiplier, mode="bilinear"
+            ).permute(0,2,3,1)
+            lr_height, lr_width = features.shape[1:3]
             mask_resized = cv.resize(
                 z_msk.astype(int), (lr_width, lr_height),
                 interpolation=cv.INTER_NEAREST_EXACT

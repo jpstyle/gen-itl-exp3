@@ -913,7 +913,11 @@ def analyze_demonstration(agent, demo_data):
     # and topological structure of (sub)assemblies
     cam_K, distortion_coeffs = agent.vision.camera_intrinsics
     assembly_trees = {}             # Trees representing (sub)assembly structures
-    
+
+    # Shortcut helper for normalizing set of features by L2 norm, so that cosine
+    # similarities can be computed
+    normalize = lambda fts: fts / norm(fts, axis=1, keepdims=True)
+
     for assembly_step in assembly_sequence:
         with torch.no_grad():
             # Unpacking assembly step information
@@ -961,6 +965,7 @@ def analyze_demonstration(agent, demo_data):
                             agent.lt_mem.exemplars, vision_2d_data[obj][2], "pcls"
                         )
                         conc_ind = fs_scores.argmax()
+                        inst2conc_map[obj] = conc_ind       # Store result
 
                 msk_flattened = lr_msk.reshape(-1)
                 nonzero_inds = msk_flattened.nonzero()[0]
@@ -972,16 +977,18 @@ def analyze_demonstration(agent, demo_data):
                 # Compare against downsampled point descriptors stored in XB, per each view
                 point_cloud, views, descriptors, _ = agent.lt_mem.exemplars.object_3d[conc_ind]
                 pose_estimation_results = []
+                pth_fh_flattened = pth_ft.cpu().numpy().reshape(-1, D)
                 for vi, view_info in views.items():
-                    # Fetch downsampled point descriptors
-                    ds_points = sorted(view_info["visible_feature_points"])
-                    ds_features = torch.tensor([descriptors[pi][vi] for pi in ds_points])
-                    ds_features = ds_features.to(pth_ft.device)
+                    # Fetch descriptors of visible points
+                    visible_pts_sorted = sorted(view_info["visible_points"])
+                    visible_pts_features = np.stack(
+                        [descriptors[pi][vi] for pi in visible_pts_sorted]
+                    )
 
                     # Compute cosine similarities between patches
-                    features_nrm_1 = F.normalize(pth_ft.reshape(-1, D))
-                    features_nrm_2 = F.normalize(ds_features)
-                    S = (features_nrm_1 @ features_nrm_2.t()).cpu()
+                    features_nrm_1 = normalize(view_info["pca"].transform(pth_fh_flattened))
+                    features_nrm_2 = normalize(visible_pts_features)
+                    S = features_nrm_1 @ features_nrm_2.T
 
                     # Obtaining (u,v)-coordinates of projected (downsampled) points at the
                     # viewpoint pose, needed for proximity score computation
@@ -995,19 +1002,19 @@ def analyze_demonstration(agent, demo_data):
                     u_min, u_max = proj_at_view[:,0].min(), proj_at_view[:,0].max()
                     v_min, v_max = proj_at_view[:,1].min(), proj_at_view[:,1].max()
                     proj_w = u_max - u_min; proj_h = v_max - v_min
-                    # Downsampled point coordinates to be scaled and aligned
-                    ds_proj_aligned = proj_at_view[ds_points]
-                    ds_proj_aligned[:,0] -= u_min; ds_proj_aligned[:,1] -= v_min
+                    # Scale and align point coordinates
+                    proj_aligned = proj_at_view[visible_pts_sorted]
+                    proj_aligned[:,0] -= u_min; proj_aligned[:,1] -= v_min
                     # Scale so that the bounding box would encase the provided object
                     # mask (object may be occluded while projection is never occluded)
                     obj_box = masks_bounding_boxes([msk])[0]
                     obj_w = obj_box[2] - obj_box[0]; obj_h = obj_box[3] - obj_box[1]
                     obj_cu = (obj_box[0]+obj_box[2]) / 2; obj_cv = (obj_box[3]+obj_box[1]) / 2
                     scale_ratio = min(proj_w / obj_w, proj_h / obj_h)
-                    ds_proj_aligned /= scale_ratio
+                    proj_aligned /= scale_ratio
                     # Align by box center coordinates
-                    ds_proj_aligned[:,0] += obj_cu - (proj_w / 2) / scale_ratio
-                    ds_proj_aligned[:,1] += obj_cv - (proj_h / 2) / scale_ratio
+                    proj_aligned[:,0] += obj_cu - (proj_w / 2) / scale_ratio
+                    proj_aligned[:,1] += obj_cv - (proj_h / 2) / scale_ratio
 
                     # Proximity scores (w.r.t. to downsampled point projection) computed
                     # with RBF kernel; for giving slight advantages to pixels close to
@@ -1018,12 +1025,12 @@ def analyze_demonstration(agent, demo_data):
                     ], axis=-1)
                     sigma = min(z_img.width, z_img.height)
                     proximity = norm(
-                        uv_coords[:,:,None] - ds_proj_aligned[None,None], axis=-1
+                        uv_coords[:,:,None] - proj_aligned[None,None], axis=-1
                     )
                     proximity = np.exp(-np.square(proximity) / (2 * (sigma ** 2)))
 
                     # Forward matching
-                    agg_scores = S + 0.4 * proximity.reshape(-1, len(ds_points))
+                    agg_scores = S + 0.4 * proximity.reshape(-1, len(visible_pts_sorted))
                     match_forward = linear_sum_assignment(
                         agg_scores[msk_flattened], maximize=True
                     )
@@ -1037,7 +1044,8 @@ def analyze_demonstration(agent, demo_data):
                         for lr_x, lr_y in points_2d
                     ])
                     points_3d = np.array([
-                        point_cloud.points[ds_points[i]] for i in match_forward[1]
+                        point_cloud.points[visible_pts_sorted[i]]
+                        for i in match_forward[1]
                     ])
 
                     # Pose estimation by PnP with USAC (MAGSAC)
@@ -1052,23 +1060,24 @@ def analyze_demonstration(agent, demo_data):
                             np.asarray(point_cloud.points), rvec, tvec,
                             cam_K, distortion_coeffs
                         )[0][:,0,:]
-                        ds_reprojections = np.array([
-                            reprojections[ds_points[i]] for i in match_forward[1]
+                        visible_reprojections = np.array([
+                            reprojections[visible_pts_sorted[i]]
+                            for i in match_forward[1]
                         ])
                         dists_to_reprojs = norm(
-                            uv_coords[:,:,None] - ds_reprojections[None,None], axis=-1
+                            uv_coords[:,:,None] - visible_reprojections[None,None], axis=-1
                         )
-                        dists_to_reprojs = dists_to_reprojs.reshape(-1, len(ds_points))
+                        dists_to_reprojs = dists_to_reprojs.reshape(-1, len(visible_reprojections))
                         reproj_coords = np.unravel_index(
                             dists_to_reprojs.argmin(axis=0), (lr_h, lr_w)
                         )
-                        reproj_score_inds = reproj_coords + (np.arange(len(ds_points)),)
+                        reproj_score_inds = reproj_coords + (np.arange(len(visible_pts_sorted)),)
                         reproj_scores = S.reshape(lr_h, lr_w, -1)[reproj_score_inds]
                         # Only consider points whose reprojections fall into the low-res
                         # mask; accounts for occlusions
                         within_mask_inds = [
                             lr_msk[(reproj_coords[0][i], reproj_coords[1][i])]
-                            for i in range(len(ds_points))
+                            for i in range(len(visible_pts_sorted))
                         ]
                         reproj_scores = reproj_scores[within_mask_inds]
 
