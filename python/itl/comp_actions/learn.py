@@ -5,8 +5,8 @@ referring to belief updates that modify long-term memory
 import re
 import math
 import torch
-from math import sin, cos, pi
-from itertools import permutations
+from math import sin, cos, radians
+from itertools import product, permutations
 from collections import defaultdict
 
 import inflect
@@ -14,13 +14,11 @@ import cv2 as cv
 import open3d as o3d
 import numpy as np
 import networkx as nx
-import torch.nn.functional as F
 from numpy.linalg import norm, inv
-from scipy.spatial import ConvexHull
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import pairwise_distances
 from sklearn.decomposition import PCA
-from matplotlib.path import Path
+from skimage.morphology import dilation, disk
 
 from ..lpmln import Literal
 from ..lpmln.utils import flatten_cons_ante, wrap_args
@@ -35,41 +33,36 @@ EPS = 1e-10                 # Value used for numerical stabilization
 SR_THRES = 0.8              # Mismatch surprisal threshold
 U_IN_PR = 0.99              # How much the agent values information provided by the user
 
-# Pre-specified poses (quaternion & position pair) of 3D inspection viewpoints (total 16)
-R = 0.3; Tr = (0, 0, R); theta_H = pi/3; theta_L = pi/6
+# Pre-specified poses (quaternion & position pair) of 3D inspection viewpoints
+R = 0.3; Tr = (0, 0, R); theta_H = radians(70); theta_L = radians(50)
 H1 = cos(theta_H/2); H2 = sin(theta_H/2); L1 = cos(theta_L/2); L2 = sin(theta_L/2)
-VP_POSES = [
-    ## (qw/qx/qy/qz quaternion, tx/ty/tz position); rotation first, then translation
+## (qw/qx/qy/qz quaternion, tx/ty/tz position); rotation first, then translation
+VP_POSES = \
+[
     # 'Lower-high' loop
-    ((H1, H2, 0, 0), Tr),
-    ((H1*cos(pi/4), H2*cos(pi/4), H1*sin(pi/4), H2*sin(pi/4)), Tr),
-    ((0, 0, H1, H2), Tr),
-    ((H1*cos(3*pi/4), H2*cos(3*pi/4), H1*sin(3*pi/4), H2*sin(3*pi/4)), Tr),
+    ((H1*cos(th := radians((th1+th2) / 2)), H2*cos(th), H1*sin(th), H2*sin(th)), Tr)
+    for th1, th2 in product([0, 90, 180, 270], [-10, 10])
+] + [
     # 'Lower-low' loop
-    ((L1, L2, 0, 0), Tr),
-    ((L1*cos(pi/4), L2*cos(pi/4), L1*sin(pi/4), L2*sin(pi/4)), Tr),
-    ((0, 0, L1, L2), Tr),
-    ((L1*cos(3*pi/4), L2*cos(3*pi/4), L1*sin(3*pi/4), L2*sin(3*pi/4)), Tr),
+    ((L1*cos(th := radians((th1+th2) / 2)), L2*cos(th), L1*sin(th), L2*sin(th)), Tr)
+    for th1, th2 in product([0, 90, 180, 270], [-10, 10])
+] + [
     # 'Upper-low' loop
-    ((L1, -L2, 0, 0), Tr),
-    ((L1*cos(pi/4), -L2*cos(pi/4), L1*sin(pi/4), -L2*sin(pi/4)), Tr),
-    ((0, 0, L1, -L2), Tr),
-    ((L1*cos(3*pi/4), -L2*cos(3*pi/4), L1*sin(3*pi/4), -L2*sin(3*pi/4)), Tr),
+    ((L1*cos(th := radians((th1+th2) / 2)), -L2*cos(th), L1*sin(th), -L2*sin(th)), Tr)
+    for th1, th2 in product([0, 90, 180, 270], [-10, 10])
+] + [
     # 'Upper-high' loop
-    ((H1, -H2, 0, 0), Tr),
-    ((H1*cos(pi/4), -H2*cos(pi/4), H1*sin(pi/4), -H2*sin(pi/4)), Tr),
-    ((0, 0, H1, -H2), Tr),
-    ((H1*cos(3*pi/4), -H2*cos(3*pi/4), H1*sin(3*pi/4), -H2*sin(3*pi/4)), Tr)
+    ((H1*cos(th := radians((th1+th2) / 2)), -H2*cos(th), H1*sin(th), -H2*sin(th)), Tr)
+    for th1, th2 in product([0, 90, 180, 270], [-10, 10])
 ]
 # Connectivity graph that represents pairs of 3D inspection images to be cross-referenced
 CON_GRAPH = nx.Graph()
 for i in range(4):
-    if i < 3:
-        CON_GRAPH.add_edge(i, i+1); CON_GRAPH.add_edge(i+4, i+5)
-        CON_GRAPH.add_edge(i+8, i+9); CON_GRAPH.add_edge(i+12, i+13)
-    CON_GRAPH.add_edge(i, i+4); CON_GRAPH.add_edge(i+4, i+8); CON_GRAPH.add_edge(i+8, i+12)
-CON_GRAPH.add_edge(3, 0); CON_GRAPH.add_edge(7, 4)
-CON_GRAPH.add_edge(11, 8); CON_GRAPH.add_edge(15, 12)
+    CON_GRAPH.add_edge(2*i, 2*i+8); CON_GRAPH.add_edge(2*i+1, 2*i+9)
+    CON_GRAPH.add_edge(2*i+8, 2*i+16); CON_GRAPH.add_edge(2*i+9, 2*i+17)
+    CON_GRAPH.add_edge(2*i+16, 2*i+24); CON_GRAPH.add_edge(2*i+17, 2*i+25)
+    CON_GRAPH.add_edge(2*i, 2*i+1); CON_GRAPH.add_edge(2*i+8, 2*i+9)
+    CON_GRAPH.add_edge(2*i+16, 2*i+17); CON_GRAPH.add_edge(2*i+24, 2*i+25)
 
 # Recursive helper methods for checking whether rule cons/ante is grounded (variable-
 # free), lifted (all variables), contains any predicate referent as argument, or uses
@@ -750,7 +743,7 @@ def analyze_demonstration(agent, demo_data):
                                     # Atomic part type to be remembered, record (image, mask)
                                     # pair by the name index
                                     data = (prev_img, env_refs["o0"]["mask"])
-                                    vision_2d_data[target_info["name"]] = data
+                                    vision_2d_data[target_info["name"]] = [data]
 
                             case 3 | 4:
                                 # drop_~ action
@@ -761,23 +754,25 @@ def analyze_demonstration(agent, demo_data):
                                 # assemble_~ action; record 2d visual data (image + masks)
                                 # and assembly action info, then remember non-atomic subassemblies
                                 # (distinguished by string name handle)
-                                target_l_info = [
-                                    rf_dis for rf_dis, rf_env in value_assignment.items()
-                                    if rf_dis.startswith(lit.args[0][0]) and rf_env == lit.args[2][0]
-                                ][0]
-                                target_l_info = referents["dis"][target_l_info]
-                                target_r_info = [
-                                    rf_dis for rf_dis, rf_env in value_assignment.items()
-                                    if rf_dis.startswith(lit.args[0][0]) and rf_env == lit.args[3][0]
-                                ][0]
-                                target_r_info = referents["dis"][target_r_info]
+                                component_masks = {
+                                    # Provided ground-truth masks for potentially involved components
+                                    referents["dis"][rf_dis]["name"]: env_refs[rf_env]["mask"]
+                                    for msk_arg, _ in lit.args[6:]
+                                    for rf_dis, rf_env in value_assignment.items()
+                                    if rf_dis.startswith(lit.args[0][0]) and msk_arg == rf_env
+                                }
                                 current_assembly_info = [
-                                    (current_held[0], target_l_info["name"]),
-                                    (current_held[1], target_r_info["name"]),
-                                    prev_img, env_refs["o0"]["mask"], env_refs["o1"]["mask"],
-                                    referents["dis"][lit.args[4][0]]["name"]
+                                    (current_held[0], referents["dis"][lit.args[3][0]]["name"]),
+                                    (current_held[1], referents["dis"][lit.args[4][0]]["name"]),
+                                    prev_img, component_masks, referents["dis"][lit.args[2][0]]["name"]
                                 ]
-                                current_held[left_or_right] = referents["dis"][lit.args[4][0]]["name"]
+                                # Add visuals of any atomic parts to 2d exemplar lists
+                                for obj in current_held:
+                                    # Only atomic parts are listed in 2d vision data storage
+                                    if obj in vision_2d_data:
+                                        vision_2d_data[obj].append((prev_img, component_masks[obj]))
+                                # Update hand states
+                                current_held[left_or_right] = referents["dis"][lit.args[2][0]]["name"]
                                 current_held[left_or_right+1 % 2] = None
 
                                 nonatomic_subassemblies.add(current_held[left_or_right])
@@ -786,7 +781,7 @@ def analyze_demonstration(agent, demo_data):
                                 # inspect_~ action; collect all views for 3D reconstruction
                                 viewed_obj = lit.args[2][0]
                                 view_ind = int(referents["dis"][lit.args[3][0]]["name"])
-                                if view_ind < 16:
+                                if view_ind < 32:
                                     inspect_data["img"][view_ind] = img
                                 if view_ind > 0:
                                     inspect_data["msk"][view_ind-1] = env_refs[viewed_obj]["mask"]
@@ -834,9 +829,9 @@ def analyze_demonstration(agent, demo_data):
                 # expressed in natural language in the scope of our experiment
                 raise NotImplementedError
 
-        if len(inspect_data["img"]) == 16 and len(inspect_data["msk"]) == 16:
+        if len(inspect_data["img"]) == 32 and len(inspect_data["msk"]) == 32:
             # Reconstruct 3D structure of the inspected object instance
-            for mpl in [1.25, 1.75]:
+            for mpl in [1, 1.5]:
                 # Try at most twice, increasing the 'resolution multiplier'
                 # value each time the obtained point cloud doesn't have enough points
                 reconstruction = agent.vision.reconstruct_3d_structure(
@@ -846,7 +841,7 @@ def analyze_demonstration(agent, demo_data):
                 point_cloud = reconstruction[0]
 
                 # Break if enough points obtained
-                if len(point_cloud.points) >= 1000: break
+                if len(point_cloud.points) >= 1200: break
 
             vision_3d_data[current_held[left_or_right]] = reconstruction
 
@@ -875,38 +870,45 @@ def analyze_demonstration(agent, demo_data):
 
     # Further process vision 2D data to obtain instance-level embeddings
     vision_2d_data = {
-        instance_name: (
-            image, mask, bg_image := blur_and_grayscale(image),
-            visual_prompt_by_mask(image, bg_image, [mask])
-        )
-        for instance_name, (image, mask) in vision_2d_data.items()
+        instance_name: [
+            (
+                image, mask, bg_image := blur_and_grayscale(image),
+                visual_prompt_by_mask(image, bg_image, [mask])
+            )
+            for image, mask in data
+        ]
+        for instance_name, data in vision_2d_data.items()
     }
     vis_model = agent.vision.model; vis_model.eval()
     with torch.no_grad():
-        for instance_name, (image, mask, bg_image, vis_prompt) in vision_2d_data.items():
-            vp_processed = vis_model.dino_processor(images=vis_prompt, return_tensors="pt")
-            vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
-            vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
-            f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
-            vision_2d_data[instance_name] = (image, mask, f_vec)
+        for instance_name, data in vision_2d_data.items():
+            processed_data = []
+            for image, mask, bg_image, vis_prompt in data:
+                vp_processed = vis_model.dino_processor(images=vis_prompt, return_tensors="pt")
+                vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
+                vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
+                f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
+                processed_data.append((image, mask, f_vec))
+            vision_2d_data[instance_name] = processed_data
     # Add 2D vision data in XB, based on the newly assigned pcls concept indices
-    for instance_name, (image, mask, f_vec) in vision_2d_data.items():
+    for instance_name, data in vision_2d_data.items():
         if instance_name not in inst2conc_map:
             # Cannot exactly specify which concept this instance classifies as, skip
             continue
 
-        exemplars = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
-        pointers = {
-            ("pcls", inst2conc_map[inst], "pos" if inst==instance_name else "neg"): {
-                # (Whether object is newly added to XB, index 0 as only one is newly
-                # added each time)
-                (True, 0)
+        for image, mask, f_vec in data:
+            exemplars = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
+            pointers = {
+                ("pcls", inst2conc_map[inst], "pos" if inst==instance_name else "neg"): {
+                    # (Whether object is newly added to XB, index 0 as only one is newly
+                    # added each time)
+                    (True, 0)
+                }
+                for inst in vision_2d_data if inst in inst2conc_map
             }
-            for inst in vision_2d_data if inst in inst2conc_map
-        }
-        agent.lt_mem.exemplars.add_exs_2d(
-            scene_img=image, exemplars=exemplars, pointers=pointers
-        )
+            agent.lt_mem.exemplars.add_exs_2d(
+                scene_img=image, exemplars=exemplars, pointers=pointers
+            )
 
     # Finally process assembly data; estimate pose of assembled parts in hand,
     # infer 3D locations of 'contact points' based on manipulator pose difference,
@@ -922,146 +924,170 @@ def analyze_demonstration(agent, demo_data):
         with torch.no_grad():
             # Unpacking assembly step information
             involved_objs = assembly_step[:2]
-            image, *masks = assembly_step[2:5]
-            resulting_subassembly, direction, *manip_poses = assembly_step[5:9]
-            foo = assembly_step[9:]
+            image, component_masks, resulting_subassembly = assembly_step[2:5]
+            direction, *manip_poses = assembly_step[5:8]
+            foo = assembly_step[8:]
 
-            # Extract patch-level features as guided by masks
-            zoomed_images, zoomed_masks, crop_dims = crop_images_by_masks(
-                { 0: image, 1: image }, masks       # 0: Left, 1: Right
-            )
-            patch_features, lr_masks, lr_dims = vis_model.lr_features_from_masks(
-                zoomed_images, zoomed_masks, 900, 2
-            )
-            D = patch_features[0].shape[-1]
-
-            involved_parts_info = []           # Part concept index and pose
-            zipped_leftright = zip(
-                involved_objs, patch_features, zoomed_images,
-                masks, lr_masks, lr_dims, crop_dims
-            )                   # Zipping data for left side and right side
-            for zip_data in zipped_leftright:
-                # Length unpacking split into multiple lines...
-                (obj, cp), pth_ft = zip_data[:2]
-                z_img, msk, lr_msk = zip_data[2:5]
-                (lr_w, lr_h), (cr_x, _, cr_y, _) = zip_data[5:]
-
-                # Need to know which concept's instance the target object is
+            # Select reference masks by which the target components' poses
+            # will be estimated; may be the very components themselves, or
+            # some other assembly-connected proxy components when the targets
+            # are heavily occluded (hence very small mask area)
+            selected_components = []; selected_masks = []
+            for obj, cp in involved_objs:
                 if obj in assembly_trees:
-                    # Involved object is a subassembly built in a previous step
+                    # Involved object is a subassembly built in a previous step,
+                    # *may* need to select a mask if heavily occluded
                     subassembly = assembly_trees[obj]
-                    joined_part = [
-                        n for n in subassembly.nodes
-                        if subassembly.nodes[n]["part_handle"] in cp
-                    ][0]
-                    conc_ind = inst2conc_map[joined_part]
+                    mask_criteria = {
+                        # Tuple of (whether type agrees, mask area); prioritize
+                        # type agreement, fall back to next best only if and only if
+                        # mask area is too small
+                        n: (hdl==cp.split("/")[0], component_masks[n].sum())
+                        for n, hdl in subassembly.nodes(data="part_handle")
+                    }
+                    components_sorted = sorted(
+                        subassembly.nodes, reverse=True, key=lambda n: mask_criteria[n]
+                    )
+                    # Select the top two: The explicitly mentioned part (which may
+                    # be heavily occluded), and another part with the largest mask
+                    # area among the rest as a fallback in case of heavy occlusion
+                    selected = components_sorted[:2]
                 else:
-                    # Involved object is an atomic part
-                    if obj in inst2conc_map:
-                        conc_ind = inst2conc_map[obj]
-                    else:
-                        # Pick among concepts stored in visual inventory
-                        fs_scores = agent.vision.fs_conc_pred(
-                            agent.lt_mem.exemplars, vision_2d_data[obj][2], "pcls"
-                        )
-                        conc_ind = fs_scores.argmax()
-                        inst2conc_map[obj] = conc_ind       # Store result
+                    # Only atomic component part, use its mask
+                    selected = [obj]
 
-                msk_flattened = lr_msk.reshape(-1)
-                nonzero_inds = msk_flattened.nonzero()[0]
+                selected_components.append(selected)
+                selected_masks.append([component_masks[obj] for obj in selected])
 
-                # Scale ratio between zoomed image vs. low-res feature map
-                x_ratio = z_img.width / lr_w
-                y_ratio = z_img.height / lr_h
-
-                # Compare against downsampled point descriptors stored in XB, per each view
-                point_cloud, views, descriptors, _ = agent.lt_mem.exemplars.object_3d[conc_ind]
+            # For each of the lefthand & righthand side
+            involved_parts_info = []            # For storing part concepts and poses
+            for parts, masks in zip(selected_components, selected_masks):
                 pose_estimation_results = []
-                pth_fh_flattened = pth_ft.cpu().numpy().reshape(-1, D)
-                for vi, view_info in views.items():
-                    # Fetch descriptors of visible points
-                    visible_pts_sorted = sorted(view_info["visible_points"])
-                    visible_pts_features = np.stack(
-                        [descriptors[pi][vi] for pi in visible_pts_sorted]
+                for part, msk in zip(parts, masks):
+                    # Skip on obvious occlusion, i.e., if mask area of part in
+                    # a subassembly is too small
+                    if len(masks) > 1 and msk.sum() < 5000:
+                        continue
+
+                    # Extract patch-level features as guided by masks
+                    zoomed_image, zoomed_msk, crop_dim = crop_images_by_masks(
+                        { 0: image }, [msk]
                     )
+                    patch_features, lr_msk, lr_dim = vis_model.lr_features_from_masks(
+                        zoomed_image, zoomed_msk, 600, 2
+                    ) 
+                    D = patch_features[0].shape[-1]
+                    (cr_x, _, cr_y, _), (lr_w, lr_h) = crop_dim[0], lr_dim[0]
+                    zoomed_image = zoomed_image[0]; lr_msk = lr_msk[0]
 
-                    # Compute cosine similarities between patches
-                    features_nrm_1 = normalize(view_info["pca"].transform(pth_fh_flattened))
-                    features_nrm_2 = normalize(visible_pts_features)
-                    S = features_nrm_1 @ features_nrm_2.T
+                    # Need to know which concept's instance the component part is
+                    if part in inst2conc_map:
+                        conc_ind = inst2conc_map[part]
+                    else:
+                        # Unspecified as yet, need to pick among concepts stored in
+                        # visual inventory
+                        fs_scores = np.array([
+                            agent.vision.fs_conc_pred(agent.lt_mem.exemplars, f_vec, "pcls")
+                            for _, _, f_vec in vision_2d_data[part]
+                        ])
+                        conc_ind = fs_scores.sum(axis=0).argmax()
+                        inst2conc_map[part] = conc_ind.item()       # Store result
 
-                    # Obtaining (u,v)-coordinates of projected (downsampled) points at the
-                    # viewpoint pose, needed for proximity score computation
-                    rmat_view = quat2rmat(view_info["cam_quaternion"])
-                    tvec_view = view_info["cam_position"]
-                    proj_at_view = cv.projectPoints(
-                        np.asarray(point_cloud.points),
-                        cv.Rodrigues(rmat_view)[0], tvec_view,
-                        cam_K, distortion_coeffs
-                    )[0][:,0,:]
-                    u_min, u_max = proj_at_view[:,0].min(), proj_at_view[:,0].max()
-                    v_min, v_max = proj_at_view[:,1].min(), proj_at_view[:,1].max()
-                    proj_w = u_max - u_min; proj_h = v_max - v_min
-                    # Scale and align point coordinates
-                    proj_aligned = proj_at_view[visible_pts_sorted]
-                    proj_aligned[:,0] -= u_min; proj_aligned[:,1] -= v_min
-                    # Scale so that the bounding box would encase the provided object
-                    # mask (object may be occluded while projection is never occluded)
-                    obj_box = masks_bounding_boxes([msk])[0]
-                    obj_w = obj_box[2] - obj_box[0]; obj_h = obj_box[3] - obj_box[1]
-                    obj_cu = (obj_box[0]+obj_box[2]) / 2; obj_cv = (obj_box[3]+obj_box[1]) / 2
-                    scale_ratio = min(proj_w / obj_w, proj_h / obj_h)
-                    proj_aligned /= scale_ratio
-                    # Align by box center coordinates
-                    proj_aligned[:,0] += obj_cu - (proj_w / 2) / scale_ratio
-                    proj_aligned[:,1] += obj_cv - (proj_h / 2) / scale_ratio
+                    msk_flattened = lr_msk.reshape(-1)
+                    nonzero_inds = msk_flattened.nonzero()[0]
 
-                    # Proximity scores (w.r.t. to downsampled point projection) computed
-                    # with RBF kernel; for giving slight advantages to pixels close to
-                    # initial guess projections
-                    uv_coords = np.stack([
-                        np.tile((np.arange(lr_w)*x_ratio + cr_x)[None], [lr_h, 1]),
-                        np.tile((np.arange(lr_h)*y_ratio + cr_y)[:,None], [1, lr_w])
-                    ], axis=-1)
-                    sigma = min(z_img.width, z_img.height)
-                    proximity = norm(
-                        uv_coords[:,:,None] - proj_aligned[None,None], axis=-1
-                    )
-                    proximity = np.exp(-np.square(proximity) / (2 * (sigma ** 2)))
+                    # Scale ratio between zoomed image vs. low-res feature map
+                    x_ratio = zoomed_image.width / lr_w
+                    y_ratio = zoomed_image.height / lr_h
 
-                    # Forward matching
-                    agg_scores = S + 0.4 * proximity.reshape(-1, len(visible_pts_sorted))
-                    match_forward = linear_sum_assignment(
-                        agg_scores[msk_flattened], maximize=True
-                    )
+                    # Compare against downsampled point descriptors stored in XB, per each view
+                    point_cloud, views, descriptors, _ = agent.lt_mem.exemplars.object_3d[conc_ind]
+                    pth_fh_flattened = patch_features[0].cpu().numpy().reshape(-1, D)
+                    for vi, view_info in views.items():
+                        # Fetch descriptors of visible points
+                        visible_pts_sorted = sorted(view_info["visible_points"])
+                        visible_pts_features = np.stack(
+                            [descriptors[pi][vi] for pi in visible_pts_sorted]
+                        )
 
-                    # Extract 2D-3D correspondence based on the match
-                    points_2d = [
-                        (i % lr_w, i // lr_w) for i in nonzero_inds[match_forward[0]]
-                    ]
-                    points_2d = np.array([
-                        (cr_x + lr_x * x_ratio, cr_y + lr_y * y_ratio)
-                        for lr_x, lr_y in points_2d
-                    ])
-                    points_3d = np.array([
-                        point_cloud.points[visible_pts_sorted[i]]
-                        for i in match_forward[1]
-                    ])
+                        # Compute cosine similarities between patches
+                        features_nrm_1 = normalize(view_info["pca"].transform(pth_fh_flattened))
+                        features_nrm_2 = normalize(visible_pts_features)
+                        S = features_nrm_1 @ features_nrm_2.T
 
-                    # Pose estimation by PnP with USAC (MAGSAC)
-                    output_valid, rvec, tvec, _ = cv.solvePnPRansac(
-                        points_3d, points_2d, cam_K, distortion_coeffs,
-                        flags=cv.USAC_MAGSAC
-                    )
-                    if output_valid:
-                        # Evaluate estimated pose by obtaining mean similarity
-                        # scores at reprojected downsampled points
-                        reprojections = cv.projectPoints(
+                        # Obtaining (u,v)-coordinates of projected (downsampled) points at the
+                        # viewpoint pose, needed for proximity score computation
+                        rmat_view = quat2rmat(view_info["cam_quaternion"])
+                        tvec_view = view_info["cam_position"]
+                        proj_at_view = cv.projectPoints(
+                            np.asarray(point_cloud.points),
+                            cv.Rodrigues(rmat_view)[0], tvec_view,
+                            cam_K, distortion_coeffs
+                        )[0][:,0,:]
+                        u_min, u_max = proj_at_view[:,0].min(), proj_at_view[:,0].max()
+                        v_min, v_max = proj_at_view[:,1].min(), proj_at_view[:,1].max()
+                        proj_w = u_max - u_min; proj_h = v_max - v_min
+                        # Scale and align point coordinates
+                        proj_aligned = proj_at_view[visible_pts_sorted]
+                        proj_aligned[:,0] -= u_min; proj_aligned[:,1] -= v_min
+                        # Scale so that the bounding box would encase the provided object
+                        # mask (object may be occluded while projection is never occluded)
+                        obj_box = masks_bounding_boxes([msk])[0]
+                        obj_w = obj_box[2] - obj_box[0]; obj_h = obj_box[3] - obj_box[1]
+                        obj_cu = (obj_box[0]+obj_box[2]) / 2; obj_cv = (obj_box[3]+obj_box[1]) / 2
+                        scale_ratio = min(proj_w / obj_w, proj_h / obj_h)
+                        proj_aligned /= scale_ratio
+                        # Align by box center coordinates
+                        proj_aligned[:,0] += obj_cu - (proj_w / 2) / scale_ratio
+                        proj_aligned[:,1] += obj_cv - (proj_h / 2) / scale_ratio
+
+                        # Proximity scores (w.r.t. to downsampled point projection) computed
+                        # with RBF kernel; for giving slight advantages to pixels close to
+                        # initial guess projections
+                        uv_coords = np.stack([
+                            np.tile((np.arange(lr_w)*x_ratio + cr_x)[None], [lr_h, 1]),
+                            np.tile((np.arange(lr_h)*y_ratio + cr_y)[:,None], [1, lr_w])
+                        ], axis=-1)
+                        sigma = min(zoomed_image.width, zoomed_image.height)
+                        proximity = norm(
+                            uv_coords[:,:,None] - proj_aligned[None,None], axis=-1
+                        )
+                        proximity = np.exp(-np.square(proximity) / (2 * (sigma ** 2)))
+
+                        # Forward matching
+                        agg_scores = S + 0.4 * proximity.reshape(-1, len(visible_pts_sorted))
+                        match_forward = linear_sum_assignment(
+                            agg_scores[msk_flattened], maximize=True
+                        )
+
+                        points_2d = [
+                            (i % lr_w, i // lr_w)
+                            for i in nonzero_inds[match_forward[0]]
+                        ]
+                        points_2d = np.array([
+                            (cr_x + lr_x * x_ratio, cr_y + lr_y * y_ratio)
+                            for lr_x, lr_y in points_2d
+                        ])
+                        points_3d = np.array([
+                            point_cloud.points[visible_pts_sorted[i]]
+                            for i in match_forward[1]
+                        ])
+
+                        # Pose estimation by PnP with USAC (MAGSAC)
+                        output_valid, rvec, tvec, _ = cv.solvePnPRansac(
+                            points_3d, points_2d, cam_K, distortion_coeffs,
+                            flags=cv.USAC_MAGSAC
+                        )
+                        assert output_valid
+
+                        # Evaluate estimated pose by obtaining mean similarity scores at
+                        # reprojected downsampled points
+                        estim_reprojections = cv.projectPoints(
                             np.asarray(point_cloud.points), rvec, tvec,
                             cam_K, distortion_coeffs
                         )[0][:,0,:]
                         visible_reprojections = np.array([
-                            reprojections[visible_pts_sorted[i]]
+                            estim_reprojections[visible_pts_sorted[i]]
                             for i in match_forward[1]
                         ])
                         dists_to_reprojs = norm(
@@ -1073,48 +1099,102 @@ def analyze_demonstration(agent, demo_data):
                         )
                         reproj_score_inds = reproj_coords + (np.arange(len(visible_pts_sorted)),)
                         reproj_scores = S.reshape(lr_h, lr_w, -1)[reproj_score_inds]
-                        # Only consider points whose reprojections fall into the low-res
-                        # mask; accounts for occlusions
+                        # Only consider points that belong to the primary cluster; accounts
+                        # for occlusions
                         within_mask_inds = [
                             lr_msk[(reproj_coords[0][i], reproj_coords[1][i])]
                             for i in range(len(visible_pts_sorted))
                         ]
                         reproj_scores = reproj_scores[within_mask_inds]
 
-                        # Also evaluate by overlap between provided object mask vs.
-                        # mask of convex hull of reprojections
-                        lr_reprojections = np.copy(reprojections)
-                        lr_reprojections[:,0] = (lr_reprojections[:,0] - cr_x) / x_ratio
-                        lr_reprojections[:,1] = (lr_reprojections[:,1] - cr_y) / y_ratio
-                        hull_path = Path(lr_reprojections[ConvexHull(lr_reprojections).vertices])
-                        hull_msk = np.zeros_like(lr_msk)
-                        for i in range(hull_msk.shape[1]):
-                            for j in range(hull_msk.shape[0]):
-                                hull_msk[j,i] = hull_path.contains_point((i, j))
-                        mask_overlap = mask_iou([lr_msk], [hull_msk])[0][0]
+                        # Also evaluate by overlap between provided object mask vs. mask made
+                        # from reprojected visible points dilated with disk-shaped footprints.
+                        # Size of disk determined by mean nearest distances between reprojected
+                        # visible points.
+                        vps_prm_reproj = estim_reprojections[visible_pts_sorted]
+                        pdists = pairwise_distances(vps_prm_reproj, vps_prm_reproj)
+                        pdists[np.diag_indices(len(pdists))] = float("inf")
+                        median_nn_dist = np.median(pdists.min(axis=0))
+                            # Occasionally some reprojected points are placed very far
+                            # from the rest... Using median instead of mean to eliminate
+                            # effects by outliers
+                        proj_x, proj_y = vps_prm_reproj.round().astype(np.int64).T
+                        proj_msk = np.zeros_like(msk)
+                        valid_inds = valid_inds = np.logical_and(
+                            np.logical_and(0 <= proj_y, proj_y < msk.shape[0]),
+                            np.logical_and(0 <= proj_x, proj_x < msk.shape[1])
+                        )
+                        proj_msk[proj_y[valid_inds], proj_x[valid_inds]] = True
+                        proj_msk = dilation(proj_msk, footprint=disk(2 * median_nn_dist))
+                        mask_overlap = mask_iou([msk], [proj_msk])[0][0]
 
                         # Store pose estimation results along with pose evaluation score
                         pose_estimation_results.append(
-                            (rvec, tvec, reproj_scores.mean().item(), mask_overlap)
+                            (
+                                (rvec, tvec), conc_ind, part,
+                                (reproj_scores.mean().item()+1) / 2, mask_overlap
+                            )
                         )
 
                 # Select the best pose estimation result with highest score
-                rvec, tvec = sorted(
-                    pose_estimation_results, key=lambda x: x[2]+x[3], reverse=True
-                )[0][:2]
-                involved_parts_info.append((conc_ind, (rvec, tvec)))
+                best_estimation = sorted(
+                    pose_estimation_results, key=lambda x: x[3]+x[4], reverse=True
+                )[0]
+                involved_parts_info.append(
+                    (transformation_matrix(*best_estimation[0]),)+best_estimation[1:3]
+                )
 
-        (part_l_conc_ind, pose_l), (part_r_conc_ind, pose_r) = involved_parts_info
+        # Resolve any (chain of) indirect pose estimation via connected parts
+        assert len(involved_parts_info) == 2
+        for side in [0, 1]:         # Left (0) or right (1)
+            obj, cp = involved_objs[side]
+            if obj in assembly_trees:
+                subassembly = assembly_trees[obj]
+                part_estimated = involved_parts_info[side][2]
+                part_goal = [
+                    n for n, hdl in subassembly.nodes(data="part_handle")
+                    if hdl == cp.split("/")[0]
+                ][0]
+                if part_estimated != part_goal:
+                    # Get a shortest connection path
+                    connection_path = next(nx.shortest_simple_paths(
+                        subassembly, part_estimated, part_goal
+                    ))
+                    u = connection_path.pop(0); v = connection_path.pop(0)
+                    tmat_u = involved_parts_info[side][0]
+                    while True:
+                        part_u = subassembly.nodes[u]["part_conc"]
+                        part_v = subassembly.nodes[v]["part_conc"]
+                        cp_u, i_u = subassembly.edges[(u, v)]["contact"][u]
+                        cp_v, i_v = subassembly.edges[(u, v)]["contact"][v]
+                        pose_cp_u = agent.lt_mem.exemplars.object_3d[part_u][3][cp_u][i_u]
+                        pose_cp_v = agent.lt_mem.exemplars.object_3d[part_v][3][cp_v][i_v]
+                        tmat_cp_u = transformation_matrix(*pose_cp_u)
+                        tmat_cp_v = transformation_matrix(*pose_cp_v)
+                        tmat_v = tmat_u @ tmat_cp_u @ inv(tmat_cp_v)
+
+                        # Update component concept and transformation info
+                        involved_parts_info[side] = \
+                            (tmat_v, part_v) + involved_parts_info[side][2:]
+
+                        # Break if reached end of chain
+                        if len(connection_path) == 0: break
+
+                        # Next chain link
+                        u = v; tmat_u = tmat_v; v = connection_path.pop(0)
+
+        tmat_l, part_l_conc_ind, _ = involved_parts_info[0]
+        tmat_r, part_r_conc_ind, _ = involved_parts_info[1]
 
         # Infer contact point from the estimated object poses and manipulator
         # movement
         if direction == "RToL":
-            pose_tgt_obj = pose_l; pose_src_obj_before = pose_r
+            tmat_tgt_obj = tmat_l; tmat_src_obj_before = tmat_r
             tgt_conc_ind = part_l_conc_ind; src_conc_ind = part_r_conc_ind
             pcl_tgt = agent.lt_mem.exemplars.object_3d[part_l_conc_ind][0]
             pcl_src = agent.lt_mem.exemplars.object_3d[part_r_conc_ind][0]
         else:
-            pose_tgt_obj = pose_r; pose_src_obj_before = pose_l
+            tmat_tgt_obj = tmat_r; tmat_src_obj_before = tmat_l
             tgt_conc_ind = part_r_conc_ind; src_conc_ind = part_l_conc_ind
             pcl_tgt = agent.lt_mem.exemplars.object_3d[part_r_conc_ind][0]
             pcl_src = agent.lt_mem.exemplars.object_3d[part_l_conc_ind][0]
@@ -1129,13 +1209,11 @@ def analyze_demonstration(agent, demo_data):
             flip_position_y(manip_poses[1][1])
         )
 
-        tmat_tgt_obj = transformation_matrix(*pose_tgt_obj)
         # Relation among manipulator & object transformations:
         # [Tr. of src object after movement] = 
         #   [Tr. of src manipulator after movement] *
         #   inv([Tr. of src manipulator before movement]) *
         #   [Tr. of src object before movement]
-        tmat_src_obj_before = transformation_matrix(*pose_src_obj_before)
         tmat_src_manip_before = transformation_matrix(*pose_src_manip_before)
         tmat_src_manip_after = transformation_matrix(*pose_src_manip_after)
         tmat_src_obj_after = tmat_src_manip_after @ \
@@ -1170,11 +1248,11 @@ def analyze_demonstration(agent, demo_data):
         # for rotation, apply the rotation matrix first, then inverse of the
         # rotation part of the transformations
         pose_cp_tgt = (
-            rmat2quat(inv(tmat_tgt_obj)[:3,:3] @ cp_rmat),
+            rmat2quat(tmat_tgt_obj[:3,:3].T @ cp_rmat),
             tuple((inv(tmat_tgt_obj) @ np.append(cp_position, 1))[:3].tolist())
         )
         pose_cp_src = (
-            rmat2quat(inv(tmat_src_obj_after)[:3,:3] @ cp_rmat),
+            rmat2quat(tmat_src_obj_after[:3,:3].T @ cp_rmat),
             tuple((inv(tmat_src_obj_after) @ np.append(cp_position, 1))[:3].tolist())
         )
 
@@ -1186,10 +1264,10 @@ def analyze_demonstration(agent, demo_data):
 
         # Register contact point type and pose info
         agent.lt_mem.exemplars.add_exs_3d(
-            tgt_conc_ind, None, None, None, { cp_tgt_conc_ind: {pose_cp_tgt} }
+            tgt_conc_ind, None, None, None, { cp_tgt_conc_ind: [pose_cp_tgt] }
         )
         agent.lt_mem.exemplars.add_exs_3d(
-            src_conc_ind, None, None, None, { cp_src_conc_ind: {pose_cp_src} }
+            src_conc_ind, None, None, None, { cp_src_conc_ind: [pose_cp_src] }
         )
 
         # Add new subassembly tree by adding concept-annotated part nodes and
@@ -1223,8 +1301,13 @@ def analyze_demonstration(agent, demo_data):
         ][0]
         assembly_trees[resulting_subassembly].add_edge(
             part_node_l, part_node_r,
-            contact={ part_node_l: cp_l_conc_ind, part_node_r: cp_r_conc_ind }
+            contact={
+                part_node_l: (cp_l_conc_ind, 0),
+                part_node_r: (cp_r_conc_ind, 0)
+            }
         )
+
+    print(0)
 
 
 def _add_scene_and_exemplars_2d(

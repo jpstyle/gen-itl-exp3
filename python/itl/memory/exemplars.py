@@ -133,13 +133,13 @@ class Exemplars:
             # Entry exists; interpret intent as adding contact points
             if contact_points is not None:
                 for cp_conc_ind, poses in contact_points.items():
-                    self.object_3d[conc_ind][3][cp_conc_ind] |= poses
+                    self.object_3d[conc_ind][3][cp_conc_ind] += poses
         else:
             # New entry
             if contact_points is None:
-                contact_points = defaultdict(set)
+                contact_points = defaultdict(list)
             else:
-                contact_points = defaultdict(set, contact_points)
+                contact_points = defaultdict(list, contact_points)
 
             # Store the provided info
             self.object_3d[conc_ind] = (

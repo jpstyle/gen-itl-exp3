@@ -169,6 +169,9 @@ class SimulatedTeacher:
                     copy.deepcopy(self.current_episode_record["sampled_parts"])
                 )
                 self.ongoing_demonstration = sampled_plan
+                self.assembly_state = {
+                    "left": None, "right": None, "subassemblies": defaultdict(set)
+                }
 
                 # Notify agent that user will demonstrate how to build one
                 response.append((
@@ -184,43 +187,72 @@ class SimulatedTeacher:
                 if len(self.ongoing_demonstration) == 0:
                     # Last action executed, demonstration finished
                     response.append((
-                    "Utter",
-                    {
-                        "utterance": f"This is a {self.target_concept}.",
-                        "pointing": { (0, 4): "/truck" }
-                    }
-                ))
+                        "Utter",
+                        {
+                            "utterance": f"This is a {self.target_concept}.",
+                            "pointing": { (0, 4): "/truck" }
+                        }
+                    ))
                 else:
                     # Keep popping and executing plan actions until plan is empty
                     act_type, act_params = self.ongoing_demonstration.pop(0)
+                    # Shortcuts
+                    assem_st = self.assembly_state
+                    subassems = assem_st["subassemblies"]
 
                     # Execute physical action
                     response.append((act_type, { "parameters": act_params }))
                     # Annotate physical action to be executed for this step, communicated
                     # to agent along with the action
-                    offset = len(f"# Action: {act_type}")
+                    act_str_prefix = f"# Action: {act_type}"
+                    offset = len(act_str_prefix)
                     if act_type.startswith("PickUp"):
                         # For PickUp~ actions, provide demonstrative reference by string path
                         # to target GameObject (which will be converted into binary mask)
                         target = act_params[0]
                         crange = (offset+1, offset+1+len(target))
                         act_anno = {
-                            "utterance": f"# Action: {act_type}({target})",
+                            "utterance": f"{act_str_prefix}({target})",
                             "pointing": { crange: "/" + act_params[0] }
                         }
+                        if act_type.endswith("Left"):
+                            assem_st["left"] = target
+                        else:
+                            assem_st["right"] = target
+                        if target not in subassems:
+                            subassems[target].add(target)
                     elif act_type.startswith("Assemble"):
                         # For Assemble~ actions, provide contact point info, specified by
-                        # (atomic part supertype, string identifier) pair
-                        target_l, target_r, subassembly = act_params
-                        crange_l = (offset+1, offset+1+len(target_l))
-                        crange_r = (crange_l[1]+1, crange_l[1]+1+len(target_r))
-                        act_anno = {
-                            "utterance": f"# Action: {act_type}({target_l},{target_r},{subassembly})",
-                            "pointing": {
-                                crange_l: "/Teacher Agent/Left Hand/*",
-                                crange_r: "/Teacher Agent/Right Hand/*"
-                            }
-                        }
+                        # (atomic part supertype, point identifier string) pair. Parameters
+                        # after the third represent requests for ground truth masks of
+                        # subassembly component parts.
+                        subassembly, target_l, target_r = act_params
+                        # Building action spec description string
+                        num_components = \
+                            len(subassems[assem_st["left"]] | subassems[assem_st["right"]])
+                        act_str = act_str_prefix
+                        act_str += f"({subassembly},{target_l},{target_r},{num_components},"
+                        offset = len(act_str)
+                        mask_requests = []; pointings = []
+                        for topmost_held in [assem_st["left"], assem_st["right"]]:
+                            for part in subassems[topmost_held]:
+                                mask_requests.append(part)
+                                part_type = re.findall(r"^t_(.*)_\d+$", part)[0]
+                                pointings.append((
+                                    (offset, offset+len(part)),
+                                    f"/Teacher Agent/*/{topmost_held}/{part_type}"
+                                ))
+                                offset += len(part) + 1
+                        act_str += ",".join(mask_requests) + ")"
+                        act_anno = { "utterance": act_str, "pointing": dict(pointings) }
+                        subassems[subassembly] = \
+                            subassems.pop(assem_st["left"]) | subassems.pop(assem_st["right"])
+                        if act_type.endswith("Left"):
+                            assem_st["left"] = subassembly
+                            assem_st["right"] = None
+                        else:
+                            assem_st["left"] = None
+                            assem_st["right"] = subassembly
                     elif act_type.startswith("Inspect"):
                         # For Inspect~ actions, provide integer index of (relative) viewpoint
                         hand = "Left" if act_type.endswith("Left") else "Right"
@@ -228,7 +260,7 @@ class SimulatedTeacher:
                         target, view_ind = act_params
                         crange = (offset+1, offset+1+len(target))
                         act_anno = {
-                            "utterance": f"# Action: {act_type}({target},{view_ind})",
+                            "utterance": f"{act_str_prefix}({target},{view_ind})",
                             "pointing": {
                                 crange: "/".join([path_prefix, "*"])
                             }
@@ -236,7 +268,7 @@ class SimulatedTeacher:
                     else:
                         # No parameter info to communicate, just annotate action type
                         act_anno = {
-                            "utterance": f"# Action: {act_type}()",
+                            "utterance": f"{act_str_prefix}()",
                             "pointing": {}
                         }
                     response.append(("Utter", act_anno))
@@ -582,9 +614,9 @@ def _sample_demo_plan(sampled_parts):
             [
                 ("PickUpLeft", ("fl_fender",)),
                 ("PickUpRight", ("wheel",)),
-                ("AssembleRightToLeft", ("fl_fender/wheel", "wheel/bolt", "fl_fw")),
+                ("AssembleRightToLeft", ("fl_fw", "fl_fender/wheel", "wheel/bolt")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("fl_fender/wheel", "bolt/bolt", "fl_fw_unit")),
+                ("AssembleRightToLeft", ("fl_fw_unit", "fl_fender/wheel", "bolt/bolt")),
                 ("DropLeft", ())
             ],
             [],
@@ -596,9 +628,9 @@ def _sample_demo_plan(sampled_parts):
             [
                 ("PickUpLeft", ("fr_fender",)),
                 ("PickUpRight", ("wheel",)),
-                ("AssembleRightToLeft", ("fr_fender/wheel", "wheel/bolt", "fr_fw")),
+                ("AssembleRightToLeft", ("fr_fw", "fr_fender/wheel", "wheel/bolt")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("fr_fender/wheel", "bolt/bolt", "fr_fw_unit")),
+                ("AssembleRightToLeft", ("fr_fw_unit", "fr_fender/wheel", "bolt/bolt")),
                 ("DropLeft", ())
             ],
             [],
@@ -611,18 +643,18 @@ def _sample_demo_plan(sampled_parts):
                 ("PickUpLeft", ("bl_fender",)),
             ] + ([
                 ("PickUpRight", ("wheel",)),
-                ("AssembleRightToLeft", ("bl_fender/wheel", "wheel/bolt", "bl_fw")),
+                ("AssembleRightToLeft", ("bl_fw", "bl_fender/wheel", "wheel/bolt")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("wheel/bolt", "bolt/bolt", "bl_fw_unit")),
+                ("AssembleRightToLeft", ("bl_fw_unit", "wheel/bolt", "bolt/bolt")),
             ] if not sampled_parts[("bl_fender", 0)].startswith("double") else [
                 ("PickUpRight", ("wheel",)),
-                ("AssembleRightToLeft", ("bl_fender/wheel1", "wheel/bolt", "bl_fw1")),
+                ("AssembleRightToLeft", ("bl_fw1", "bl_fender/wheel1", "wheel/bolt")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("bl_fender/wheel1", "bolt/bolt", "bl_fw2")),
+                ("AssembleRightToLeft", ("bl_fw2", "bl_fender/wheel1", "bolt/bolt")),
                 ("PickUpRight", ("wheel",)),
-                ("AssembleRightToLeft", ("bl_fender/wheel2", "wheel/bolt", "bl_fw3")),
+                ("AssembleRightToLeft", ("bl_fw3", "bl_fender/wheel2", "wheel/bolt")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("bl_fender/wheel2", "bolt/bolt", "bl_fw_unit")),
+                ("AssembleRightToLeft", ("bl_fw_unit", "bl_fender/wheel2", "bolt/bolt")),
             ]) + [
                 ("DropLeft", ())
             ],
@@ -636,18 +668,18 @@ def _sample_demo_plan(sampled_parts):
                 ("PickUpLeft", ("br_fender",)),
             ] + ([
                 ("PickUpRight", ("wheel",)),
-                ("AssembleRightToLeft", ("br_fender/wheel", "wheel/bolt", "br_fw")),
+                ("AssembleRightToLeft", ("br_fw", "br_fender/wheel", "wheel/bolt")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("wheel/bolt", "bolt/bolt", "br_fw_unit")),
+                ("AssembleRightToLeft", ("br_fw_unit", "wheel/bolt", "bolt/bolt")),
             ] if not sampled_parts[("br_fender", 0)].startswith("double") else [
                 ("PickUpRight", ("wheel",)),
-                ("AssembleRightToLeft", ("br_fender/wheel1", "wheel/bolt", "br_fw1")),
+                ("AssembleRightToLeft", ("br_fw1", "br_fender/wheel1", "wheel/bolt", )),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("br_fender/wheel1", "bolt/bolt", "br_fw2")),
+                ("AssembleRightToLeft", ("br_fw2", "br_fender/wheel1", "bolt/bolt")),
                 ("PickUpRight", ("wheel",)),
-                ("AssembleRightToLeft", ("br_fender/wheel2", "wheel/bolt", "br_fw3")),
+                ("AssembleRightToLeft", ("br_fw3", "br_fender/wheel2", "wheel/bolt")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("br_fender/wheel2", "bolt/bolt", "br_fw_unit")),
+                ("AssembleRightToLeft", ("br_fw_unit", "br_fender/wheel2", "bolt/bolt")),
             ]) + [
                 ("DropLeft", ())
             ],
@@ -660,15 +692,15 @@ def _sample_demo_plan(sampled_parts):
             [
                 ("PickUpLeft", ("chassis_front",)),
                 ("PickUpRight", ("cabin",)),
-                ("AssembleRightToLeft", ("chassis_front/cabin1", "cabin/front1", "cf0")),
+                ("AssembleRightToLeft", ("cf0", "chassis_front/cabin1", "cabin/front1")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("chassis_front/cabin1", "bolt/bolt", "cf1")),
+                ("AssembleRightToLeft", ("cf1", "chassis_front/cabin1", "bolt/bolt")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("chassis_front/cabin2", "bolt/bolt", "cf2")),
+                ("AssembleRightToLeft", ("cf2", "chassis_front/cabin2", "bolt/bolt")),
                 ("PickUpRight", ("fl_fw_unit",)),
-                ("AssembleRightToLeft", ("chassis_front/lfw", "fl_fender/wheel", "cfl")),
+                ("AssembleRightToLeft", ("cfl", "chassis_front/lfw", "fl_fender/wheel")),
                 ("PickUpRight", ("fr_fw_unit",)),
-                ("AssembleRightToLeft", ("chassis_front/rfw", "fr_fender/wheel", "truck_front")),
+                ("AssembleRightToLeft", ("truck_front", "chassis_front/rfw", "fr_fender/wheel")),
                 ("DropLeft", ())
             ],
             ["fl_fw_unit", "fr_fw_unit"],
@@ -680,21 +712,21 @@ def _sample_demo_plan(sampled_parts):
             [
                 ("PickUpLeft", ("chassis_back",)),
                 ("PickUpRight", ("load",)),
-                ("AssembleRightToLeft", ("chassis_back/load", "load/back", "lb0")),
+                ("AssembleRightToLeft", ("lb0", "chassis_back/load", "load/back")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("chassis_back/load", "bolt/bolt", "lb1"))
+                ("AssembleRightToLeft", ("lb1", "chassis_back/load", "bolt/bolt"))
             ] + ([
                 ("PickUpRight", ("bl_fw_unit",)),
-                ("AssembleRightToLeft", ("chassis_back/lfw0", "bl_fender/wheel", "lb2"))
+                ("AssembleRightToLeft", ("lb2", "chassis_back/lfw0", "bl_fender/wheel"))
             ] if not sampled_parts[("bl_fender", 0)].startswith("double") else [
                 ("PickUpRight", ("bl_fw_unit",)),
-                ("AssembleRightToLeft", ("chassis_back/lfw1", "bl_fender/wheel1", "lb2"))
+                ("AssembleRightToLeft", ("lb2", "chassis_back/lfw1", "bl_fender/wheel1"))
             ]) + ([
                 ("PickUpRight", ("br_fw_unit",)),
-                ("AssembleRightToLeft", ("chassis_back/rfw0", "bl_fender/wheel", "truck_back"))
+                ("AssembleRightToLeft", ("truck_back", "chassis_back/rfw0", "bl_fender/wheel"))
             ] if not sampled_parts[("br_fender", 0)].startswith("double") else [
                 ("PickUpRight", ("br_fw_unit",)),
-                ("AssembleRightToLeft", ("chassis_back/rfw1", "br_fender/wheel1", "truck_back"))
+                ("AssembleRightToLeft", ("truck_back", "chassis_back/rfw1", "br_fender/wheel1"))
             ]) + [
                 ("DropLeft", ())
             ],
@@ -707,13 +739,13 @@ def _sample_demo_plan(sampled_parts):
             [
                 ("PickUpLeft", ("truck_front",)),
                 ("PickUpRight", ("chassis_center",)),
-                ("AssembleRightToLeft", ("chassis_front/center", "chassis_center/front", "tfc0")),
+                ("AssembleRightToLeft", ("tfc0", "chassis_front/center", "chassis_center/front")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("chassis_front/center", "bolt/bolt", "tfc1")),
+                ("AssembleRightToLeft", ("tfc1", "chassis_front/center", "bolt/bolt")),
                 ("PickUpRight", ("truck_back",)),
-                ("AssembleRightToLeft", ("chassis_center/back", "chassis_back/center", "tfcb")),
+                ("AssembleRightToLeft", ("tfcb", "chassis_center/back", "chassis_back/center")),
                 ("PickUpRight", ("bolt",)),
-                ("AssembleRightToLeft", ("chassis_center/back", "bolt/bolt", "truck")),
+                ("AssembleRightToLeft", ("truck", "chassis_center/back", "bolt/bolt")),
                 ("DropLeft", ())
             ],
             ["truck_front", "truck_back"],
@@ -770,7 +802,7 @@ def _sample_demo_plan(sampled_parts):
                     hand = "Left" if action[0].endswith("Left") else "Right"
                     plan += [
                         (f"Inspect{hand}", (f"t_{instance[0]}_{instance[1]}", str(i)))
-                        for i in range(17)
+                        for i in range(33)
                     ]
 
             else:

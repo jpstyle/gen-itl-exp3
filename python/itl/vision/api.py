@@ -16,7 +16,6 @@ import numpy as np
 import open3d as o3d
 from pycocotools import mask
 from sklearn.decomposition import PCA
-from sklearn.metrics import pairwise_distances
 
 from .modeling import VisualSceneAnalyzer
 from .utils import (
@@ -617,26 +616,6 @@ class VisionModule:
         point_cloud = o3d.geometry.PointCloud(
             points=o3d.utility.Vector3dVector(reindexed_points)
         )
-
-        # # Storing full 2d-visual features from deep vision model in XB would require
-        # # too much space; select randomly downsampled points
-        # random_points = point_cloud.farthest_point_down_sample(
-        #     int(len(point_cloud.points) / 2)
-        # )
-        # # Also toss in some ISS-based keypoints
-        # avg_nn_dist = np.array(point_cloud.compute_nearest_neighbor_distance()).mean()
-        # iss_keypoints = o3d.geometry.keypoint.compute_iss_keypoints(
-        #     point_cloud, salient_radius=avg_nn_dist*2, non_max_radius=avg_nn_dist*2
-        # )
-        # # Remove any potential redundancy
-        # ds_points = np.concatenate([
-        #     np.asarray(random_points.points), np.asarray(iss_keypoints.points)
-        # ])
-        # ds_points = o3d.geometry.PointCloud(points=o3d.utility.Vector3dVector(ds_points))
-        # ds_points.remove_duplicated_points()
-        # # Finding the indices of the downsampled points in the original point cloud
-        # pdists = pairwise_distances(ds_points.points, point_cloud.points)
-        # kp_inds = pdists.argmin(axis=1).tolist()
 
         # Collect view info and point descriptors
         views = {}

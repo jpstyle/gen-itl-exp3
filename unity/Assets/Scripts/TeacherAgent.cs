@@ -405,7 +405,7 @@ public class TeacherAgent : DialogueAgent
         var wrapperPos = new Vector3(xPosition, 0f, zPosition);
 
         // Apply random rotations to the parent partition object
-        var rotY = Random.Range(0f, 359.9f);
+        var rotY = 90f * Random.Range(0, 4) + Random.Range(-5f, 5f);
         var prtRot = new Vector3(0f, rotY, 0f);
 
         InstantiateAtomicPrefab(
@@ -441,7 +441,7 @@ public class TeacherAgent : DialogueAgent
         };
 
         // Apply random rotations to the parent partition object
-        var rotY = 90f * Random.Range(0, 4) + Random.Range(-15f, 15f);
+        var rotY = 90f * Random.Range(0, 4) + Random.Range(-10f, 10f);
         var prtRot = new Vector3(0f, rotY, 0f);
 
         // Create empty wrapper GameObjects representing 'singleton subassembly'
@@ -467,7 +467,7 @@ public class TeacherAgent : DialogueAgent
         var wrapperPos = new Vector3(xPosition, 0f, zPosition);
 
         // Apply random rotation to the parent partition object
-        var rotY = Random.Range(-0f, 359.9f);
+        var rotY = 180f * Random.Range(0, 2) + Random.Range(-5f, 5f);
         var prtRot = new Vector3(0f, rotY, 0f);
         
         InstantiateAtomicPrefab(
@@ -533,9 +533,9 @@ public class TeacherAgent : DialogueAgent
         // Valid (x,z)-positions to sample from
         var xzPositions = new List<(float, float)>
         {
-            (-0.07f, 0.05f), (-0.07f, -0.03f),
+            (-0.08f, 0.05f), (-0.08f, -0.03f),
             (0f, 0.01f), (0f, -0.07f),
-            (0.07f, 0.05f), (0.07f, -0.03f)
+            (0.08f, 0.05f), (0.08f, -0.03f)
         };
         var randomIndices = Enumerable.Range(0, 6).ToList();
         Shuffle(randomIndices);
@@ -565,9 +565,9 @@ public class TeacherAgent : DialogueAgent
         // Valid (x,z)-positions to sample from
         var xzPositions = new List<(float, float)>
         {
-            (-0.06f, -0.03f), (-0.03f, -0.03f), (0f, -0.03f), (0.03f, -0.03f), (0.06f, -0.03f),
-            (-0.075f, 0.03f), (-0.045f, 0.03f), (-0.015f, 0.03f),
-            (0.015f, 0.03f), (0.045f, 0.03f), (0.075f, 0.03f)
+            (-0.08f, -0.03f), (-0.04f, -0.03f), (0f, -0.03f), (0.04f, -0.03f), (0.08f, -0.03f),
+            (-0.1f, 0.03f), (-0.06f, 0.03f), (-0.02f, 0.03f),
+            (0.02f, 0.03f), (0.06f, 0.03f), (0.1f, 0.03f)
         };
         var randomIndices = Enumerable.Range(0, 11).ToList();
         Shuffle(randomIndices);

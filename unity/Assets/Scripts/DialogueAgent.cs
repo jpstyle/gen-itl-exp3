@@ -64,6 +64,12 @@ public class DialogueAgent : Agent
     // Behavior type as MLAgent
     private BehaviorType _behaviorType;
 
+    // A bit of 'cheating' for stabilizing pose estimation results, as physical
+    // simulations may perturb rotation after dropping objects) Cache localRotations
+    // of held objects when dropping, and restore when picking them
+    // back up
+    private Dictionary<string, Quaternion> _rotationCache;
+    
     // Boolean flag indicating an Utter action is invoked as coroutine and currently
     // running; for preventing multiple invocation of Utter coroutine 
     private bool _uttering;
@@ -93,6 +99,7 @@ public class DialogueAgent : Agent
             );
 
         _behaviorType = GetComponent<BehaviorParameters>().BehaviorType;
+        _rotationCache = new Dictionary<string, Quaternion>();
         _nextTimeToAct = Time.time;
 
         leftOriginalPosition = leftHand.localPosition;
@@ -206,7 +213,7 @@ public class DialogueAgent : Agent
                 // Set agent (x,z)-translation
                 transform.position = new Vector3(0f, 0.85f, -0.3f);
                 // Set agent camera (x,y)-rotation
-                _cameraSensor.Camera.transform.eulerAngles = new Vector3(50f, 0f, 0f);
+                _cameraSensor.Camera.transform.eulerAngles = new Vector3(55f, 0f, 0f);
 
                 // Turn off request flag
                 calibrationImageRequest = -1;
@@ -414,13 +421,14 @@ public class DialogueAgent : Agent
                 break;
             case 5:
             case 6:
-                // AssembleRtoL/LtoR action, parameter: {contact point L, contact point R,
-                // resultant subassembly string name)
+                // AssembleRtoL/LtoR action, parameter: {resultant subassembly string name,
+                // contact point L, contact point R, # of parts whose ground truth masks are
+                // requested, [those parts]}
+                var productName = actionParameterBuffer.Dequeue();
                 var leftPoint = actionParameterBuffer.Dequeue();
                 var rightPoint = actionParameterBuffer.Dequeue();
-                var productName = actionParameterBuffer.Dequeue();
                 var rightToLeft = actionType % 2 == 1;
-                Assemble(leftPoint, rightPoint, productName, rightToLeft);
+                Assemble(productName, leftPoint, rightPoint, rightToLeft);
                 break;
             case 7:
             case 8:
@@ -465,6 +473,8 @@ public class DialogueAgent : Agent
         // disable physics interaction
         targetObj.transform.parent = activeHand.transform;
         targetObj.transform.localPosition = Vector3.zero;
+        if (_rotationCache.TryGetValue(targetObj.name, out var cachedRotation))
+            targetObj.transform.localRotation = cachedRotation;
         var objRigidbody = targetObj.GetComponent<Rigidbody>();
         objRigidbody.isKinematic = true;
         objRigidbody.detectCollisions = false;
@@ -485,6 +495,9 @@ public class DialogueAgent : Agent
         }
         Assert.IsNotNull(heldObj);
 
+        // Cache the current local rotation so that it can be restored later
+        _rotationCache[heldObj.name] = heldObj.transform.localRotation;
+        
         // Move target object above (y) some random x/z-position within the main
         // work area partition, 'release' by nullifying the hand's child status,
         float xPos, zPos;
@@ -518,7 +531,7 @@ public class DialogueAgent : Agent
     }
 
     private void Assemble(
-        string leftPoint, string rightPoint, string productName, bool rightToLeft
+        string productName, string leftPoint, string rightPoint, bool rightToLeft
     )
     {
         // Assemble two subassemblies held in each hand as guided by the specified
@@ -629,6 +642,9 @@ public class DialogueAgent : Agent
         Destroy(srcHeld);
         tgtHeld.name = productName;
 
+        // Update children of resulting subassembly
+        tgtHeld.GetComponent<EnvEntity>().UpdateClosestChildren();
+
         // Repositioning children prefabs in merged subassembly so the center of the
         // bounding volume becomes origin of the local space
         foreach (Transform child in tgtHeld.transform)
@@ -666,30 +682,33 @@ public class DialogueAgent : Agent
             activeHand.position = relativeViewCenter.position;
         }
 
-        if (viewIndex < 16)
+        if (viewIndex < 32)
         {
             // Turn hand orientation to each direction where the imaginary viewer is supposed to be
-            if (viewIndex % 4 == 0)
+            if (viewIndex % 8 == 0)
             {
-                // Adjust 'viewing height' (0~3: upper-high, 4~7: upper-low, 8~11: lower-low, 12~15:
-                // lower-high)
-                var rx = (viewIndex / 4) switch
+                // Adjust 'viewing height'
+                var rx = (viewIndex / 8) switch
                 {
-                    0 => _cameraSensor.Camera.transform.eulerAngles.x - 60f,
-                    1 => _cameraSensor.Camera.transform.eulerAngles.x - 30f,
-                    2 => _cameraSensor.Camera.transform.eulerAngles.x + 30f,
-                    3 => _cameraSensor.Camera.transform.eulerAngles.x + 60f,
+                    0 => _cameraSensor.Camera.transform.eulerAngles.x - 70f,
+                    1 => _cameraSensor.Camera.transform.eulerAngles.x - 50f,
+                    2 => _cameraSensor.Camera.transform.eulerAngles.x + 50f,
+                    3 => _cameraSensor.Camera.transform.eulerAngles.x + 70f,
                     _ => relativeViewCenter.eulerAngles.x
                 };
                 relativeViewCenter.eulerAngles = new Vector3(rx, 0f, 0f);
+                relativeViewCenter.Rotate(Vector3.up, -10f, Space.Self);
             }
             else
-                relativeViewCenter.Rotate(Vector3.up, 90f, Space.Self);
+                if (viewIndex % 2 == 0)
+                    relativeViewCenter.Rotate(Vector3.up, 70f, Space.Self);
+                else
+                    relativeViewCenter.Rotate(Vector3.up, 20f, Space.Self);
 
             activeHand.LookAt(relativeViewPoint, relativeViewCenter.up);
         }
 
-        if (viewIndex == 16)
+        if (viewIndex == 32)
         {
             // Back to default poses at the end of inspection
             activeHand.localPosition = onLeft ? leftOriginalPosition : rightOriginalPosition;

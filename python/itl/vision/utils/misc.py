@@ -140,30 +140,27 @@ def rmat2quat(rmat):
     r21, r22, r23 = rmat[1].tolist()
     r31, r32, r33 = rmat[2].tolist()
 
-    w_mag = sqrt((1 + r11 + r22 + r33) / 4)
-    x_mag = sqrt((1 + r11 - r22 - r33) / 4)
-    y_mag = sqrt((1 - r11 + r22 - r33) / 4)
-    z_mag = sqrt((1 - r11 - r22 + r33) / 4)
-    magnitudes = [w_mag, x_mag, y_mag, z_mag]
+    # Values for determining the first quaternion element to compute
+    selectors = [r11 + r22 + r33, r11, r22, r33]
 
-    match magnitudes.index(max(magnitudes)):
+    match selectors.index(max(selectors)):
         case 0:
-            qw = w_mag
+            qw = sqrt((1 + r11 + r22 + r33) / 4)
             qx = (r32 - r23) / (4 * qw)
             qy = (r13 - r31) / (4 * qw)
             qz = (r21 - r12) / (4 * qw)
         case 1:
-            qx = x_mag
+            qx = sqrt((1 + r11 - r22 - r33) / 4)
             qw = (r32 - r23) / (4 * qx)
             qy = (r12 + r21) / (4 * qx)
             qz = (r13 + r31) / (4 * qx)
         case 2:
-            qy = y_mag
+            qy = sqrt((1 - r11 + r22 - r33) / 4)
             qw = (r13 - r31) / (4 * qy)
             qx = (r12 + r21) / (4 * qy)
             qz = (r23 + r32) / (4 * qy)
         case 3:
-            qz = z_mag
+            qz = sqrt((1 - r11 - r22 + r33) / 4)
             qw = (r21 - r12) / (4 * qz)
             qx = (r13 + r31) / (4 * qz)
             qy = (r23 + r32) / (4 * qz)
