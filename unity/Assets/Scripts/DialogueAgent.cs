@@ -682,7 +682,7 @@ public class DialogueAgent : Agent
             activeHand.position = relativeViewCenter.position;
         }
 
-        if (viewIndex < 32)
+        if (viewIndex < 40)
         {
             // Turn hand orientation to each direction where the imaginary viewer is supposed to be
             if (viewIndex % 8 == 0)
@@ -692,23 +692,23 @@ public class DialogueAgent : Agent
                 {
                     0 => _cameraSensor.Camera.transform.eulerAngles.x - 70f,
                     1 => _cameraSensor.Camera.transform.eulerAngles.x - 50f,
-                    2 => _cameraSensor.Camera.transform.eulerAngles.x + 50f,
-                    3 => _cameraSensor.Camera.transform.eulerAngles.x + 70f,
+                    2 => _cameraSensor.Camera.transform.eulerAngles.x,
+                    3 => _cameraSensor.Camera.transform.eulerAngles.x + 50f,
+                    4 => _cameraSensor.Camera.transform.eulerAngles.x + 70f,
                     _ => relativeViewCenter.eulerAngles.x
                 };
                 relativeViewCenter.eulerAngles = new Vector3(rx, 0f, 0f);
-                relativeViewCenter.Rotate(Vector3.up, -10f, Space.Self);
             }
             else
                 if (viewIndex % 2 == 0)
-                    relativeViewCenter.Rotate(Vector3.up, 70f, Space.Self);
+                    relativeViewCenter.Rotate(Vector3.up, 75f, Space.Self);
                 else
-                    relativeViewCenter.Rotate(Vector3.up, 20f, Space.Self);
+                    relativeViewCenter.Rotate(Vector3.up, 15f, Space.Self);
 
             activeHand.LookAt(relativeViewPoint, relativeViewCenter.up);
         }
 
-        if (viewIndex == 32)
+        if (viewIndex == 40)
         {
             // Back to default poses at the end of inspection
             activeHand.localPosition = onLeft ? leftOriginalPosition : rightOriginalPosition;

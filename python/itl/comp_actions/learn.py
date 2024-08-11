@@ -37,32 +37,50 @@ U_IN_PR = 0.99              # How much the agent values information provided by 
 R = 0.3; Tr = (0, 0, R); theta_H = radians(70); theta_L = radians(50)
 H1 = cos(theta_H/2); H2 = sin(theta_H/2); L1 = cos(theta_L/2); L2 = sin(theta_L/2)
 ## (qw/qx/qy/qz quaternion, tx/ty/tz position); rotation first, then translation
+Y_ROTATIONS = [th1+th2 for th1, th2 in product([0, 90, 180, 270], [0, 15])]
 VP_POSES = \
 [
     # 'Lower-high' loop
-    ((H1*cos(th := radians((th1+th2) / 2)), H2*cos(th), H1*sin(th), H2*sin(th)), Tr)
-    for th1, th2 in product([0, 90, 180, 270], [-10, 10])
+    ((H1*cos(th := radians(th_y / 2)), H2*cos(th), H1*sin(th), H2*sin(th)), Tr)
+    for th_y in Y_ROTATIONS
 ] + [
     # 'Lower-low' loop
-    ((L1*cos(th := radians((th1+th2) / 2)), L2*cos(th), L1*sin(th), L2*sin(th)), Tr)
-    for th1, th2 in product([0, 90, 180, 270], [-10, 10])
+    ((L1*cos(th := radians(th_y / 2)), L2*cos(th), L1*sin(th), L2*sin(th)), Tr)
+    for th_y in Y_ROTATIONS
+] + [
+    # 'Equator' loop
+    ((cos(th := radians(th_y / 2)), 0, sin(th), 0), Tr)
+    for th_y in Y_ROTATIONS
 ] + [
     # 'Upper-low' loop
-    ((L1*cos(th := radians((th1+th2) / 2)), -L2*cos(th), L1*sin(th), -L2*sin(th)), Tr)
-    for th1, th2 in product([0, 90, 180, 270], [-10, 10])
+    ((L1*cos(th := radians(th_y / 2)), -L2*cos(th), L1*sin(th), -L2*sin(th)), Tr)
+    for th_y in Y_ROTATIONS
 ] + [
     # 'Upper-high' loop
-    ((H1*cos(th := radians((th1+th2) / 2)), -H2*cos(th), H1*sin(th), -H2*sin(th)), Tr)
-    for th1, th2 in product([0, 90, 180, 270], [-10, 10])
+    ((H1*cos(th := radians(th_y / 2)), -H2*cos(th), H1*sin(th), -H2*sin(th)), Tr)
+    for th_y in Y_ROTATIONS
 ]
 # Connectivity graph that represents pairs of 3D inspection images to be cross-referenced
 CON_GRAPH = nx.Graph()
-for i in range(4):
-    CON_GRAPH.add_edge(2*i, 2*i+8); CON_GRAPH.add_edge(2*i+1, 2*i+9)
-    CON_GRAPH.add_edge(2*i+8, 2*i+16); CON_GRAPH.add_edge(2*i+9, 2*i+17)
-    CON_GRAPH.add_edge(2*i+16, 2*i+24); CON_GRAPH.add_edge(2*i+17, 2*i+25)
-    CON_GRAPH.add_edge(2*i, 2*i+1); CON_GRAPH.add_edge(2*i+8, 2*i+9)
-    CON_GRAPH.add_edge(2*i+16, 2*i+17); CON_GRAPH.add_edge(2*i+24, 2*i+25)
+for i in range(8):
+    CON_GRAPH.add_edge(i, i+8)
+    CON_GRAPH.add_edge(i+8, i+16)
+    CON_GRAPH.add_edge(i+16, i+24)
+    CON_GRAPH.add_edge(i+24, i+32)
+    if i < 7:
+        CON_GRAPH.add_edge(i, i+1); CON_GRAPH.add_edge(i+8, i+9)
+        CON_GRAPH.add_edge(i+16, i+17); CON_GRAPH.add_edge(i+24, i+25)
+        CON_GRAPH.add_edge(i+32, i+33)
+    else:
+        CON_GRAPH.add_edge(i, i-7); CON_GRAPH.add_edge(i+8, i+1)
+        CON_GRAPH.add_edge(i+16, i+9); CON_GRAPH.add_edge(i+24, i+17)
+        CON_GRAPH.add_edge(i+32, i+25)
+# for i in range(4):
+#     CON_GRAPH.add_edge(2*i, 2*i+8); CON_GRAPH.add_edge(2*i+1, 2*i+9)
+#     CON_GRAPH.add_edge(2*i+8, 2*i+16); CON_GRAPH.add_edge(2*i+9, 2*i+17)
+#     CON_GRAPH.add_edge(2*i+16, 2*i+24); CON_GRAPH.add_edge(2*i+17, 2*i+25)
+#     CON_GRAPH.add_edge(2*i, 2*i+1); CON_GRAPH.add_edge(2*i+8, 2*i+9)
+#     CON_GRAPH.add_edge(2*i+16, 2*i+17); CON_GRAPH.add_edge(2*i+24, 2*i+25)
 
 # Recursive helper methods for checking whether rule cons/ante is grounded (variable-
 # free), lifted (all variables), contains any predicate referent as argument, or uses
@@ -781,7 +799,7 @@ def analyze_demonstration(agent, demo_data):
                                 # inspect_~ action; collect all views for 3D reconstruction
                                 viewed_obj = lit.args[2][0]
                                 view_ind = int(referents["dis"][lit.args[3][0]]["name"])
-                                if view_ind < 32:
+                                if view_ind < 40:
                                     inspect_data["img"][view_ind] = img
                                 if view_ind > 0:
                                     inspect_data["msk"][view_ind-1] = env_refs[viewed_obj]["mask"]
@@ -829,7 +847,7 @@ def analyze_demonstration(agent, demo_data):
                 # expressed in natural language in the scope of our experiment
                 raise NotImplementedError
 
-        if len(inspect_data["img"]) == 32 and len(inspect_data["msk"]) == 32:
+        if len(inspect_data["img"]) == 40 and len(inspect_data["msk"]) == 40:
             # Reconstruct 3D structure of the inspected object instance
             for mpl in [1, 1.5]:
                 # Try at most twice, increasing the 'resolution multiplier'
@@ -841,7 +859,7 @@ def analyze_demonstration(agent, demo_data):
                 point_cloud = reconstruction[0]
 
                 # Break if enough points obtained
-                if len(point_cloud.points) >= 1200: break
+                if len(point_cloud.points) >= 1000: break
 
             vision_3d_data[current_held[left_or_right]] = reconstruction
 
@@ -974,7 +992,7 @@ def analyze_demonstration(agent, demo_data):
                         { 0: image }, [msk]
                     )
                     patch_features, lr_msk, lr_dim = vis_model.lr_features_from_masks(
-                        zoomed_image, zoomed_msk, 600, 2
+                        zoomed_image, zoomed_msk, 750, 2
                     ) 
                     D = patch_features[0].shape[-1]
                     (cr_x, _, cr_y, _), (lr_w, lr_h) = crop_dim[0], lr_dim[0]
@@ -1125,7 +1143,9 @@ def analyze_demonstration(agent, demo_data):
                             np.logical_and(0 <= proj_x, proj_x < msk.shape[1])
                         )
                         proj_msk[proj_y[valid_inds], proj_x[valid_inds]] = True
-                        proj_msk = dilation(proj_msk, footprint=disk(2 * median_nn_dist))
+                        proj_msk = dilation(
+                            proj_msk, footprint=disk(max(2 * median_nn_dist, 1))
+                        )
                         mask_overlap = mask_iou([msk], [proj_msk])[0][0]
 
                         # Store pose estimation results along with pose evaluation score

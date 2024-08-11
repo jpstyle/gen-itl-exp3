@@ -504,7 +504,7 @@ class VisionModule:
         with torch.no_grad():
             # Obtain (flattened) patch-level features and corresponding masks extracted from
             # the zoomed images
-            lr_mask_area = 800
+            lr_mask_area = 750
             patch_features, lr_masks, lr_dims = self.model.lr_features_from_masks(
                 zoomed_images, zoomed_masks, lr_mask_area, resolution_multiplier
             )

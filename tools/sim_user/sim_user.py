@@ -802,7 +802,7 @@ def _sample_demo_plan(sampled_parts):
                     hand = "Left" if action[0].endswith("Left") else "Right"
                     plan += [
                         (f"Inspect{hand}", (f"t_{instance[0]}_{instance[1]}", str(i)))
-                        for i in range(33)
+                        for i in range(41)
                     ]
 
             else:
