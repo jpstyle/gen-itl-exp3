@@ -5,6 +5,7 @@ referring to belief updates that modify long-term memory
 import re
 import math
 import torch
+from copy import deepcopy
 from math import sin, cos, radians
 from itertools import product, permutations
 from collections import defaultdict
@@ -38,13 +39,12 @@ R = 0.3; Tr = (0, 0, R); theta_H = radians(70); theta_L = radians(50)
 H1 = cos(theta_H/2); H2 = sin(theta_H/2); L1 = cos(theta_L/2); L2 = sin(theta_L/2)
 ## (qw/qx/qy/qz quaternion, tx/ty/tz position); rotation first, then translation
 Y_ROTATIONS = [th1+th2 for th1, th2 in product([0, 90, 180, 270], [0, 15])]
-VP_POSES = \
-[
-    # 'Lower-high' loop
+VP_POSES = [
+    # 'Southern-high' loop
     ((H1*cos(th := radians(th_y / 2)), H2*cos(th), H1*sin(th), H2*sin(th)), Tr)
     for th_y in Y_ROTATIONS
 ] + [
-    # 'Lower-low' loop
+    # 'Southern-low' loop
     ((L1*cos(th := radians(th_y / 2)), L2*cos(th), L1*sin(th), L2*sin(th)), Tr)
     for th_y in Y_ROTATIONS
 ] + [
@@ -52,11 +52,11 @@ VP_POSES = \
     ((cos(th := radians(th_y / 2)), 0, sin(th), 0), Tr)
     for th_y in Y_ROTATIONS
 ] + [
-    # 'Upper-low' loop
+    # 'Northern-low' loop
     ((L1*cos(th := radians(th_y / 2)), -L2*cos(th), L1*sin(th), -L2*sin(th)), Tr)
     for th_y in Y_ROTATIONS
 ] + [
-    # 'Upper-high' loop
+    # 'Northern-high' loop
     ((H1*cos(th := radians(th_y / 2)), -H2*cos(th), H1*sin(th), -H2*sin(th)), Tr)
     for th_y in Y_ROTATIONS
 ]
@@ -75,12 +75,13 @@ for i in range(8):
         CON_GRAPH.add_edge(i, i-7); CON_GRAPH.add_edge(i+8, i+1)
         CON_GRAPH.add_edge(i+16, i+9); CON_GRAPH.add_edge(i+24, i+17)
         CON_GRAPH.add_edge(i+32, i+25)
-# for i in range(4):
-#     CON_GRAPH.add_edge(2*i, 2*i+8); CON_GRAPH.add_edge(2*i+1, 2*i+9)
-#     CON_GRAPH.add_edge(2*i+8, 2*i+16); CON_GRAPH.add_edge(2*i+9, 2*i+17)
-#     CON_GRAPH.add_edge(2*i+16, 2*i+24); CON_GRAPH.add_edge(2*i+17, 2*i+25)
-#     CON_GRAPH.add_edge(2*i, 2*i+1); CON_GRAPH.add_edge(2*i+8, 2*i+9)
-#     CON_GRAPH.add_edge(2*i+16, 2*i+17); CON_GRAPH.add_edge(2*i+24, 2*i+25)
+# Index of viewpoints whose data (camera pose, visible points and their descriptors)
+# will be stored in long-term memory; storing for all consumes too much time (for
+# examining possible initial poses during pose estimation) and space (storing all
+# descriptors---even in reduced dimensionalities---would take too much)
+STORE_VP_INDS = [
+    0, 2, 4, 6, 8, 10, 12, 14, 24, 26, 28, 30, 32, 34, 36, 38
+]
 
 # Recursive helper methods for checking whether rule cons/ante is grounded (variable-
 # free), lifted (all variables), contains any predicate referent as argument, or uses
@@ -849,18 +850,10 @@ def analyze_demonstration(agent, demo_data):
 
         if len(inspect_data["img"]) == 40 and len(inspect_data["msk"]) == 40:
             # Reconstruct 3D structure of the inspected object instance
-            for mpl in [1, 1.5]:
-                # Try at most twice, increasing the 'resolution multiplier'
-                # value each time the obtained point cloud doesn't have enough points
-                reconstruction = agent.vision.reconstruct_3d_structure(
-                    inspect_data["img"], inspect_data["msk"], VP_POSES, CON_GRAPH,
-                    resolution_multiplier=mpl
-                )
-                point_cloud = reconstruction[0]
-
-                # Break if enough points obtained
-                if len(point_cloud.points) >= 1000: break
-
+            reconstruction = agent.vision.reconstruct_3d_structure(
+                inspect_data["img"], inspect_data["msk"],
+                VP_POSES, CON_GRAPH, STORE_VP_INDS
+            )
             vision_3d_data[current_held[left_or_right]] = reconstruction
 
             # Make way for new data
@@ -881,7 +874,9 @@ def analyze_demonstration(agent, demo_data):
         new_conc_ind = agent.vision.add_concept("pcls")
 
         # Store the reconstructed structure info in XB
-        agent.lt_mem.exemplars.add_exs_3d(new_conc_ind, point_cloud, views, descriptors)
+        agent.lt_mem.exemplars.add_exs_3d(
+            new_conc_ind, np.asarray(point_cloud.points), views, descriptors
+        )
 
         # Track corresponding concepts
         inst2conc_map[instance_name] = new_conc_ind
@@ -984,7 +979,7 @@ def analyze_demonstration(agent, demo_data):
                 for part, msk in zip(parts, masks):
                     # Skip on obvious occlusion, i.e., if mask area of part in
                     # a subassembly is too small
-                    if len(masks) > 1 and msk.sum() < 5000:
+                    if len(masks) > 1 and msk.sum() < 3000:
                         continue
 
                     # Extract patch-level features as guided by masks
@@ -992,8 +987,8 @@ def analyze_demonstration(agent, demo_data):
                         { 0: image }, [msk]
                     )
                     patch_features, lr_msk, lr_dim = vis_model.lr_features_from_masks(
-                        zoomed_image, zoomed_msk, 750, 2
-                    ) 
+                        zoomed_image, zoomed_msk, 750, 3
+                    )
                     D = patch_features[0].shape[-1]
                     (cr_x, _, cr_y, _), (lr_w, lr_h) = crop_dim[0], lr_dim[0]
                     zoomed_image = zoomed_image[0]; lr_msk = lr_msk[0]
@@ -1019,7 +1014,7 @@ def analyze_demonstration(agent, demo_data):
                     y_ratio = zoomed_image.height / lr_h
 
                     # Compare against downsampled point descriptors stored in XB, per each view
-                    point_cloud, views, descriptors, _ = agent.lt_mem.exemplars.object_3d[conc_ind]
+                    points, views, descriptors, _ = agent.lt_mem.exemplars.object_3d[conc_ind]
                     pth_fh_flattened = patch_features[0].cpu().numpy().reshape(-1, D)
                     for vi, view_info in views.items():
                         # Fetch descriptors of visible points
@@ -1038,7 +1033,7 @@ def analyze_demonstration(agent, demo_data):
                         rmat_view = quat2rmat(view_info["cam_quaternion"])
                         tvec_view = view_info["cam_position"]
                         proj_at_view = cv.projectPoints(
-                            np.asarray(point_cloud.points),
+                            points,
                             cv.Rodrigues(rmat_view)[0], tvec_view,
                             cam_K, distortion_coeffs
                         )[0][:,0,:]
@@ -1087,7 +1082,7 @@ def analyze_demonstration(agent, demo_data):
                             for lr_x, lr_y in points_2d
                         ])
                         points_3d = np.array([
-                            point_cloud.points[visible_pts_sorted[i]]
+                            points[visible_pts_sorted[i]]
                             for i in match_forward[1]
                         ])
 
@@ -1101,8 +1096,7 @@ def analyze_demonstration(agent, demo_data):
                         # Evaluate estimated pose by obtaining mean similarity scores at
                         # reprojected downsampled points
                         estim_reprojections = cv.projectPoints(
-                            np.asarray(point_cloud.points), rvec, tvec,
-                            cam_K, distortion_coeffs
+                            points, rvec, tvec, cam_K, distortion_coeffs
                         )[0][:,0,:]
                         visible_reprojections = np.array([
                             estim_reprojections[visible_pts_sorted[i]]
@@ -1185,8 +1179,8 @@ def analyze_demonstration(agent, demo_data):
                     while True:
                         part_u = subassembly.nodes[u]["part_conc"]
                         part_v = subassembly.nodes[v]["part_conc"]
-                        cp_u, i_u = subassembly.edges[(u, v)]["contact"][u]
-                        cp_v, i_v = subassembly.edges[(u, v)]["contact"][v]
+                        _, cp_u, i_u = subassembly.edges[(u, v)]["contact"][u]
+                        _, cp_v, i_v = subassembly.edges[(u, v)]["contact"][v]
                         pose_cp_u = agent.lt_mem.exemplars.object_3d[part_u][3][cp_u][i_u]
                         pose_cp_v = agent.lt_mem.exemplars.object_3d[part_v][3][cp_v][i_v]
                         tmat_cp_u = transformation_matrix(*pose_cp_u)
@@ -1322,11 +1316,46 @@ def analyze_demonstration(agent, demo_data):
         assembly_trees[resulting_subassembly].add_edge(
             part_node_l, part_node_r,
             contact={
-                part_node_l: (cp_l_conc_ind, 0),
-                part_node_r: (cp_r_conc_ind, 0)
+                part_node_l: (None, cp_l_conc_ind, 0),
+                part_node_r: (None, cp_r_conc_ind, 0)
             }
         )
 
+    for subassembly_name, tree in assembly_trees.items():
+        # Create a new assembly graph, relabeling node names into case-neutral
+        # indices
+        neutral_tree = nx.Graph()
+
+        # Assign arbitrary integer ordering to atomic parts in subassemblies
+        node_reindex = list(tree.nodes)
+
+        # Accordingly neutralize node and edge name & data
+        for n, n_data in tree.nodes(data=True):
+            n_ind = node_reindex.index(n)
+            n_data_new = {
+                "node_type": "atomic_part",
+                "parts": {n_data["part_conc"]}
+            }
+            neutral_tree.add_node(n_ind, **n_data_new)
+        for n1, n2, e_data in tree.edges(data=True):
+            n1_ind, n2_ind = (node_reindex.index(n1), node_reindex.index(n2))
+            e_data_new = {
+                "contact": {
+                    n1_ind: e_data["contact"][n1],
+                    n2_ind: e_data["contact"][n2]
+                }
+            }
+            neutral_tree.add_edge(n1_ind, n2_ind, **e_data_new)
+
+        # Parse subassembly concept type & index
+        sa_conc = subassembly_labeling[subassembly_name].split("_")
+        sa_conc = (sa_conc[0], int(sa_conc[1]))
+
+        # Store the structure in KB
+        agent.lt_mem.kb.add_structure(sa_conc, neutral_tree)
+
+    import datetime
+    print(datetime.datetime.now())
     print(0)
 
 

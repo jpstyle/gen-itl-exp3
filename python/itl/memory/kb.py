@@ -28,6 +28,14 @@ class KnowledgeBase:
         # Indexing entries by contained predicates
         self.entries_by_pred = defaultdict(set)
 
+        # Actionable knowledge regarding how assembly (sub)structures can be built
+        # from their component atomic parts and/or substructures. Stored as (undirected)
+        # graphs, which can be later converted into ASP program fragments as needed.
+        # Note that a structure can have multiple possible combinations of atomic
+        # parts; for each structure we will store a disjunction (as list) of possible
+        # instantiations, consisting of different atomic parts.
+        self.assembly_structures = defaultdict(list)
+
     def __len__(self):
         return len(self.entries)
 
@@ -546,6 +554,10 @@ class KnowledgeBase:
                         add_evidence(pred, args, likelihood)
 
         return ev_prog
+
+    def add_structure(self, conc, tree):
+        """ Add or modify subassembly structure knowledge """
+        self.assembly_structures[conc].append(tree)
 
     @staticmethod
     def analyze_exported_reasoning_program(prog):

@@ -1,3 +1,0 @@
-paths:
-    grammar_image: "${paths.assets_dir}/grammars/erg-2018-x86-64-0.9.34.dat"
-    ace_binary: "${paths.assets_dir}/binaries/ace-0.9.34"

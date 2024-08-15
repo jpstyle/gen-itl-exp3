@@ -2525,8 +2525,8 @@ MonoBehaviour:
   frontChassisTypes:
   - {fileID: 6733888188683594903, guid: dc24d6369cac8fc34845595f35f4be8c, type: 3}
   centerChassisTypes:
-  - {fileID: 3057356756438121794, guid: f801c812d11786af9bad16bbf39c49ba, type: 3}
-  - {fileID: 1626345510092331421, guid: 840672daf7b7e11f48dd9726b9056588, type: 3}
+  - {fileID: 7734575806055474968, guid: 19faf673378c0f871ac0d09dc4593e69, type: 3}
+  - {fileID: 134611114058161143, guid: 8bddd51d72d74eed182ed04c1c2a7c80, type: 3}
   - {fileID: 3281324660702431920, guid: a13bd4a5eb3f7d238a7eb2097ec5c2d7, type: 3}
   - {fileID: 4531940676182110155, guid: fa607ee5ebcdd7cb791b1e2f241a0303, type: 3}
   backChassisTypes:

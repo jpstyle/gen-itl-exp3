@@ -34,7 +34,7 @@ class Exemplars:
         self.binary_classifiers_2d = { "pcls": {}, "prel": {} }
 
         # 3D structures of (unary) concept instances. Store point clouds, associated
-        # views and keypoint descriptors.
+        # views, keypoint descriptors and contact points.
         self.object_3d = {}
 
     def __repr__(self):

@@ -16,6 +16,7 @@ import numpy as np
 import open3d as o3d
 from pycocotools import mask
 from sklearn.decomposition import PCA
+from skimage.morphology import dilation, disk
 
 from .modeling import VisualSceneAnalyzer
 from .utils import (
@@ -483,7 +484,8 @@ class VisionModule:
         self.camera_intrinsics = (cam_K, distortion_coeffs)
 
     def reconstruct_3d_structure(
-        self, images, masks, viewpoint_poses, con_graph, resolution_multiplier=1
+        self, images, masks, viewpoint_poses, con_graph, store_vp_inds,
+        resolution_multiplier=1
     ):
         """
         Given lists of images & binary masks of an object viewed from different
@@ -513,10 +515,11 @@ class VisionModule:
         # Storing full 2d-visual features from deep vision model in XB would
         # require too much space; apply dimensionality reduction by PCA (specific
         # to each view) and store analysis results
-        dim_reducs = [
-            PCA(n_components=48).fit(pth_ft[0][lr_msk].cpu())
-            for pth_ft, lr_msk in zip(patch_features, lr_masks)
-        ]
+        dim_reducs = {
+            i: PCA(n_components=48).fit(pth_ft[0][lr_msk].cpu())
+            for i, (pth_ft, lr_msk) in enumerate(zip(patch_features, lr_masks))
+            if i in store_vp_inds
+        }
 
         # Flatten patch features
         patch_features = [
@@ -586,6 +589,7 @@ class VisionModule:
 
         # Collect points and filter by 2D reprojection vs. masks
         for msk, (quat, trns) in zip(masks.values(), viewpoint_poses):
+            msk = dilation(msk, footprint=disk(5))
             # Project to 2D image coordinate from this viewing angle
             cam_K, distortion_coeffs = self.camera_intrinsics
             rmat = quat2rmat(quat)
@@ -621,10 +625,13 @@ class VisionModule:
         views = {}
         descriptors_full = defaultdict(dict); descriptors_reduc = defaultdict(dict)
         for i, (_, img) in enumerate(sorted(reconstruction.images.items())):
-            views[i] = {
+            if i not in store_vp_inds: continue
+            st_i = store_vp_inds.index(i)
+
+            views[st_i] = {
                 "cam_quaternion": xyzw2wxyz(img.cam_from_world.rotation.quat),
                 "cam_position": img.cam_from_world.translation,
-                "visible_points": set(),#, "visible_feature_points": set()
+                "visible_points": set(),
                 "pca": dim_reducs[i]
             }
 
@@ -633,7 +640,7 @@ class VisionModule:
                 p3i = p2d.point3D_id
                 if p3i not in reindex_map_inv: continue     # Ignore invalid p2ds
                 p3i_reind = reindex_map_inv[p3i]
-                views[i]["visible_points"].add(p3i_reind)
+                views[st_i]["visible_points"].add(p3i_reind)
 
                 patch_index = colmap2patch_map[i][p2i]
                 descriptors_full[p3i_reind][i] = patch_features[i][patch_index]
@@ -641,8 +648,8 @@ class VisionModule:
             # Applying dimensionality reduction to the descriptors
             for p3i, per_view in descriptors_full.items():
                 if i in per_view:
-                    fvec_reduc = views[i]["pca"].transform(per_view[i][None])[0]
-                    descriptors_reduc[p3i][i] = fvec_reduc
+                    fvec_reduc = views[st_i]["pca"].transform(per_view[i][None])[0]
+                    descriptors_reduc[p3i][st_i] = fvec_reduc
 
         descriptors = dict(descriptors_reduc)
 
