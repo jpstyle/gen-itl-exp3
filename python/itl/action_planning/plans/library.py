@@ -47,7 +47,7 @@ library = {
     "address_unanswered_Q": [
         # Prepare answering utterance to generate
         {
-            "action_method": Val(referrable=["comp_actions", "attempt_answer_Q"]),
+            "action_method": Val(referrable=["comp_actions", "attempt_Q"]),
             "action_args_getter": lambda x: (Val(data=x),)
         },
     ],
@@ -67,14 +67,25 @@ library = {
         }
     ],
 
-    # Handle unanswered question by first checking if it can be executed with agent's
+    # Handle unexecuted command by first checking if it can be executed with agent's
     # current knowledge, and if so, adding to agenda to actually execute it
     "address_unexecuted_commands": [
         # Prepare answering utterance to generate
         {
-            "action_method": Val(referrable=["comp_actions", "attempt_execute_command"]),
+            "action_method": Val(referrable=["comp_actions", "attempt_command"]),
             "action_args_getter": lambda x: (Val(data=x),)
         },
+    ],
+
+    # Execute a command by committing to an appropriate goal state based on perceived
+    # environment state, translating goal state into ASP program fragment and running
+    # ASP solver, then executing each primitive action in sequence in order
+    "execute_command": [
+        # Set goal, plan, execute
+        {
+            "action_method": Val(referrable=["comp_actions", "execute_command"]),
+            "action_args_getter": lambda x: (Val(data=x),)
+        }
     ],
 
     # Resolve mismatch between agent's vs. user's perception by asking question,

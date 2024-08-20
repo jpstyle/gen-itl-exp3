@@ -85,12 +85,13 @@ def main(cfg):
     teacher = SimulatedTeacher(cfg)
 
     # Two types of task to teach/learn:
-    #   "build_truck_supertype": Learn how to build instances of the broad truck supertype,
-    #       where main learning targets are the types of constituent parts, valid assembly
-    #       pairs and contact points and the general desired 'assembly topology'
-    #   "build_truck_subtype": Learn how to build fine-grained subtypes of trucks, where
-    #       main learning targets are ontology rules (definitions and constraaints) that
-    #       need to be followed
+    #   "build_truck_supertype": Learn how to build instances of the broad truck
+    #       supertype, where main learning targets are the types of constituent
+    #       parts, valid assembly pairs and contact points and the general desired
+    #       'assembly topology'
+    #   "build_truck_subtype": Learn how to build fine-grained subtypes of trucks,
+    #       where main learning targets are ontology rules (definitions and constraints)
+    #       that need to be followed
     target_task = cfg.exp.task
 
     # Student/teacher-side string message communication side channels

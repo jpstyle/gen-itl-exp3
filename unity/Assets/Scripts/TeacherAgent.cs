@@ -405,7 +405,7 @@ public class TeacherAgent : DialogueAgent
         var wrapperPos = new Vector3(xPosition, 0f, zPosition);
 
         // Apply random rotations to the parent partition object
-        var rotY = 90f * Random.Range(0, 4) + Random.Range(-5f, 5f);
+        var rotY = 180f * Random.Range(0, 2) + Random.Range(-5f, 5f);
         var prtRot = new Vector3(0f, rotY, 0f);
 
         InstantiateAtomicPrefab(
@@ -441,7 +441,7 @@ public class TeacherAgent : DialogueAgent
         };
 
         // Apply random rotations to the parent partition object
-        var rotY = 90f * Random.Range(0, 4) + Random.Range(-10f, 10f);
+        var rotY = 180f * Random.Range(0, 2) + Random.Range(-5f, 5f);
         var prtRot = new Vector3(0f, rotY, 0f);
 
         // Create empty wrapper GameObjects representing 'singleton subassembly'
@@ -481,14 +481,7 @@ public class TeacherAgent : DialogueAgent
     )
     {
         // Define positions & rotations w.r.t. partition coordinate
-        var xRotations = new List<float>
-        {
-            // -1 corresponds to x-rotation of -90, 1 corresponds to x-rotation of 90
-            (Random.Range(0, 2) * 2 - 1) * 90f,
-            (Random.Range(0, 2) * 2 - 1) * 90f,
-            (Random.Range(0, 2) * 2 - 1) * 90f,
-            (Random.Range(0, 2) * 2 - 1) * 90f
-        };
+        var xRotations = new List<float> { -90f, 90f, -90f, 90f };
         var zPositions = new List<float> {-0.09f, -0.03f, 0.03f, 0.09f};
         var randomIndices = Enumerable.Range(0, 4).ToList();
         Shuffle(randomIndices);
@@ -549,7 +542,7 @@ public class TeacherAgent : DialogueAgent
             // Define position & rotation w.r.t. partition coordinate
             var xzPos = xzPositions[randomIndices[i]]; 
             var wrapperPos = new Vector3(xzPos.Item1, 0f, xzPos.Item2);
-            var wrapperRot = new Vector3(0f, 0f, (Random.Range(0, 2) * 2 - 1) * 90f);
+            var wrapperRot = new Vector3(0f, 0f, -90f);
 
             InstantiateAtomicPrefab(
                 wheelTypes[typeIndices[i]], null, partition,

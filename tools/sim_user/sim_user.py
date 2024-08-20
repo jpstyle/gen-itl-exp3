@@ -154,6 +154,7 @@ class SimulatedTeacher:
     def react(self, agent_reactions):
         """ Rule-based pattern matching for handling agent responses """
         response = []
+        sampled_parts = self.current_episode_record["sampled_parts"]
         for utt, dem_refs in agent_reactions:
             if re.match(r"I don't know what '(.*)' means\.$", utt):
                 # Agent reported it does not know what the target concept is
@@ -165,9 +166,7 @@ class SimulatedTeacher:
                 assert reported_neologism == self.target_concept
 
                 # Sample a valid workplan for demonstration and load for execution
-                sampled_plan = _sample_demo_plan(
-                    copy.deepcopy(self.current_episode_record["sampled_parts"])
-                )
+                sampled_plan = _sample_demo_plan(copy.deepcopy(sampled_parts))
                 self.ongoing_demonstration = sampled_plan
                 self.assembly_state = {
                     "left": None, "right": None, "subassemblies": defaultdict(set)
@@ -193,6 +192,7 @@ class SimulatedTeacher:
                             "pointing": { (0, 4): "/truck" }
                         }
                     ))
+
                 else:
                     # Keep popping and executing plan actions until plan is empty
                     act_type, act_params = self.ongoing_demonstration.pop(0)
@@ -206,6 +206,8 @@ class SimulatedTeacher:
                     # to agent along with the action
                     act_str_prefix = f"# Action: {act_type}"
                     offset = len(act_str_prefix)
+
+                    act_dscr = None
                     if act_type.startswith("PickUp"):
                         # For PickUp~ actions, provide demonstrative reference by string path
                         # to target GameObject (which will be converted into binary mask)
@@ -221,6 +223,20 @@ class SimulatedTeacher:
                             assem_st["right"] = target
                         if target not in subassems:
                             subassems[target].add(target)
+
+                        atomic_parts = {
+                            f"t_{inst[0]}_{inst[1]}": part_type
+                            for inst, part_type in sampled_parts.items()
+                        }
+                        if target in atomic_parts:
+                            target_label = f"a {atomic_parts[target]}"
+                        else:
+                            target_label = "the subassembly"
+                        act_dscr = {
+                            "utterance": f"Pick up {target_label}.",
+                            "pointing": {}
+                        }
+
                     elif act_type.startswith("Assemble"):
                         # For Assemble~ actions, provide contact point info, specified by
                         # (atomic part supertype, point identifier string) pair. Parameters
@@ -253,6 +269,7 @@ class SimulatedTeacher:
                         else:
                             assem_st["left"] = None
                             assem_st["right"] = subassembly
+
                     elif act_type.startswith("Inspect"):
                         # For Inspect~ actions, provide integer index of (relative) viewpoint
                         hand = "Left" if act_type.endswith("Left") else "Right"
@@ -265,13 +282,16 @@ class SimulatedTeacher:
                                 crange: "/".join([path_prefix, "*"])
                             }
                         }
+
                     else:
                         # No parameter info to communicate, just annotate action type
                         act_anno = {
                             "utterance": f"{act_str_prefix}()",
                             "pointing": {}
                         }
+
                     response.append(("Utter", act_anno))
+                    if act_dscr is not None: response.append(("Utter", act_dscr))
 
             elif utt == "OK.":
                 # No further interaction needed; effectively terminates current episode

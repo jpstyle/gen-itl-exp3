@@ -503,7 +503,7 @@ class ITLAgent:
                         unresolved_items.append((todo_state, todo_args))
 
                 # Any unresolved items back to agenda stack
-                self.planner.agenda = unresolved_items
+                self.planner.agenda = copy.deepcopy(unresolved_items)
 
                 if num_resolved_items == 0 or len(self.planner.agenda) == 0:
                     # No resolvable agenda item any more, or stack clear

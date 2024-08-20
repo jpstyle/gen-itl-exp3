@@ -516,7 +516,7 @@ class VisionModule:
         # require too much space; apply dimensionality reduction by PCA (specific
         # to each view) and store analysis results
         dim_reducs = {
-            i: PCA(n_components=48).fit(pth_ft[0][lr_msk].cpu())
+            i: PCA(n_components=128).fit(pth_ft[0][lr_msk].cpu())
             for i, (pth_ft, lr_msk) in enumerate(zip(patch_features, lr_masks))
             if i in store_vp_inds
         }

@@ -5,7 +5,6 @@ referring to belief updates that modify long-term memory
 import re
 import math
 import torch
-from copy import deepcopy
 from math import sin, cos, radians
 from itertools import product, permutations
 from collections import defaultdict
@@ -722,7 +721,7 @@ def analyze_demonstration(agent, demo_data):
 
     # Sequentially process each demonstration step
     current_held = [None, None]; current_assembly_info = None
-    nonatomic_subassemblies = set(); subassembly_labeling = {}
+    nonatomic_subassemblies = set(); nl_labeling = {}
     vision_2d_data = {}; vision_3d_data = {}; assembly_sequence = []
     for img, annotations, env_refs in demo_data:
         # Appropriately handle each annotation
@@ -744,11 +743,12 @@ def analyze_demonstration(agent, demo_data):
                         if conc_type != "arel": continue
                         conc_ind = int(conc_ind)
 
-                        # Handle each action accordingly (actions 1~8 to be handled
-                        # in our scope)
-                        left_or_right = (conc_ind-1) % 2
-                        match conc_ind:
-                            case 1 | 2:
+                        # Handle each action accordingly
+                        act_name = agent.lt_mem.lexicon.d2s[(conc_type, conc_ind)][0][1]
+                        act_type = act_name.split("_")[0]
+                        left_or_right = 0 if act_name.endswith("left") else 1
+                        match act_type:
+                            case "pick":
                                 # pick_up_~ action; track the held object and record 2d
                                 # visual data (image + mask)
                                 target_info = [
@@ -764,12 +764,12 @@ def analyze_demonstration(agent, demo_data):
                                     data = (prev_img, env_refs["o0"]["mask"])
                                     vision_2d_data[target_info["name"]] = [data]
 
-                            case 3 | 4:
+                            case "drop":
                                 # drop_~ action
                                 lastly_dropped = current_held[left_or_right]
                                 current_held[left_or_right] = None
 
-                            case 5 | 6:
+                            case "assemble":
                                 # assemble_~ action; record 2d visual data (image + masks)
                                 # and assembly action info, then remember non-atomic subassemblies
                                 # (distinguished by string name handle)
@@ -792,11 +792,11 @@ def analyze_demonstration(agent, demo_data):
                                         vision_2d_data[obj].append((prev_img, component_masks[obj]))
                                 # Update hand states
                                 current_held[left_or_right] = referents["dis"][lit.args[2][0]]["name"]
-                                current_held[left_or_right+1 % 2] = None
+                                current_held[(left_or_right+1) % 2] = None
 
                                 nonatomic_subassemblies.add(current_held[left_or_right])
 
-                            case 7 | 8:
+                            case "inspect":
                                 # inspect_~ action; collect all views for 3D reconstruction
                                 viewed_obj = lit.args[2][0]
                                 view_ind = int(referents["dis"][lit.args[3][0]]["name"])
@@ -815,11 +815,13 @@ def analyze_demonstration(agent, demo_data):
                         if conc_type != "arel": continue
                         conc_ind = int(conc_ind)
 
-                        # Handle each action accordingly (actions 1~8 to be handled
+                        # Handle each action accordingly (actions 2~9 to be handled
                         # in our scope)
-                        left_or_right = (conc_ind-1) % 2
-                        match conc_ind:
-                            case 5 | 6:
+                        act_name = agent.lt_mem.lexicon.d2s[(conc_type, conc_ind)][0][1]
+                        act_type = act_name.split("_")[0]
+                        left_or_right = 0 if act_name.endswith("left") else 1
+                        match act_type:
+                            case "assemble":
                                 # assemble_~ action; record manipulator poses
                                 parse_values = lambda ai: tuple(
                                     float(v) for v in referents["dis"][lit.args[ai][0]]["name"].split("/")
@@ -838,10 +840,17 @@ def analyze_demonstration(agent, demo_data):
 
                                 current_assembly_info = None
 
-                else:
-                    # Additional natural language annotation, providing labeling of
-                    # object instances of interest
-                    subassembly_labeling[lastly_dropped] = cons[0].name
+                elif raw.startswith("Pick up a"):
+                    # NL description providing labeling of the atomic part just
+                    # picked up with a PickUp~ action
+                    nl_labeling[current_held[left_or_right]] = \
+                        re.findall(r"Pick up a (.*)\.$", raw)[0]
+
+                elif raw.startswith("This is a"):
+                    # NL description providing labeling of the subassembly just
+                    # placed on the desk with a Drop~ action
+                    nl_labeling[lastly_dropped] = \
+                        re.findall(r"This is a (.*)\.$", raw)[0]
 
             else:
                 # Quantified statement with antecedent; expecting a generic rule
@@ -852,7 +861,8 @@ def analyze_demonstration(agent, demo_data):
             # Reconstruct 3D structure of the inspected object instance
             reconstruction = agent.vision.reconstruct_3d_structure(
                 inspect_data["img"], inspect_data["msk"],
-                VP_POSES, CON_GRAPH, STORE_VP_INDS
+                VP_POSES, CON_GRAPH, STORE_VP_INDS,
+                # resolution_multiplier=1.25
             )
             vision_3d_data[current_held[left_or_right]] = reconstruction
 
@@ -861,40 +871,46 @@ def analyze_demonstration(agent, demo_data):
 
         prev_img = img
 
-    # Process gathered data, 2D/3D vision and assembly contact points
-
-    # Process 3D vision data first, registering new pcls concepts and storing
-    # reconstructed structure data in XB
+    # Tag each part instance with their visual concept index, registering any
+    # new visual concepts & neologisms; we assume here all neologisms are nouns
+    # (corresponding to 'pcls')
     inst2conc_map = {}
-    for instance_name, reconstruction in vision_3d_data.items():
-        point_cloud, views, descriptors = reconstruction
+    for part_inst, part_type_name in nl_labeling.items():
+        sym = ("n", part_type_name)
+        if sym in agent.lt_mem.lexicon:
+            # Already registered
+            _, conc_ind = agent.lt_mem.lexicon.s2d[sym][0]
+            inst2conc_map[part_inst] = conc_ind
+        else:
+            # Neologism
+            new_conc_ind = agent.vision.add_concept("pcls")
+            agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
+            inst2conc_map[part_inst] = new_conc_ind
 
-        # Assumption: All concepts for which 3D data is acquired are novel to
-        # the learner agent and should be newly registered)
-        new_conc_ind = agent.vision.add_concept("pcls")
+    # Process 3D vision data, storing reconstructed structure data in XB    
+    for part_inst, reconstruction in vision_3d_data.items():
+        point_cloud, views, descriptors = reconstruction
 
         # Store the reconstructed structure info in XB
         agent.lt_mem.exemplars.add_exs_3d(
-            new_conc_ind, np.asarray(point_cloud.points), views, descriptors
+            inst2conc_map[part_inst],
+            np.asarray(point_cloud.points), views, descriptors
         )
 
-        # Track corresponding concepts
-        inst2conc_map[instance_name] = new_conc_ind
-
-    # Further process vision 2D data to obtain instance-level embeddings
+    # Process vision 2D data to obtain instance-level embeddings
     vision_2d_data = {
-        instance_name: [
+        part_inst: [
             (
                 image, mask, bg_image := blur_and_grayscale(image),
                 visual_prompt_by_mask(image, bg_image, [mask])
             )
             for image, mask in data
         ]
-        for instance_name, data in vision_2d_data.items()
+        for part_inst, data in vision_2d_data.items()
     }
     vis_model = agent.vision.model; vis_model.eval()
     with torch.no_grad():
-        for instance_name, data in vision_2d_data.items():
+        for part_inst, data in vision_2d_data.items():
             processed_data = []
             for image, mask, bg_image, vis_prompt in data:
                 vp_processed = vis_model.dino_processor(images=vis_prompt, return_tensors="pt")
@@ -902,17 +918,17 @@ def analyze_demonstration(agent, demo_data):
                 vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
                 f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
                 processed_data.append((image, mask, f_vec))
-            vision_2d_data[instance_name] = processed_data
+            vision_2d_data[part_inst] = processed_data
     # Add 2D vision data in XB, based on the newly assigned pcls concept indices
-    for instance_name, data in vision_2d_data.items():
-        if instance_name not in inst2conc_map:
+    for part_inst, data in vision_2d_data.items():
+        if part_inst not in inst2conc_map:
             # Cannot exactly specify which concept this instance classifies as, skip
             continue
 
         for image, mask, f_vec in data:
             exemplars = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
             pointers = {
-                ("pcls", inst2conc_map[inst], "pos" if inst==instance_name else "neg"): {
+                ("pcls", inst2conc_map[inst], "pos" if inst==part_inst else "neg"): {
                     # (Whether object is newly added to XB, index 0 as only one is newly
                     # added each time)
                     (True, 0)
@@ -993,19 +1009,6 @@ def analyze_demonstration(agent, demo_data):
                     (cr_x, _, cr_y, _), (lr_w, lr_h) = crop_dim[0], lr_dim[0]
                     zoomed_image = zoomed_image[0]; lr_msk = lr_msk[0]
 
-                    # Need to know which concept's instance the component part is
-                    if part in inst2conc_map:
-                        conc_ind = inst2conc_map[part]
-                    else:
-                        # Unspecified as yet, need to pick among concepts stored in
-                        # visual inventory
-                        fs_scores = np.array([
-                            agent.vision.fs_conc_pred(agent.lt_mem.exemplars, f_vec, "pcls")
-                            for _, _, f_vec in vision_2d_data[part]
-                        ])
-                        conc_ind = fs_scores.sum(axis=0).argmax()
-                        inst2conc_map[part] = conc_ind.item()       # Store result
-
                     msk_flattened = lr_msk.reshape(-1)
                     nonzero_inds = msk_flattened.nonzero()[0]
 
@@ -1014,6 +1017,7 @@ def analyze_demonstration(agent, demo_data):
                     y_ratio = zoomed_image.height / lr_h
 
                     # Compare against downsampled point descriptors stored in XB, per each view
+                    conc_ind = inst2conc_map[part]
                     points, views, descriptors, _ = agent.lt_mem.exemplars.object_3d[conc_ind]
                     pth_fh_flattened = patch_features[0].cpu().numpy().reshape(-1, D)
                     for vi, view_info in views.items():
@@ -1137,9 +1141,10 @@ def analyze_demonstration(agent, demo_data):
                             np.logical_and(0 <= proj_x, proj_x < msk.shape[1])
                         )
                         proj_msk[proj_y[valid_inds], proj_x[valid_inds]] = True
-                        proj_msk = dilation(
-                            proj_msk, footprint=disk(max(2 * median_nn_dist, 1))
-                        )
+                        disk_size = min(
+                            max(2*median_nn_dist, 1), min(obj_w, obj_h) / 10
+                        )       # Max cap disk size with 0.1 * min(mask_w, mask_h)
+                        proj_msk = dilation(proj_msk, footprint=disk(disk_size))
                         mask_overlap = mask_iou([msk], [proj_msk])[0][0]
 
                         # Store pose estimation results along with pose evaluation score
@@ -1212,8 +1217,8 @@ def analyze_demonstration(agent, demo_data):
             tgt_conc_ind = part_r_conc_ind; src_conc_ind = part_l_conc_ind
             pcl_tgt = agent.lt_mem.exemplars.object_3d[part_r_conc_ind][0]
             pcl_src = agent.lt_mem.exemplars.object_3d[part_l_conc_ind][0]
-        pcl_tgt = o3d.geometry.PointCloud(pcl_tgt)
-        pcl_src = o3d.geometry.PointCloud(pcl_src)
+        pcl_tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_tgt))
+        pcl_src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_src))
         pose_src_manip_before = (
             flip_quaternion_y(manip_poses[0][0]),
             flip_position_y(manip_poses[0][1])
@@ -1341,22 +1346,18 @@ def analyze_demonstration(agent, demo_data):
             n1_ind, n2_ind = (node_reindex.index(n1), node_reindex.index(n2))
             e_data_new = {
                 "contact": {
-                    n1_ind: e_data["contact"][n1],
-                    n2_ind: e_data["contact"][n2]
+                    n1_ind: [e_data["contact"][n1]],
+                    n2_ind: [e_data["contact"][n2]]
                 }
             }
             neutral_tree.add_edge(n1_ind, n2_ind, **e_data_new)
 
         # Parse subassembly concept type & index
-        sa_conc = subassembly_labeling[subassembly_name].split("_")
+        sa_conc = agent.lt_mem.lexicon.s2d[("n", nl_labeling[subassembly_name])][0]
         sa_conc = (sa_conc[0], int(sa_conc[1]))
 
         # Store the structure in KB
         agent.lt_mem.kb.add_structure(sa_conc, neutral_tree)
-
-    import datetime
-    print(datetime.datetime.now())
-    print(0)
 
 
 def _add_scene_and_exemplars_2d(

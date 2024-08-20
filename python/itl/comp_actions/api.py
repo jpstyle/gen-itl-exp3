@@ -14,12 +14,14 @@ class CompositeActions:
         self.agent = agent
 
     # Environmental interactions
-    def attempt_answer_Q(self, utt_pointer):
-        return attempt_answer_Q(self.agent, utt_pointer)
+    def attempt_Q(self, utt_pointer):
+        return attempt_Q(self.agent, utt_pointer)
     def prepare_answer_Q(self, utt_pointer):
         return prepare_answer_Q(self.agent, utt_pointer)
-    def attempt_execute_command(self, utt_pointer):
-        return attempt_execute_command(self.agent, utt_pointer)
+    def attempt_command(self, utt_pointer):
+        return attempt_command(self.agent, utt_pointer)
+    def execute_command(self, action_spec):
+        return execute_command(self.agent, action_spec)
 
     # Cognitive actions
     def identify_mismatch(self, rule):

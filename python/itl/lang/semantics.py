@@ -27,8 +27,9 @@ class SemanticParser:
             #   1) "Build a {truck_type}."
             #   2) "I will demonstrate how to build a {truck_type}."
             #   3) "# Action/Feedback: {action_type}({parameters})"
-            #   4) "This is a {concept_type}"
-            #   5) ...
+            #   4) "This is a {concept_type}."
+            #   5) "Pick up a {part_type}." or "Pick up the subassembly."
+            #   6) ...
             if re.match(r"Build a (.*)\.$", utt):
                 # 1) Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -150,6 +151,40 @@ class SemanticParser:
                 referents = {
                     "e0": { "mood": "." },
                     "x0": { "source_evt": "e0", "dem_ref": (0, 4) }
+                }
+
+                source = { "e0": utt }
+
+            elif re.match(r"Pick up (.*)\.$", utt):
+                # 5) Utterance has appearance of a command, but more like a NL
+                # description (with haptic-ostensive reference) of a pick-up action
+                # being demonstrated by the user
+
+                # Only consider "Pick up a {part_type}" descriptions; "Pick up
+                # the subassembly" utterances don't provide learning signals in
+                # our context
+                pick_up_target = re.findall(r"Pick up a (.*)\.$", utt)
+                if len(pick_up_target) > 0:
+                    # "~ a {part_type}" case, extract the NL label
+                    pick_up_target = pick_up_target[0]
+                else:
+                    # "~ the subassembly" case, do nothing here
+                    continue
+
+                clauses = {
+                    "e0": (
+                        None, set(), [],
+                        [
+                            ("va", "pick_up", ["e0", "x0", "x1"]),
+                            ("sp", "pronoun2", ["x0"]),
+                            ("n", pick_up_target, ["x1"])
+                        ]
+                    )
+                }
+                referents = {
+                    "e0": { "mood": "." },
+                    "x0": { "source_evt": "e0" },
+                    "x1": { "source_evt": "e0" }
                 }
 
                 source = { "e0": utt }
