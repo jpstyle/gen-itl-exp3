@@ -185,70 +185,34 @@ def execute_command(agent, action_spec):
     structures = agent.lt_mem.kb.assembly_structures
     target_candidates = structures[build_target]
 
-    # TODO: write new helper method which is less labor intensive
-    def estimate_feasibility_recursive(template):
-        ...
-
-    # Unroll each candidate structure template into a set of possible instantiations
-    def instantiate_templates_recursive(templates):
+    def rank_templates_recursive(templates, groundings=None):
         """
-        Recursive helper method for extracting atomic parts and returning their
-        counts as dict. Returns a list of tuples (tuple of node 'addresses',
-        their possible part type instantiations)
+        Recursive helper method for ranking a collection of structure templates
+        by their 'feasibility' as determined by visual search. Returns a list
+        of tuples with the following entries:
+            - structure template as a graph
+            - rankings for any component subassemblies
+            - feasibility score per part choice
+            - aggregate feasibility score
+        ...sorted in descending order by the final value (aggregate score).
         """
-        instantiations = []
+        output_list = []
+        if groundings is None: groundings = {}
 
         # Process each template
         for asm_gr in templates:
             # Process each node according to their type and data field value
-            part_options = {}; sa_options = {}
             for n, data in asm_gr.nodes(data=True):
                 match data["node_type"]:
                     case "atomic_part":
-                        part_options[n] = data["parts"]
+                        ...
                     case "subassembly":
-                        sa_options[n] = instantiate_templates_recursive(
-                            sum([
-                                structures[("pcls", sa)]
-                                for sa in data["subassemblies"]
-                            ], [])
-                        )
+                        print(0)
 
-            part_options = list(zip(*part_options.items()))
-            # Enumerating every possible combination of instantiations of the
-            # component subassemblies collected
-            # (My god this is one heck of a monstrosity... Deep apologies if anyone
-            # clueless---including me in the future---ever gets to read this part
-            # of the code)
-            sa_options = {
-                n: [
-                    (addresses, inst)
-                    for addresses, insts in per_node
-                    for inst in insts
-                ]
-                for n, per_node in sa_options.items()
-            }
-            sa_options = [
-                tuple(zip(*[
-                    (tuple((n,)+addr for addr in sa_options[n][i][0]), sa_options[n][i][1])
-                    for n, i in zip(sorted(sa_options), inds)
-                ]))
-                for inds in product(*[
-                    range(len(sa_options[n])) for n in sorted(sa_options)
-                ])
-            ]
-            sa_options = [
-                (sum(opt_addrs, ()), sum(opt_inst, ()))
-                for opt_addrs, opt_inst in sa_options
-            ]
+        output_list = sorted(output_list, reverse=True, key=...)
+        return output_list
 
-            per_template = ...
-
-            instantiations += per_template
-
-        return instantiations
-
-    template_insts = instantiate_templates_recursive(target_candidates)
+    ranked_templates = rank_templates_recursive(target_candidates)
 
     print(0)
 

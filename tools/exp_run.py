@@ -143,12 +143,12 @@ def main(cfg):
     else:
         # Skipping camera calibration step by using parameters obtained in advance...
         cam_K = np.array([
-            [518.66, 0, 399.19],
-            [0, 518.66, 299.52],
+            [521.756, 0, 399.149],
+            [0, 521.345, 304.926],
             [0, 0, 1]
         ])
         distortion_coeffs = np.array([
-            [0.00215, -0.00090, 0.00015, -0.00020, -0.00490]
+            [0.00223, 0.00731, 0.00180, -0.00035, -0.01217]
         ])
         student.vision.camera_intrinsics = (cam_K, distortion_coeffs)
 

@@ -16,7 +16,6 @@ import numpy as np
 import open3d as o3d
 from pycocotools import mask
 from sklearn.decomposition import PCA
-from skimage.morphology import dilation, disk
 
 from .modeling import VisualSceneAnalyzer
 from .utils import (
@@ -506,7 +505,7 @@ class VisionModule:
         with torch.no_grad():
             # Obtain (flattened) patch-level features and corresponding masks extracted from
             # the zoomed images
-            lr_mask_area = 750
+            lr_mask_area = 800
             patch_features, lr_masks, lr_dims = self.model.lr_features_from_masks(
                 zoomed_images, zoomed_masks, lr_mask_area, resolution_multiplier
             )
@@ -589,7 +588,6 @@ class VisionModule:
 
         # Collect points and filter by 2D reprojection vs. masks
         for msk, (quat, trns) in zip(masks.values(), viewpoint_poses):
-            msk = dilation(msk, footprint=disk(5))
             # Project to 2D image coordinate from this viewing angle
             cam_K, distortion_coeffs = self.camera_intrinsics
             rmat = quat2rmat(quat)

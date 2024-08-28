@@ -37,7 +37,7 @@ U_IN_PR = 0.99              # How much the agent values information provided by 
 R = 0.3; Tr = (0, 0, R); theta_H = radians(70); theta_L = radians(50)
 H1 = cos(theta_H/2); H2 = sin(theta_H/2); L1 = cos(theta_L/2); L2 = sin(theta_L/2)
 ## (qw/qx/qy/qz quaternion, tx/ty/tz position); rotation first, then translation
-Y_ROTATIONS = [th1+th2 for th1, th2 in product([0, 90, 180, 270], [0, 15])]
+Y_ROTATIONS = [th1+th2 for th1, th2 in product([0, 90, 180, 270], [0, 20])]
 VP_POSES = [
     # 'Southern-high' loop
     ((H1*cos(th := radians(th_y / 2)), H2*cos(th), H1*sin(th), H2*sin(th)), Tr)
@@ -762,7 +762,7 @@ def analyze_demonstration(agent, demo_data):
                                     # Atomic part type to be remembered, record (image, mask)
                                     # pair by the name index
                                     data = (prev_img, env_refs["o0"]["mask"])
-                                    vision_2d_data[target_info["name"]] = [data]
+                                    vision_2d_data[target_info["name"]] = data
 
                             case "drop":
                                 # drop_~ action
@@ -785,11 +785,6 @@ def analyze_demonstration(agent, demo_data):
                                     (current_held[1], referents["dis"][lit.args[4][0]]["name"]),
                                     prev_img, component_masks, referents["dis"][lit.args[2][0]]["name"]
                                 ]
-                                # Add visuals of any atomic parts to 2d exemplar lists
-                                for obj in current_held:
-                                    # Only atomic parts are listed in 2d vision data storage
-                                    if obj in vision_2d_data:
-                                        vision_2d_data[obj].append((prev_img, component_masks[obj]))
                                 # Update hand states
                                 current_held[left_or_right] = referents["dis"][lit.args[2][0]]["name"]
                                 current_held[(left_or_right+1) % 2] = None
@@ -899,45 +894,39 @@ def analyze_demonstration(agent, demo_data):
 
     # Process vision 2D data to obtain instance-level embeddings
     vision_2d_data = {
-        part_inst: [
-            (
-                image, mask, bg_image := blur_and_grayscale(image),
-                visual_prompt_by_mask(image, bg_image, [mask])
-            )
-            for image, mask in data
-        ]
-        for part_inst, data in vision_2d_data.items()
+        part_inst: (
+            image, mask, bg_image := blur_and_grayscale(image),
+            visual_prompt_by_mask(image, bg_image, [mask])
+        )
+        for part_inst, (image, mask) in vision_2d_data.items()
     }
     vis_model = agent.vision.model; vis_model.eval()
     with torch.no_grad():
         for part_inst, data in vision_2d_data.items():
-            processed_data = []
-            for image, mask, bg_image, vis_prompt in data:
-                vp_processed = vis_model.dino_processor(images=vis_prompt, return_tensors="pt")
-                vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
-                vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
-                f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
-                processed_data.append((image, mask, f_vec))
-            vision_2d_data[part_inst] = processed_data
+            image, mask, bg_image, vis_prompt = data
+            vp_processed = vis_model.dino_processor(images=vis_prompt, return_tensors="pt")
+            vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
+            vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
+            f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
+            vision_2d_data[part_inst] = (image, mask, f_vec)
     # Add 2D vision data in XB, based on the newly assigned pcls concept indices
-    for part_inst, data in vision_2d_data.items():
+    for part_inst, (image, mask, f_vec) in vision_2d_data.items():
         if part_inst not in inst2conc_map:
             # Cannot exactly specify which concept this instance classifies as, skip
             continue
 
-        for image, mask, f_vec in data:
-            exemplars = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
-            pointers = {
-                ("pcls", inst2conc_map[inst], "pos" if inst==part_inst else "neg"): {
-                    # (Whether object is newly added to XB, index 0 as only one is newly
-                    # added each time)
-                    (True, 0)
-                }
-                for inst in vision_2d_data if inst in inst2conc_map
+        exemplars = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
+        pointers = {
+            ("pcls", inst2conc_map[inst], "pos" if inst==part_inst else "neg"): {
+                # (Whether object is newly added to XB, index 0 as only one is newly
+                # added each time)
+                (True, 0)
             }
-            agent.lt_mem.exemplars.add_exs_2d(
-                scene_img=image, exemplars=exemplars, pointers=pointers
-            )
+            for inst in vision_2d_data if inst in inst2conc_map
+        }
+        agent.lt_mem.exemplars.add_exs_2d(
+            scene_img=image, exemplars=exemplars, pointers=pointers
+        )
 
     # Finally process assembly data; estimate pose of assembled parts in hand,
     # infer 3D locations of 'contact points' based on manipulator pose difference,
@@ -1003,7 +992,7 @@ def analyze_demonstration(agent, demo_data):
                         { 0: image }, [msk]
                     )
                     patch_features, lr_msk, lr_dim = vis_model.lr_features_from_masks(
-                        zoomed_image, zoomed_msk, 750, 3
+                        zoomed_image, zoomed_msk, 800, 3
                     )
                     D = patch_features[0].shape[-1]
                     (cr_x, _, cr_y, _), (lr_w, lr_h) = crop_dim[0], lr_dim[0]
@@ -1031,6 +1020,7 @@ def analyze_demonstration(agent, demo_data):
                         features_nrm_1 = normalize(view_info["pca"].transform(pth_fh_flattened))
                         features_nrm_2 = normalize(visible_pts_features)
                         S = features_nrm_1 @ features_nrm_2.T
+                        S = (S + 1) / 2
 
                         # Obtaining (u,v)-coordinates of projected (downsampled) points at the
                         # viewpoint pose, needed for proximity score computation
@@ -1072,7 +1062,7 @@ def analyze_demonstration(agent, demo_data):
                         proximity = np.exp(-np.square(proximity) / (2 * (sigma ** 2)))
 
                         # Forward matching
-                        agg_scores = S + 0.4 * proximity.reshape(-1, len(visible_pts_sorted))
+                        agg_scores = S + 0.5 * proximity.reshape(-1, len(visible_pts_sorted))
                         match_forward = linear_sum_assignment(
                             agg_scores[msk_flattened], maximize=True
                         )
@@ -1151,7 +1141,7 @@ def analyze_demonstration(agent, demo_data):
                         pose_estimation_results.append(
                             (
                                 (rvec, tvec), conc_ind, part,
-                                (reproj_scores.mean().item()+1) / 2, mask_overlap
+                                reproj_scores.mean().item(), mask_overlap
                             )
                         )
 
