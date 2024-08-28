@@ -168,7 +168,7 @@ public class DialogueAgent : Agent
                     _ => 0.25f
                 };
                 var tz = quot12 == 0 ? -0.8f : -0.7f;
-                var rx = quot12 == 0 ? 15f : 30f;
+                var rx = quot12 == 0 ? 30f : 45f;
                 var ry = (quot4Rem3, quot12, rem4) switch
                 {
                     (0, 0, 0) => 10f,
@@ -701,9 +701,9 @@ public class DialogueAgent : Agent
             }
             else
                 if (viewIndex % 2 == 0)
-                    relativeViewCenter.Rotate(Vector3.up, 75f, Space.Self);
+                    relativeViewCenter.Rotate(Vector3.up, 70f, Space.Self);
                 else
-                    relativeViewCenter.Rotate(Vector3.up, 15f, Space.Self);
+                    relativeViewCenter.Rotate(Vector3.up, 20f, Space.Self);
 
             activeHand.LookAt(relativeViewPoint, relativeViewCenter.up);
         }
