@@ -32,7 +32,7 @@ def optimize(prog, statements):
 
     # Optimize with clingo
     ctl = clingo.Control(["--warn=none"])
-    ctl.add("base", [], prog._pure_ASP_str()+stm_asp_str)
+    ctl.add("base", [], prog.pure_ASP_str()+stm_asp_str)
     ctl.ground([("base", [])])
     ctl.configuration.solve.models = 0
     ctl.configuration.solve.opt_mode = "opt"

@@ -1,6 +1,7 @@
 """
 Implements dialogue-related composite actions
 """
+import os
 import re
 import random
 from copy import deepcopy
@@ -10,9 +11,10 @@ from collections import defaultdict
 
 import numpy as np
 import networkx as nx
+from clingo import Control, SymbolType
 
 from ..lpmln import Literal
-from ..lpmln.utils import flatten_cons_ante
+from ..lpmln.utils import flatten_cons_ante, wrap_args
 from ..memory.kb import KnowledgeBase
 from ..symbolic_reasoning.query import query
 from ..symbolic_reasoning.utils import rgr_extract_likelihood, rgr_replace_likelihood
@@ -161,59 +163,210 @@ def execute_command(agent, action_spec):
 
     We only consider the 'Build a X' type of commands in our scope, which would
     take a sequence of primitive actions to accomplish. Process the command by:
-        1) Setting a desired goal configuration to be fed into the ASP planning
-            problem from the agent's current knowledge and the perceived scene
-            status. Select the best goal assembly structure among listed in
-            the agent's KB such that the required parts are most likely to be
-            included in the scene.
-        2) Compiling the commited goal configuration into an appropriate ASP
-            program fragment, which will be stitched together with other ASP
-            program fragments needed for solving the planning problem instance.
-        3) Running ASP solver to obtain a (hopefully) valid sequence of actions
-            and storing it as a variable in the planning module. Keep popping
-            and executing each primitive action in the plan until goal completion
-            or interruption by the teacher upon an action deemed incorrect.
+        1) Running appropriate vision module methods to extract segmentation
+            masks, simultaneously predicting object class concept and filtering
+            out non-objects to leave potentially relevant objects on the table
+        2) Synthesizing ASP program for planning out of the visual prediction
+            results, current knowledge base status and the provided goal action
+            spec (We only consider executing 'build X' commands for now)
+        3) Solving the compiled ASP program with clingo, pushing the obtained
+            sequence of atomic actions onto agenda stack
     """
     # Currently considering 'build' commands only
     action_type, action_params = action_spec
     assert action_type == agent.lt_mem.lexicon.s2d[("va", "build")][0][1]
 
-    build_target = list(action_params.values())[0][0].split("_")
-    build_target = (build_target[0], int(build_target[1]))
+    # Convert current visual scene (from ensemble prediction) into ASP fact
+    # literals (note difference vs. agent.lt_mem.kb.visual_evidence_from_scene
+    # method, which is for probabilistic reasoning by LP^MLN). Only list the
+    # observations whose likelihood values are above certain threshold; this
+    # effectively results in 'semantic filtering' of irrelevant objects.
+    threshold = 0.25; observations = set()
+    likelihood_values = np.stack([
+        obj["pred_cls"] for obj in agent.vision.scene.values()
+    ])
+    min_val = max(likelihood_values.min(), threshold)
+    max_val = likelihood_values.max()
+    val_range = max_val - min_val
 
-    # Fetch a list of valid target assembly structures stored as graphs
+    for oi, obj in agent.vision.scene.items():
+        # Ignore any proposal not worth tracking
+        if obj["pred_cls"].max() < threshold: continue
+
+        # Add to list of observed (perceived) facts
+        for ci, val in enumerate(obj["pred_cls"]):
+            if val < threshold: continue
+
+            # Normalize & discretize within [0,50]; the more granular
+            # the discrete approximation is, the more time it takes to
+            # solve the program
+            nrm_val = (val-min_val) / val_range
+            dsc_val = int(nrm_val * 50)
+            if dsc_val == 0: continue       # Range 'left exclusive'
+
+            obs_lit = Literal(
+                "is_likely", wrap_args(oi, ci, dsc_val)
+            )
+            observations.add(obs_lit)
+
+    # Compile assembly structure knowledge into ASP fact literals
     structures = agent.lt_mem.kb.assembly_structures
-    target_candidates = structures[build_target]
+    assembly_pieces = set()
+    for (_, sa_conc), templates in structures.items():
 
-    def rank_templates_recursive(templates, groundings=None):
-        """
-        Recursive helper method for ranking a collection of structure templates
-        by their 'feasibility' as determined by visual search. Returns a list
-        of tuples with the following entries:
-            - structure template as a graph
-            - rankings for any component subassemblies
-            - feasibility score per part choice
-            - aggregate feasibility score
-        ...sorted in descending order by the final value (aggregate score).
-        """
-        output_list = []
-        if groundings is None: groundings = {}
+        # For each valid template option
+        template_desc = "sole" if len(templates)==1 else "possible"
+        for ti, template in enumerate(templates):
+            # Register this specific template option
+            template_lit = Literal(
+                f"sa_{template_desc}_template", wrap_args(sa_conc, ti)
+            )
+            assembly_pieces.add(template_lit)
 
-        # Process each template
-        for asm_gr in templates:
-            # Process each node according to their type and data field value
-            for n, data in asm_gr.nodes(data=True):
+            # Register part/subassembly options for each node
+            for n, data in template.nodes(data=True):
                 match data["node_type"]:
                     case "atomic_part":
-                        ...
+                        options = data["parts"]
+                        for opt_conc in options:
+                            part_lit = Literal("atomic", wrap_args(opt_conc))
+                            assembly_pieces.add(part_lit)
                     case "subassembly":
-                        print(0)
+                        options = data["subassemblies"]
+                        for opt_conc in options:
+                            sa_lit = Literal("subassembly", wrap_args(opt_conc))
+                            assembly_pieces.add(sa_lit)
+                choice_desc = "sole" if len(options)==1 else "possible"
+                for opt_conc in options:
+                    opt_lit = Literal(
+                        f"node_{choice_desc}_choice",
+                        wrap_args(sa_conc, ti, n, opt_conc)
+                    )
+                    assembly_pieces.add(opt_lit)
 
-        output_list = sorted(output_list, reverse=True, key=...)
-        return output_list
+            # Register assembly contact signatures, iterating over edges
+            sgn_str = lambda sg: str(sg[0]) if len(sg) == 1 \
+                else f"c({sg[0]},{sgn_str(sg[1:])})"        # Serialization
+            for u, v, data in template.edges(data=True):
+                u, v = min(u, v), max(u, v)     # Ensure sorted order
+                cp_options_u = [
+                    (sgn_str(signature), f"p_{cp[0]}_{cp[1]}")
+                    for signature, cp in data["contact"][u].items()
+                        # `signature` represents a sequence of subassembly
+                        # templates with terminal atomic part suffix
+                ]
+                cp_options_v = [
+                    (sgn_str(signature), f"p_{cp[0]}_{cp[1]}")
+                    for signature, cp in data["contact"][v].items()
+                ]
 
-    ranked_templates = rank_templates_recursive(target_candidates)
+                for cp_opt_u, cp_opt_v in product(cp_options_u, cp_options_v):
+                    sgn_u, cp_u = cp_opt_u; sgn_v, cp_v = cp_opt_v
+                    conn_sgn_lit = Literal(
+                        f"connection_signature",
+                        wrap_args(sa_conc, ti, u, v, sgn_u, sgn_v, cp_u, cp_v)
+                    )
+                    assembly_pieces.add(conn_sgn_lit)
 
+    # Encode assembly target info into ASP fact literal
+    build_target = list(action_params.values())[0][0].split("_")
+    target_lit = Literal("build_target", wrap_args(int(build_target[1])))
+
+    # Configure optimization option
+    lp_path = os.path.join(agent.cfg.paths.assets_dir, "planning_encoding")
+    ctl = Control(["--warn=none"])
+    ctl.configuration.solve.models = 0
+    ctl.configuration.solve.opt_mode = "opt"
+
+    # Load ASP base program for selecting goal structure
+    ctl.load(os.path.join(lp_path, "goal_selection.lp"))
+
+    # Add and ground all the fact literals obtained above
+    all_lits = sorted(
+        observations | assembly_pieces | {target_lit}, key=lambda x: x.name
+    )
+    facts_prg = "".join(str(lit) + ".\n" for lit in all_lits)
+    ctl.add("facts", [], facts_prg)
+
+    # Optimize with clingo
+    ctl.ground([("base", []), ("facts", [])])
+    with ctl.solve(yield_=True) as solve_gen:
+        optimal_model = list(solve_gen)[-1].symbols(atoms=True)
+
+    # Compile the optimal solution into appropriate data structures
+    assembly_hierarchy = nx.DiGraph()
+    part_candidates = defaultdict(set)
+    connect_edges = {}
+    rename_node = lambda n: str(n.number) if n.type == SymbolType.Number \
+        else f"{rename_node(n.arguments[0])}_{n.arguments[1]}"
+    for atm in optimal_model:
+        match atm.name:
+            case "atomic_node" | "sa_node":
+                # Each 'node' literal contains identifiers of its own and its direct
+                # parent's, add an edge linking the two to the committed structure 
+                # graph
+                node_rn = rename_node(atm.arguments[0])
+                node_type = atm.name.split("_")[0]
+                assembly_hierarchy.add_node(node_rn, node_type=node_type)
+
+                if atm.arguments[0].type == SymbolType.Function:
+                    # Add edge between the node and its direct parent
+                    assert atm.arguments[0].name == "n"
+                    assembly_hierarchy.add_edge(
+                        rename_node(atm.arguments[0].arguments[0]),
+                        node_rn
+                    )
+
+            case "commit_choice":
+                # Decision as to fill which node with an instance of which atomic part
+                # type
+                node_rn = rename_node(atm.arguments[0])
+                choice_conc = choice_conc=atm.arguments[1].number
+                assembly_hierarchy.add_node(node_rn, choice_conc=choice_conc)
+            
+            case "use_as":
+                # Decision as to use which recognized object as instance of which
+                # atomic part type
+                obj_name = atm.arguments[0].name
+                part_conc = atm.arguments[1].number
+                part_candidates[part_conc].add(obj_name)
+
+            case "connect":
+                # Derived assembly connection to make between nodes
+                node_u_rn = rename_node(atm.arguments[0])
+                node_v_rn = rename_node(atm.arguments[1])
+                cp_u = atm.arguments[2].name
+                cp_v = atm.arguments[3].name
+                connect_edges[(node_u_rn, node_v_rn)] = (cp_u, cp_v)
+
+    # Top node
+    assembly_hierarchy.add_node("0", node_type="sa")
+
+    # Depth-first traversal of the committed assembly hierarchy for sampling
+    # objects from candidate pools
+    def recursive_dfs_traversal(u):
+        # Atomic part of subassembly concept for the node
+        conc = assembly_hierarchy.nodes[u]["choice_conc"]
+
+        match assembly_hierarchy.nodes[u]["node_type"]:
+            case "atomic":
+                # Sample from the pool of candidate objects for the part type
+                # and assign to the node
+                if len(part_candidates[conc]) > 0:
+                    # Candidate object available, pop from pool
+                    sampled_obj = part_candidates[conc].pop()
+                    assembly_hierarchy.nodes[u]["obj_used"] = sampled_obj
+                else:
+                    # Ran uut of candidate objects, mark unavailable
+                    assembly_hierarchy.nodes[u]["obj_used"] = None
+            case "sa":
+                # Recursive iteration over children nodes
+                for _, v in assembly_hierarchy.out_edges(u):
+                    recursive_dfs_traversal(v)
+
+    recursive_dfs_traversal("0")        # Start from the top node ("0")
+
+    # Store clingo Control object
     print(0)
 
 def _answer_domain_Q(agent, utt_pointer, translated):

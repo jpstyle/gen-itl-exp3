@@ -28,9 +28,6 @@ DEF_CON = 0.6       # Default confidence value in absence of binary concept clas
 
 class VisionModule:
 
-    K = 0               # Top-k detections to leave in ensemble prediction mode
-    NMS_THRES = 0.65    # IoU threshold for post-detection NMS
-
     def __init__(self, cfg):
         self.cfg = cfg
 
@@ -94,24 +91,88 @@ class VisionModule:
         with torch.no_grad():
             # Prediction modes
             if ensemble:
-                # Full (ensemble) prediction
-                vis_embs, masks_out, scores = self.model(image)
+                # Full (ensemble) prediction. Obtain output from 'segment everything'
+                # pipeline, then filter overlapping masks so that only minimally
+                # overlapping masks remain (i.e., so that the image is literally
+                # 'segmented')
+                vis_embs, masks_out = self.model(image)
 
-                # Newly compose a scene graph with the output; filter patches to leave top-k
-                # detections
+                # Heuristic: Keep adding to the list of potential objects from
+                # the top of the list, handling overlaps appropriately. SAM pipeline
+                # tends to prefer single object wholes vs. parts or multiple objects,
+                # though exceptions occasionally arise and should be aptly handled.
+                # 
+                # Specifically, if a mask candidate is neither a 'submask' or a
+                # 'supermask' of an existing mask, simply add to the candidate list.
+                # If a submask, ignore; this will be fine in most cases. If a supermask,
+                # replace overlapping submasks only if it leads to recognition of object
+                # class concept with stronger confidence.
+                filtered_masks = []
+                for f_vec, msk in zip(vis_embs, masks_out):
+                    # Add to filtered list only if it is not a submask of any existing
+                    # mask in the list
+                    if len(filtered_masks) == 0:
+                        # First entry, just append
+                        filtered_masks.append((f_vec, msk))
+                        continue
+
+                    intersections = [
+                        np.minimum(msk, f_msk) for _, f_msk in filtered_masks
+                    ]
+                    submask_scores = np.array([
+                        i_msk.sum() / msk.sum() for i_msk in intersections
+                    ])
+                    supermask_scores = np.array([
+                        i_msk.sum() / f_msk.sum()
+                        for i_msk, (_, f_msk) in zip(intersections, filtered_masks)
+                    ])
+                    if submask_scores.max() > 0.7:
+                        # Submask of an existing mask; okay to ignore in most cases
+                        pass
+                    elif supermask_scores.max() > 0.7:
+                        # Supermask of an existing mask; 'semantic test' needed to
+                        # see if the supermask yields stronger confidence (across
+                        # all concepts) than the submasks it covers
+                        submask_inds = (supermask_scores > 0.7).nonzero()[0]
+
+                        # Few-shot prediction on current mask
+                        fs_pred = self.fs_conc_pred(exemplars, f_vec, "pcls")
+                        # Few-shot predictions on submasks
+                        sm_fs_preds = np.stack([
+                            self.fs_conc_pred(exemplars, filtered_masks[i][0], "pcls")
+                            for i in submask_inds
+                        ])
+
+                        if len(fs_pred) == 0:
+                            # Just add if visual concept inventory is empty
+                            filtered_masks.append((f_vec, msk))
+                        elif fs_pred.max() > sm_fs_preds.max():
+                            # Replace submasks with supermask only if max prediction
+                            # score is higher for the supermask than the highest for
+                            # the submasks
+                            filtered_masks = [
+                                entry for i, entry in enumerate(filtered_masks)
+                                if i not in submask_inds
+                            ]
+                            filtered_masks.append((f_vec, msk))
+                    else:
+                        # No overlap, simply add
+                        filtered_masks.append((f_vec, msk))
+
+                # Newly compose a scene graph with the output; filter patches to
+                # leave top-k detections
                 self.scene = {
                     f"o{i}": {
-                        "vis_emb": vis_embs[i],
-                        "pred_mask": masks_out[i],
-                        "pred_objectness": scores[i],
+                        "vis_emb": filtered_masks[i][0],
+                        "pred_mask": filtered_masks[i][1],
                         "pred_cls": self.fs_conc_pred(exemplars, vis_embs[i], "pcls"),
                         "pred_rel": {
-                            f"o{j}": np.zeros(self.inventories.rel)
-                            for j in range(self.K) if i != j
+                            f"o{j}": np.zeros(self.inventories.prel)
+                            for j in range(len(filtered_masks)) if i != j
                         },
                         "exemplar_ind": None       # Store exemplar storage index, if applicable
                     }
-                    for i in range(self.K)
+                    for i in range(len(filtered_masks))
                 }
 
                 for oi, obj_i in self.scene.items():
@@ -377,7 +438,6 @@ class VisionModule:
         """
         incr_vis_embs = incr_preds[0]
         incr_masks_out = incr_preds[1]
-        incr_scores = incr_preds[2]
 
         # Incrementally update the existing scene graph with the output with the
         # detections best complying with the conditions provided
@@ -385,12 +445,9 @@ class VisionModule:
 
         for oi, oj in product(existing_objs, new_objs):
             # Add new relation score slots for existing objects
-            self.scene[oi]["pred_rel"][oj] = np.zeros(self.inventories.rel)
+            self.scene[oi]["pred_rel"][oj] = np.zeros(self.inventories.prel)
 
-        update_data = list(zip(
-            new_objs, incr_vis_embs, incr_masks_out, incr_scores
-        ))
-        for oi, vis_emb, msk, score in update_data:
+        for oi, vis_emb, msk in zip(new_objs, incr_vis_embs, incr_masks_out):
             # Pass null entry
             if oi is None: continue
 
@@ -398,15 +455,14 @@ class VisionModule:
             self.scene[oi] = {
                 "vis_emb": vis_emb,
                 "pred_mask": msk,
-                "pred_objectness": score,
                 "pred_cls": self.fs_conc_pred(exemplars, vis_emb, "pcls"),
                 "pred_rel": {
                     **{
-                        oj: np.zeros(self.inventories.rel)
+                        oj: np.zeros(self.inventories.prel)
                         for oj in existing_objs
                     },
                     **{
-                        oj: np.zeros(self.inventories.rel)
+                        oj: np.zeros(self.inventories.prel)
                         for oj in new_objs if oi != oj
                     }
                 },

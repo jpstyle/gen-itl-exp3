@@ -417,10 +417,10 @@ def _sample_ASP(
     base_prg_str += "#external violate_one.\n"
 
     ctl = Control(["--warn=none"])
-    ctl.add("base", [], base_prg_str)
-    ctl.ground([("base", [])])
     ctl.configuration.solve.models = 0
     ctl.configuration.solver.seed = seed
+    ctl.add("base", [], base_prg_str)
+    ctl.ground([("base", [])])
 
     models = []
     ctl.assign_external(Function("violate_none", []), True)

@@ -53,10 +53,6 @@ class LanguageModule:
         ti = len(self.dialogue.record)      # New dialogue turn index
         new_record = []                     # New dialogue record for the turn
 
-        # New environment entities info for current timeframe
-        self.dialogue.referents["env"].append({ "_self": None, "_user": None})
-            # Always include self and user
-
         # For indexing clauses in dialogue turn
         se2ci = defaultdict(lambda: len(se2ci))
 

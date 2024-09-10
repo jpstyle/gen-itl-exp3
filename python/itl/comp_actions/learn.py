@@ -1174,8 +1174,8 @@ def analyze_demonstration(agent, demo_data):
                     while True:
                         part_u = subassembly.nodes[u]["part_conc"]
                         part_v = subassembly.nodes[v]["part_conc"]
-                        _, cp_u, i_u = subassembly.edges[(u, v)]["contact"][u]
-                        _, cp_v, i_v = subassembly.edges[(u, v)]["contact"][v]
+                        cp_u, i_u = subassembly.edges[(u, v)]["contact"][u]
+                        cp_v, i_v = subassembly.edges[(u, v)]["contact"][v]
                         pose_cp_u = agent.lt_mem.exemplars.object_3d[part_u][3][cp_u][i_u]
                         pose_cp_v = agent.lt_mem.exemplars.object_3d[part_v][3][cp_v][i_v]
                         tmat_cp_u = transformation_matrix(*pose_cp_u)
@@ -1311,8 +1311,8 @@ def analyze_demonstration(agent, demo_data):
         assembly_trees[resulting_subassembly].add_edge(
             part_node_l, part_node_r,
             contact={
-                part_node_l: (None, cp_l_conc_ind, 0),
-                part_node_r: (None, cp_r_conc_ind, 0)
+                part_node_l: (cp_l_conc_ind, 0),
+                part_node_r: (cp_r_conc_ind, 0)
             }
         )
 
@@ -1334,10 +1334,12 @@ def analyze_demonstration(agent, demo_data):
             neutral_tree.add_node(n_ind, **n_data_new)
         for n1, n2, e_data in tree.edges(data=True):
             n1_ind, n2_ind = (node_reindex.index(n1), node_reindex.index(n2))
+            n1_conc = tree.nodes[n1]["part_conc"]
+            n2_conc = tree.nodes[n2]["part_conc"]
             e_data_new = {
                 "contact": {
-                    n1_ind: [e_data["contact"][n1]],
-                    n2_ind: [e_data["contact"][n2]]
+                    n1_ind: { (n1_conc,): e_data["contact"][n1] },
+                    n2_ind: { (n2_conc,): e_data["contact"][n2] }
                 }
             }
             neutral_tree.add_edge(n1_ind, n2_ind, **e_data_new)

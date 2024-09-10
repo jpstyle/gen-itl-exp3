@@ -196,7 +196,7 @@ class ITLAgent:
             ##                  Processing perceived inputs                  ##
             ###################################################################
 
-            # Run visual prediction (only) when not in observation mode
+            # Run visual prediction (only) when not in demo observation mode
             if self.observed_demo is None:
                 if xb_updated:
                     # Concept exemplar base updated, need reclassification while keeping
@@ -210,11 +210,17 @@ class ITLAgent:
                 # Revert to pre-update dialogue state at the start of each loop iteration
                 self.lang.dialogue.record = self.lang.dialogue.record[:ti_last]
 
+                # New environment entities info for current timeframe
+                self.lang.dialogue.referents["env"].append(
+                    { "_self": None, "_user": None }         # Always include self and user
+                )
+
+                # Inform the language module of the current visual context (only)
+                # when not in demo observation mode
+                if self.observed_demo is None: self.lang.situate(self.vision.scene)
+
                 # Understand the user input in the context of the dialogue
                 self.lang.understand(self.lang.latest_input, pointing=pointing)
-
-            # Inform the language module of the current visual context
-            self.lang.situate(self.vision.scene)
 
             ents_updated = False
             if self.vision.scene is not None and self.observed_demo is None:
