@@ -178,9 +178,7 @@ def execute_command(agent, action_spec):
 
     # Convert current visual scene (from ensemble prediction) into ASP fact
     # literals (note difference vs. agent.lt_mem.kb.visual_evidence_from_scene
-    # method, which is for probabilistic reasoning by LP^MLN). Only list the
-    # observations whose likelihood values are above certain threshold; this
-    # effectively results in 'semantic filtering' of irrelevant objects.
+    # method, which is for probabilistic reasoning by LP^MLN)
     threshold = 0.25; observations = set()
     likelihood_values = np.stack([
         obj["pred_cls"] for obj in agent.vision.scene.values()
@@ -190,24 +188,24 @@ def execute_command(agent, action_spec):
     val_range = max_val - min_val
 
     for oi, obj in agent.vision.scene.items():
+        # Heuristic: consider predictions of only the highest likelihood
+        # values for each object, instead of listing all predictions with
+        # values above threshold
+        ci = obj["pred_cls"].argmax().item()
+        val = obj["pred_cls"].max().item()
         # Ignore any proposal not worth tracking
-        if obj["pred_cls"].max() < threshold: continue
+        if val < threshold: continue
 
-        # Add to list of observed (perceived) facts
-        for ci, val in enumerate(obj["pred_cls"]):
-            if val < threshold: continue
+        # Normalize & discretize within [0,20]; the more bins we
+        # use for discrete approximation, the more time it takes to
+        # solve the program
+        nrm_val = (val-min_val) / val_range
+        dsc_val = int(nrm_val * 20)
 
-            # Normalize & discretize within [0,50]; the more granular
-            # the discrete approximation is, the more time it takes to
-            # solve the program
-            nrm_val = (val-min_val) / val_range
-            dsc_val = int(nrm_val * 50)
-            if dsc_val == 0: continue       # Range 'left exclusive'
-
-            obs_lit = Literal(
-                "is_likely", wrap_args(oi, ci, dsc_val)
-            )
-            observations.add(obs_lit)
+        obs_lit = Literal(
+            "is_likely", wrap_args(oi, ci, dsc_val)
+        )
+        observations.add(obs_lit)
 
     # Compile assembly structure knowledge into ASP fact literals
     structures = agent.lt_mem.kb.assembly_structures
@@ -331,7 +329,7 @@ def execute_command(agent, action_spec):
                 part_conc = atm.arguments[1].number
                 part_candidates[part_conc].add(obj_name)
 
-            case "connect":
+            case "to_connect":
                 # Derived assembly connection to make between nodes
                 node_u_rn = rename_node(atm.arguments[0])
                 node_v_rn = rename_node(atm.arguments[1])
@@ -341,10 +339,13 @@ def execute_command(agent, action_spec):
 
     # Top node
     assembly_hierarchy.add_node("0", node_type="sa")
+    # Note: This assembly hierarchy structure object also serves to provide
+    # explanation which part is required for building which subassembly
+    # (that is direct parent in the hierarchy)
 
-    # Depth-first traversal of the committed assembly hierarchy for sampling
-    # objects from candidate pools
-    def recursive_dfs_traversal(u):
+    # Depth-first traversal of the committed assembly hierarchy for randomly
+    # allocating objects from candidate pools
+    def recursive_allocate(u):
         # Atomic part of subassembly concept for the node
         conc = assembly_hierarchy.nodes[u]["choice_conc"]
 
@@ -357,14 +358,22 @@ def execute_command(agent, action_spec):
                     sampled_obj = part_candidates[conc].pop()
                     assembly_hierarchy.nodes[u]["obj_used"] = sampled_obj
                 else:
-                    # Ran uut of candidate objects, mark unavailable
+                    # Ran out of candidate objects, mark unavailable
                     assembly_hierarchy.nodes[u]["obj_used"] = None
             case "sa":
                 # Recursive iteration over children nodes
                 for _, v in assembly_hierarchy.out_edges(u):
-                    recursive_dfs_traversal(v)
+                    recursive_allocate(v)
 
-    recursive_dfs_traversal("0")        # Start from the top node ("0")
+    recursive_allocate("0")        # Start from the top node ("0")
+
+    # Assign unique indentifiers for 'non-objects'
+    nonobj_ids = {
+        n: f"n{i}"
+        for i, (n, obj) in enumerate(assembly_hierarchy.nodes(data="obj_used"))
+        if obj is None
+    }
+    nonobj_ids_inv = { v: k for k, v in nonobj_ids.items() }
 
     # Store clingo Control object
     print(0)

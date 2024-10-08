@@ -1176,8 +1176,8 @@ def analyze_demonstration(agent, demo_data):
                         part_v = subassembly.nodes[v]["part_conc"]
                         cp_u, i_u = subassembly.edges[(u, v)]["contact"][u]
                         cp_v, i_v = subassembly.edges[(u, v)]["contact"][v]
-                        pose_cp_u = agent.lt_mem.exemplars.object_3d[part_u][3][cp_u][i_u]
-                        pose_cp_v = agent.lt_mem.exemplars.object_3d[part_v][3][cp_v][i_v]
+                        pose_cp_u, _ = agent.lt_mem.exemplars.object_3d[part_u][3][cp_u][i_u]
+                        pose_cp_v, _ = agent.lt_mem.exemplars.object_3d[part_v][3][cp_v][i_v]
                         tmat_cp_u = transformation_matrix(*pose_cp_u)
                         tmat_cp_v = transformation_matrix(*pose_cp_v)
                         tmat_v = tmat_u @ tmat_cp_u @ inv(tmat_cp_v)
@@ -1270,13 +1270,17 @@ def analyze_demonstration(agent, demo_data):
         cp_r_conc_ind = agent.vision.add_concept("pcls")
         cp_tgt_conc_ind = cp_l_conc_ind if direction == "RToL" else cp_r_conc_ind
         cp_src_conc_ind = cp_r_conc_ind if direction == "RToL" else cp_l_conc_ind
+        oracle_tag_cp_tgt = involved_objs[0 if direction == "RToL" else 1][1]
+        oracle_tag_cp_src = involved_objs[1 if direction == "RToL" else 0][1]
 
         # Register contact point type and pose info
         agent.lt_mem.exemplars.add_exs_3d(
-            tgt_conc_ind, None, None, None, { cp_tgt_conc_ind: [pose_cp_tgt] }
+            tgt_conc_ind, None, None, None,
+            { cp_tgt_conc_ind: [(pose_cp_tgt, oracle_tag_cp_tgt)] }
         )
         agent.lt_mem.exemplars.add_exs_3d(
-            src_conc_ind, None, None, None, { cp_src_conc_ind: [pose_cp_src] }
+            src_conc_ind, None, None, None,
+            { cp_src_conc_ind: [(pose_cp_src, oracle_tag_cp_src)] }
         )
 
         # Add new subassembly tree by adding concept-annotated part nodes and

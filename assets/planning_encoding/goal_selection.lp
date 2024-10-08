@@ -45,7 +45,7 @@ ununsed_supply(P,US) :- atomic(P),
 :- unmet_demand(P,UD), ununsed_supply(P,US), UD > 0, US > 0.
 
 % For tracking which nodes will have to be connected at which contact points
-connect(D1,D2,CP1,CP2) :-
+to_connect(D1,D2,CP1,CP2) :-
     commit_template(N,S,I),
     fits_signature(D1,N,NS1,SG1), fits_signature(D2,N,NS2,SG2),
     connection_signature(S,I,NS1,NS2,SG1,SG2,CP1,CP2).
