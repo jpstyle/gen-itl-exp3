@@ -59,27 +59,3 @@ avg_score(TS/NN) :- total_score(TS), NN = #count { N : atomic_node(N) }, NN != 0
 
 % Maximize final compatibility score
 #maximize { AS : avg_score(AS) }.
-
-% % Toy example
-% build_target(0).
-% sa_sole_template(0,0).
-% node_sole_choice(0,0,0,2).
-% node_possible_choice(0,0,1,1). node_possible_choice(0,0,1,5).
-% node_sole_choice(0,0,2,3).
-% sa_possible_template(3,0).
-% node_sole_choice(3,0,0,4).
-% node_possible_choice(3,0,1,5). node_possible_choice(3,0,1,1).
-% sa_possible_template(3,1).
-% node_sole_choice(3,1,0,6).
-% connection_signature(0,0,0,1,2,1,p21,p12).
-% connection_signature(0,0,0,1,2,5,p25,p52).
-% connection_signature(0,0,0,2,2,c((3,0),4),p24,p42).
-% connection_signature(0,0,0,2,2,c((3,1),6),p26,p62).
-% is_likely(a,1,18).
-% is_likely(b,2,16).
-% is_likely(c,4,10).
-% is_likely(d,5,16).
-% is_likely(e,6,10).
-% is_likely(f,6,20).
-% atomic(1). atomic(2). atomic(4). atomic(5). atomic(6).
-% subassembly(0). subassembly(3).

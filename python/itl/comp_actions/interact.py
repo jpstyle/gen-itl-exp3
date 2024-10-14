@@ -274,6 +274,7 @@ def execute_command(agent, action_spec):
     lp_path = os.path.join(agent.cfg.paths.assets_dir, "planning_encoding")
     ctl = Control(["--warn=none"])
     ctl.configuration.solve.models = 0
+    ctl.configuration.solver.seed = agent.cfg.seed
     ctl.configuration.solve.opt_mode = "opt"
 
     # Load ASP base program for selecting goal structure
@@ -358,7 +359,7 @@ def execute_command(agent, action_spec):
                     sampled_obj = part_candidates[conc].pop()
                     assembly_hierarchy.nodes[u]["obj_used"] = sampled_obj
                 else:
-                    # Ran out of candidate objects, mark unavailable
+                    # Ran out of candidate objects, mark as unavailable
                     assembly_hierarchy.nodes[u]["obj_used"] = None
             case "sa":
                 # Recursive iteration over children nodes
