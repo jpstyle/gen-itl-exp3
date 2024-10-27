@@ -9,9 +9,10 @@ from functools import reduce
 from itertools import permutations, combinations, product
 from collections import defaultdict
 
+import yaml
 import numpy as np
 import networkx as nx
-from clingo import Control, SymbolType
+from clingo import Control, SymbolType, Number, Function
 
 from ..lpmln import Literal
 from ..lpmln.utils import flatten_cons_ante, wrap_args
@@ -270,26 +271,23 @@ def execute_command(agent, action_spec):
     build_target = list(action_params.values())[0][0].split("_")
     target_lit = Literal("build_target", wrap_args(int(build_target[1])))
 
-    # Configure optimization option
+    # Load ASP encoding for selecting & committing to a goal structure
     lp_path = os.path.join(agent.cfg.paths.assets_dir, "planning_encoding")
-    ctl = Control(["--warn=none"])
-    ctl.configuration.solve.models = 0
-    ctl.configuration.solver.seed = agent.cfg.seed
-    ctl.configuration.solve.opt_mode = "opt"
-
-    # Load ASP base program for selecting goal structure
-    ctl.load(os.path.join(lp_path, "goal_selection.lp"))
+    commit_ctl = Control(["--warn=none"])
+    commit_ctl.configuration.solve.models = 0
+    commit_ctl.configuration.solve.opt_mode = "opt"
+    commit_ctl.load(os.path.join(lp_path, "goal_selection.lp"))
 
     # Add and ground all the fact literals obtained above
     all_lits = sorted(
         observations | assembly_pieces | {target_lit}, key=lambda x: x.name
     )
     facts_prg = "".join(str(lit) + ".\n" for lit in all_lits)
-    ctl.add("facts", [], facts_prg)
+    commit_ctl.add("facts", [], facts_prg)
 
     # Optimize with clingo
-    ctl.ground([("base", []), ("facts", [])])
-    with ctl.solve(yield_=True) as solve_gen:
+    commit_ctl.ground([("base", []), ("facts", [])])
+    with commit_ctl.solve(yield_=True) as solve_gen:
         optimal_model = list(solve_gen)[-1].symbols(atoms=True)
 
     # Compile the optimal solution into appropriate data structures
@@ -376,8 +374,549 @@ def execute_command(agent, action_spec):
     }
     nonobj_ids_inv = { v: k for k, v in nonobj_ids.items() }
 
-    # Store clingo Control object
+    # Turns out if a structure consists of too many atomic parts (say, more
+    # than 6 or so), ASP planner performance is significantly affected. We
+    # handle this by breaking the planning problem down to multiple smaller
+    # ones... In principle, this may risk planning failure when physical
+    # collision check is involved, depending on how the target structure is
+    # partitioned. Note that agents that are aware of semantically valid
+    # substructures are entirely free from such concerns.
+    connection_graph = nx.Graph()
+    for u, v in connect_edges:
+        obj_u = assembly_hierarchy.nodes[u]["obj_used"] or nonobj_ids[u]
+        obj_v = assembly_hierarchy.nodes[v]["obj_used"] or nonobj_ids[v]
+        connection_graph.add_edge(obj_u, obj_v)
+
+    # Ground-truth oracle for querying whether two atomic parts (or their
+    # subassemblies) can be disassembled from their final positions without
+    # collision along six directions (x+/x-/y+/y-/z+/z-). Coarse abstraction
+    # of low-level motion planner, which need to be integrated if such
+    # oracle is not available in real use cases.
+    knowledge_path = os.path.join(agent.cfg.paths.assets_dir, "domain_knowledge")
+    with open(f"{knowledge_path}/collision_table.yaml") as yml_f:
+        collision_table = yaml.safe_load(yml_f)
+    # Extracted mapping from string part names to agent's internal concept
+    # denotations
+    part_names = {
+        d[1]: s[0][1] for d, s in agent.lt_mem.lexicon.d2s.items()
+        if d[0]=="pcls"
+    }
+    # Ground-truth oracle for inspecting what each contact point learned
+    # by agent was supposed to stand for in the knowledge encoded in Unity
+    # assets
+    cp_oracle = {
+        (cp_conc, cp_i): gt_handle
+        for _, _, _, cps in agent.lt_mem.exemplars.object_3d.values()
+        for cp_conc, cp_insts in cps.items()
+        for cp_i, (_, gt_handle) in enumerate(cp_insts)
+    }
+
+    # Compress the connection graph part by part, randomly selecting chunks
+    # of parts or subassemblies to form smaller planning problems
+    compression_graph = connection_graph.copy()
+    min_chunk_size = 6; chunks_assembled = {}
+    sa_ind = 0
+    join_sequence = []
+    # Record every 'assembly scope implication' such that if a set of certain
+    # atomic objects are to be included in a chunk, some other object must
+    # be included in the set as well, so as to avoid deadends due to violations
+    # of 'precedence constraints'.
+    scope_implications = { n: set() for n in connection_graph }
+
+    replan_attempts = 0
+    # Continue until the target structure is fully compressed and planned for    
+    while len(compression_graph) > 1:
+        # Subsample designated number of nodes by BFS from each 'outer' node
+        # (i.e., having only one neighbor node). Select one with the least
+        # non-objects, break tie randomly
+        chunk_candidates = []
+        for n, dg in compression_graph.degree:
+            if dg > 1: continue
+            bfs_gen = nx.bfs_predecessors(compression_graph, n)
+
+            chunk = {n}
+            while len(chunk) < min_chunk_size:
+                try:
+                    next_node = next(bfs_gen)[0]
+                    chunk.add(next_node)
+                    for ante, cons in scope_implications.get(next_node, set()):
+                        flat_objs = {
+                            n for n in chunk if n not in chunks_assembled
+                        }
+                        hidden_objs = {
+                            o for n in chunk if n in chunks_assembled
+                            for o in chunks_assembled[n]
+                        }
+                        chunk_unrolled = flat_objs | hidden_objs
+                        if ante <= chunk_unrolled:
+                            for s, objs in chunks_assembled.items():
+                                if cons in objs:
+                                    chunk.add(s)
+                                    break
+                            else:
+                                chunk.add(cons)
+                except StopIteration:
+                    break
+
+            nonobj_count = len([u for u in chunk if u in nonobj_ids_inv])
+            chunk_candidates.append((chunk, nonobj_count))
+
+        min_count = min(cnt for _, cnt in chunk_candidates)
+        chunk = random.sample([
+            cnk for cnk, cnt in chunk_candidates if cnt==min_count
+        ], 1)[0]
+        chunk_subgraph = compression_graph.subgraph(chunk)
+
+        # Load ASP encoding for planning sequence of atomic actions
+        collision_checker = _PhysicalAssemblyPropagator(
+            (connection_graph, connect_edges),
+            (dict(assembly_hierarchy.nodes(data=True)), nonobj_ids),
+            (collision_table, part_names, cp_oracle)
+        )
+        plan_ctl = Control(["--warn=none"])
+        plan_ctl.register_propagator(collision_checker)
+        plan_ctl.configuration.solve.models = 0
+        plan_ctl.configuration.solve.opt_mode = "opt"
+        plan_ctl.load(os.path.join(lp_path, "assembly_sequence.lp"))
+
+        # Committed goal condition expressed as ASP fact literals
+        all_lits = set()
+        for u, v in chunk_subgraph.edges:
+            for n in [u, v]:
+                if n in chunks_assembled:
+                    # Each atomic part ~ subassembly relation as initial fluent
+                    for n_obj in chunks_assembled[n]:
+                        all_lits.add(
+                            Literal("init", wrap_args(("part_of", [n_obj, n])))
+                        )
+                else:
+                    # Each (non-)object; annotate type and add initial fluent
+                    # Re-use the object name handle for the singleton subassembly
+                    all_lits.add(Literal("init", wrap_args(("part_of", [n, n]))))
+
+            # Each valid (non-)object pair to connect
+            u_objs = chunks_assembled[u] if u in chunks_assembled else {u}
+            v_objs = chunks_assembled[v] if v in chunks_assembled else {v}
+            for o_u, o_v in product(u_objs, v_objs):
+                if (o_u, o_v) in connection_graph.edges:
+                    all_lits.add(Literal("to_connect", wrap_args(o_u, o_v)))
+
+        all_lits = sorted(all_lits, key=lambda x: x.name)
+        facts_prg = "".join(str(lit) + ".\n" for lit in all_lits)
+        plan_ctl.add("facts", [], facts_prg)
+        plan_ctl.ground([("base", []), ("facts", [])])
+
+        # Multi-shot solving: incrementing the number of action steps in the
+        # plan, whilst optimizing for the number of consecutive join actions
+        # made without dropping subassemblies
+        step = 0; optimal_model = None
+        while True:
+            if step > len(chunk):
+                # If reached here, ASP problem has no valid solution, probably
+                # due to faulty subgraph sampling; update the set of assembly
+                # implications as appropriate
+
+                # Break from this while loop to restart planning (after due
+                # updates of scope implications)
+                break
+
+            if step > 0:
+                plan_ctl.release_external(Function("query", [Number(step)]))
+
+            plan_ctl.ground([
+                ("step", [Number(step)]),
+                ("check", [Number(step+1)])
+            ])
+            plan_ctl.assign_external(Function("query", [Number(step+1)]), True)
+
+            with plan_ctl.solve(yield_=True) as solve_gen:
+                models = [
+                    (m.symbols(atoms=True), m.cost) for m in solve_gen
+                ]
+                if len(models) > 0:
+                    optimal_model = models[-1]
+                    break
+                else:
+                    step += 1
+
+        # Update list of known scope implications from invalid joins witnessed
+        for join_pair in collision_checker.invalid_joins:
+            objs1, objs2 = join_pair
+
+            # Process each direction only if the 'consequent' side
+            # of the implication has one object in the set
+            if len(objs1) == 1:
+                for o in objs2:
+                    scope_implications[o].add((objs2, list(objs1)[0]))
+            if len(objs2) == 1:
+                for o in objs1:
+                    scope_implications[o].add((objs1, list(objs2)[0]))
+
+        # Start again from scratch upon planning failure
+        if optimal_model is None:
+            compression_graph = connection_graph.copy()
+            chunks_assembled = {}
+            sa_ind = 0
+            join_sequence = []
+            replan_attempts += 1
+            print(f"Deadend reached; starting from scratch... ({replan_attempts})")
+            continue
+
+        # Project model into join action sequence and extract action
+        # parameters for each join action
+        projection = sorted([
+            atm for atm in optimal_model[0]
+            if atm.name=="occ" and atm.arguments[0].name=="join"
+        ], key=lambda atm: atm.arguments[1].number)
+        projection = [
+            atm.arguments[0].arguments for atm in projection
+        ]
+        arg_val = lambda a: a.name if a.type == SymbolType.Function \
+            else f"i{a.number}_{sa_ind}"
+        join_sequence += [
+            (
+                arg_val(s1), arg_val(s2),   # Involved subassemblies
+                arg_val(o1), arg_val(o2),   # Involved objects
+                f"s{sa_ind}" if i==len(projection)-1 \
+                    else f"i{i}_{sa_ind}"   # Naming resultant subassembly
+            )
+            for i, (s1, s2, o1, o2) in enumerate(projection)
+        ]
+
+        # Update connection graph by replacing the collection of nodes with
+        # a new node representing the subassembly newly assembled from the
+        # selected chunk
+        compression_graph.add_node(f"s{sa_ind}")
+        for u, v in list(compression_graph.edges):
+            if u in chunk:
+                if u in compression_graph: compression_graph.remove_node(u)
+                if v not in chunk: compression_graph.add_edge(f"s{sa_ind}", v)
+            if v in chunk:
+                if v in compression_graph: compression_graph.remove_node(v)
+                if u not in chunk: compression_graph.add_edge(u, f"s{sa_ind}")
+
+        # Remember which components constitute the new subassembly, while
+        # removing old subassemblies in chunk that have been merged into
+        # new subassembly
+        chunks_assembled[f"s{sa_ind}"] = {
+            o for s in chunk if s in chunks_assembled
+            for o in chunks_assembled[s]
+        } | {
+            o for o in chunk if o not in chunks_assembled
+        }
+        for s in chunk:
+            if s in chunks_assembled:
+                del chunks_assembled[s]
+
+        sa_ind += 1
+
+    # Instantiate the high-level plan into an actual action sequence, with
+    # all the necessary information fleshed out (to be passed to the Unity
+    # environment as parameters)
     print(0)
+
+class _PhysicalAssemblyPropagator:
+    def __init__(self, connections, objs_data, cheat_sheet):
+        connection_graph, contacts = connections
+        nodes, nonobj_inds = objs_data
+        collision_table, part_names, cp_names = cheat_sheet
+
+        self.connection_graph = connection_graph
+
+        # Inverses of mappings stored in the ground-truth oracle data
+        part_group_inv = {
+            v: k for k, vs in collision_table["part_groups"].items()
+            for v in vs
+        }
+        cp_indexing_inv = {
+            v: k for k, v in collision_table["contact_points"].items()
+        }
+        template_parts_inv = {
+            tuple(signature): inst
+            for inst, signature in collision_table["part_instances"].items()
+        }
+
+        # (Injective) Mapping of individual objects to corresponding atomic
+        # part instances in the collision table
+        all_objs = {
+            n: nodes[n]["obj_used"] or nonobj_inds[n]
+            for u, v in contacts
+            for n in [u, v]
+        }
+        obj2inst_map = {}; inst2obj_map = {}
+        while len(obj2inst_map) != len(all_objs):
+            for n, obj in all_objs.items():
+                # If already mapped
+                if obj in obj2inst_map: continue
+
+                # See if uniquely determined by part concept alone
+                conc_n = nodes[n]["choice_conc"]
+                conc_n = part_group_inv[part_names[conc_n]]
+                conc_sgn = (conc_n,) + (None,)*3
+                if conc_sgn in template_parts_inv:
+                    # Match found
+                    inst = template_parts_inv[conc_sgn]
+                    obj2inst_map[obj] = inst
+                    inst2obj_map[inst] = obj
+                    continue
+
+                # Matching with full signature if reached here
+                for (u, v), (cp_u, cp_v) in contacts.items():
+                    if n not in (u, v): continue
+
+                    cp_u = re.findall(r"p_(.*)_(.*)$", cp_u)
+                    cp_v = re.findall(r"p_(.*)_(.*)$", cp_v)
+                    cp_u = (int(cp_u[0][0]), int(cp_u[0][1]))
+                    cp_v = (int(cp_v[0][0]), int(cp_v[0][1]))
+                    cp_u = cp_indexing_inv[cp_names[cp_u]]
+                    cp_v = cp_indexing_inv[cp_names[cp_v]]
+
+                    other = v if n == u else u
+                    if all_objs[other] not in obj2inst_map: continue
+                    inst_other = obj2inst_map[all_objs[other]]
+
+                    cp_n = cp_u if n == u else cp_v
+                    cp_other = cp_v if n == u else cp_u
+
+                    full_sgn = (conc_n, inst_other, cp_n, cp_other)
+                    if full_sgn in template_parts_inv:
+                        # Match found
+                        inst = template_parts_inv[full_sgn]
+                        obj2inst_map[all_objs[n]] = inst
+                        inst2obj_map[inst] = all_objs[n]
+                        break
+
+        # Collision matrix translated to accommodate the context
+        self.collision_table = {
+            tuple(int(inst) for inst in pair.split(",")): set(colls)
+            for pair, colls in collision_table["pairwise_collisions"].items()
+        }
+        self.collision_table = {
+            (inst2obj_map[o1], inst2obj_map[o2]) : colls
+            for (o1, o2), colls in self.collision_table.items()
+            if o1 in inst2obj_map and o2 in inst2obj_map
+        }
+        self.collision_table = self.collision_table | {
+            (i2, i1): {-coll_dir for coll_dir in colls}
+            for (i1, i2), colls in self.collision_table.items()
+        }           # Also list reverse directions in lower triangle
+
+        # For tracking per-thread status
+        self.assembly_status = None
+
+        # For caching inclusion-minimal invalid object set pairs that
+        # cannot be joined
+        self.invalid_joins = set()
+
+    def init(self, init):
+        # Storage of atoms of interest by argument & time step handle
+        self.join_actions_a2l = {}
+        self.join_actions_l2a = defaultdict(set)
+        self.part_of_fluents_a2l = {}
+        self.part_of_fluents_l2a = defaultdict(set)
+
+        arg_val = lambda a: a.name if a.type == SymbolType.Function \
+            else a.number
+
+        for atm in init.symbolic_atoms:
+            # Watch occ(join(...),t) atoms and holds(part_of(...),t) atoms
+            # and establish correspondence between solver literals and
+            # action/fluent arguments
+            pred = atm.symbol.name
+            arg1 = atm.symbol.arguments[0]
+
+            occ_join = pred == "occ" and arg1.name == "join"
+            holds_part_of = pred == "holds" and arg1.name == "part_of" \
+                and atm.symbol.positive     # Dismiss -holds() atoms!
+
+            if occ_join:
+                lit = init.solver_literal(atm.literal)
+                init.add_watch(lit)
+                t = atm.symbol.arguments[1].number
+                s1 = arg_val(arg1.arguments[0])
+                s2 = arg_val(arg1.arguments[1])
+                o1 = arg_val(arg1.arguments[2])
+                o2 = arg_val(arg1.arguments[3])
+
+                self.join_actions_a2l[(s1, s2, o1, o2, t)] = lit
+                self.join_actions_l2a[lit].add((s1, s2, o1, o2, t))
+
+            if holds_part_of:
+                lit = init.solver_literal(atm.literal)
+                init.add_watch(lit)
+                t = atm.symbol.arguments[1].number
+                o = arg_val(arg1.arguments[0])
+                s = arg_val(arg1.arguments[1])
+
+                self.part_of_fluents_a2l[(o, s, t)] = lit
+                self.part_of_fluents_l2a[lit].add((o, s, t))
+
+        if self.assembly_status is None:
+            # Initialize per-thread status tracker
+            self.assembly_status = [
+                {
+                    "joins": {},
+                    "parts": defaultdict(lambda: defaultdict(set)),
+                    "parts_inv": defaultdict(dict)
+                }
+                for _ in range(init.number_of_threads)
+            ]
+
+    def propagate(self, control, changes):
+        status = self.assembly_status[control.thread_id]
+
+        updated = set()     # Tracks which join actions need checking
+        for lit in changes:
+            # Update ongoing assembly status for this thread accordingly
+            if lit in self.join_actions_l2a:
+                # Join of s1 & s2 happens at time step t
+                for s1, s2, o1, o2, t in self.join_actions_l2a[lit]:
+                    status["joins"][t] = (s1, s2, o1, o2)
+                    updated.add((s1, t))
+                    updated.add((s2, t))
+
+            if lit in self.part_of_fluents_l2a:
+                # Atomic (non-)object o is part of subassembly s at time step t
+                for o, s, t in self.part_of_fluents_l2a[lit]:
+                    if o in status["parts_inv"][t]:
+                        # An atomic (non-)object cannot belong to more than one
+                        # subassembly at each time step! Not explicitly prohibited
+                        # by some program rule (only entailed) but let's add the
+                        # set of fluents as a nogood in advance.
+                        s_dup = status["parts_inv"][t][o]
+                        dup_lit = self.part_of_fluents_a2l[(o, s_dup, t)]
+                        may_continue = control.add_nogood([lit, dup_lit]) \
+                            and control.propagate()
+                        if not may_continue: return
+
+                    status["parts"][t][s].add(o)
+                    status["parts_inv"][t][o] = s
+                    updated.add((s, t))
+
+        # After the round of updates, test if each join action would entail
+        # a collision-free path
+        for t, (s1, s2, o1, o2) in status["joins"].items():
+            if not ((s1, t) in updated or (s2, t) in updated):
+                # Nothing about this join action has been updated, can skip
+                continue
+
+            # Bipartite atomic-atomic collision check, then union across
+            # the pairwise checks to obtain collision test result
+            objs_s1 = frozenset(status["parts"][t][s1])
+            objs_s2 = frozenset(status["parts"][t][s2])
+            
+            if len(objs_s1) == 0 or len(objs_s2) == 0:
+                # Vacuous join, always treat as 'not impossible' (i.e.,
+                # doesn't rule out model due to physical collision)
+                join_possible = True
+            else:
+                subset_cached_as_invalid = any(
+                    (objs_s1 >= s1 and objs_s2 >= s2) or \
+                        (objs_s1 >= s2 and objs_s2 >= s1)
+                    for s1, s2 in self.invalid_joins
+                )
+                if subset_cached_as_invalid:
+                    # Some subset pair recognized and cached as invalid
+                    join_possible = False
+                else:
+                    # Test against table needed
+                    collision_directions = set.union(*[
+                        self.collision_table.get((o_s1, o_s2), set())
+                        for o_s1, o_s2 in product(objs_s1, objs_s2)
+                    ])
+                    # Collision-free join is possible when the resultant
+                    # union does not have six members, standing for each
+                    # direction of assembly, hence a feasible join path
+                    join_possible = len(collision_directions) < 6
+
+            if not join_possible:
+                # Join of this subassembly pair proved to be unreachable
+                # while including current object members; add nogood
+                # as appropriate and return
+                if not subset_cached_as_invalid:
+                    minimal_pair = self.analyze_collision((objs_s1, objs_s2))
+                    if minimal_pair is not None:
+                        self.invalid_joins.add(minimal_pair)
+
+                join_lit = self.join_actions_a2l[(s1, s2, o1, o2, t)]
+                part_of_lits = [
+                    self.part_of_fluents_a2l[(o, s1, t)] for o in objs_s1
+                ] + [
+                    self.part_of_fluents_a2l[(o, s2, t)] for o in objs_s2
+                ]
+                nogood = [join_lit] + part_of_lits
+                
+                may_continue = control.add_nogood(nogood) \
+                    and control.propagate()
+                if not may_continue:
+                    return
+
+    def undo(self, thread_id, assignment, changes):
+        status = self.assembly_status[thread_id]
+
+        for lit in changes:
+            # Update ongoing assembly status for this thread accordingly
+            if lit in self.join_actions_l2a:
+                # Join of s1 & s2 actually doesn't happen at time step t
+                for s1, s2, o1, o2, t in self.join_actions_l2a[lit]:
+                    if t in status["joins"]: 
+                        assert status["joins"][t] == (s1, s2, o1, o2)
+                        del status["joins"][t]
+
+            if lit in self.part_of_fluents_l2a:
+                # Atomic (non-)object o is actually not a part of s at
+                # time step t
+                for o, s, t in self.part_of_fluents_l2a[lit]:
+                    if o in status["parts"][t][s]:
+                        status["parts"][t][s].remove(o)
+                        del status["parts_inv"][t][o]
+
+    def analyze_collision(self, objs_pair):
+        """
+        Helper method factored out for analyzing an object set pair that
+        caused collision, finding an inclusion-minimal object set pair
+        """
+        objs1, objs2 = objs_pair
+
+        # Iterate over the lattice of pair of possible subset sizes of
+        # objs1, objs2, sorted so that 'smaller' size pairs are always
+        # processed earlier than 'larger' ones
+        pair_sizes = sorted(
+            (min(size1, size2) + 1, size1 + 1, size2 + 1)
+            for size1, size2 in product(range(len(objs1)), range(len(objs2)))
+        )
+        for _, size1, size2 in pair_sizes:
+            if size1 == size2 == 1:
+                # Trivially valid joins, given legitimate target structure
+                continue
+
+            # Obtain every possible subsets of objs1, objs2 of resp. sizes
+            # and iterate across possible pairs
+            subsets1 = combinations(objs1, size1)
+            subsets2 = combinations(objs2, size2)
+            for ss1, ss2 in product(subsets1, subsets2):
+                ss1 = frozenset(ss1); ss2 = frozenset(ss2)
+
+                ss_subgraph = self.connection_graph.subgraph(
+                    frozenset.union(ss1, ss2)
+                )
+                # Process the pair only if the subgraph is connected
+                if not nx.is_connected(ss_subgraph):
+                    continue
+
+                # Test this pair against table
+                collision_directions = set.union(*[
+                    self.collision_table.get((o_s1, o_s2), set())
+                    for o_s1, o_s2 in product(ss1, ss2)
+                ])
+                join_possible = len(collision_directions) < 6
+
+                if not join_possible:
+                    # Potential minimal source of collision found; return
+                    return frozenset([ss1, ss2])
+
+        # No connected source found
+        return None
 
 def _answer_domain_Q(agent, utt_pointer, translated):
     """
