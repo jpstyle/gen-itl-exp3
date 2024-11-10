@@ -10,10 +10,16 @@ from itertools import permutations, combinations, product
 from collections import defaultdict
 
 import yaml
+import torch
 import numpy as np
 import networkx as nx
 from clingo import Control, SymbolType, Number, Function
 
+from ..vision.utils import (
+    xyzw2wxyz, flip_position_y, flip_quaternion_y,
+    blur_and_grayscale, visual_prompt_by_mask, pose_estimation_with_mask,
+    transformation_matrix
+)
 from ..lpmln import Literal
 from ..lpmln.utils import flatten_cons_ante, wrap_args
 from ..memory.kb import KnowledgeBase
@@ -118,6 +124,7 @@ def attempt_command(agent, utt_pointer):
     if command_executable:
         # Schedule to generate plan & execute towards fulfilling the command
         agent.planner.agenda.insert(0, ("execute_command", (action_type, action_params)))
+        agent.lang.dialogue.unexecuted_commands.remove(utt_pointer)
         return
 
     else:
@@ -161,22 +168,43 @@ def execute_command(agent, action_spec):
     Execute a command (that was deemed executable before by `attempt_command`
     method) by appropriate planning, based on the designated action type and
     parameters provided as arguments.
+    """
+    action_type, action_params = action_spec
 
-    We only consider the 'Build a X' type of commands in our scope, which would
-    take a sequence of primitive actions to accomplish. Process the command by:
-        1) Running appropriate vision module methods to extract segmentation
-            masks, simultaneously predicting object class concept and filtering
-            out non-objects to leave potentially relevant objects on the table
+    # Currently considered commands: some long-term commands that requiring
+    # long-horizon planning (e.g., 'build'), and some primitive actions that
+    # are to be executed---that is, signaled to Unity environment---immediately
+    action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
+    match action_name:
+        case "build":
+            _execute_build(agent, action_params)
+            return
+
+        case "pick_up_left" | "pick_up_right":
+            return _execute_pick_up(agent, action_name, action_params)
+
+        case "drop_left" | "drop_right":
+            return _execute_drop(agent, action_name)
+
+        case "assemble_right_to_left" | "assemble_left_to_right":
+            return _execute_assemble(agent, action_name, action_params)
+
+def _execute_build(agent, action_params):
+    """
+    Planning for 'Build a X' type of commands, which would take a sequence of
+    primitive actions to accomplish. Process the command by:
+        1) Running appropriate vision module methods to obtain segmentation
+            masks; in this study, we will assume learner have access to ground-
+            truth segmentation masks of atomic parts on the tabletop (only),
+            whereas relaxing this would require using some general-purpose
+            segmentation model, meaning non-objects (i.e., invalid masks)
+            may be introduced.
         2) Synthesizing ASP program for planning out of the visual prediction
             results, current knowledge base status and the provided goal action
             spec (We only consider executing 'build X' commands for now)
         3) Solving the compiled ASP program with clingo, pushing the obtained
             sequence of atomic actions onto agenda stack
     """
-    # Currently considering 'build' commands only
-    action_type, action_params = action_spec
-    assert action_type == agent.lt_mem.lexicon.s2d[("va", "build")][0][1]
-
     # Convert current visual scene (from ensemble prediction) into ASP fact
     # literals (note difference vs. agent.lt_mem.kb.visual_evidence_from_scene
     # method, which is for probabilistic reasoning by LP^MLN)
@@ -288,7 +316,9 @@ def execute_command(agent, action_spec):
     # Optimize with clingo
     commit_ctl.ground([("base", []), ("facts", [])])
     with commit_ctl.solve(yield_=True) as solve_gen:
-        optimal_model = list(solve_gen)[-1].symbols(atoms=True)
+        models = [m.symbols(atoms=True) for m in solve_gen]
+        if len(models) > 0:
+            optimal_model = models[-1]
 
     # Compile the optimal solution into appropriate data structures
     assembly_hierarchy = nx.DiGraph()
@@ -335,6 +365,7 @@ def execute_command(agent, action_spec):
                 cp_u = atm.arguments[2].name
                 cp_v = atm.arguments[3].name
                 connect_edges[(node_u_rn, node_v_rn)] = (cp_u, cp_v)
+                connect_edges[(node_v_rn, node_u_rn)] = (cp_v, cp_u)
 
     # Top node
     assembly_hierarchy.add_node("0", node_type="sa")
@@ -366,11 +397,14 @@ def execute_command(agent, action_spec):
 
     recursive_allocate("0")        # Start from the top node ("0")
 
-    # Assign unique indentifiers for 'non-objects'
+    # Assign unique indentifiers for 'non-objects', which represent failure to
+    # perceive objects that ought to exist in order to fulfill the committed
+    # goal structure. They may be present on the tabletop yet not spotted by
+    # the agent's vision module, or they may not exist after all.
     nonobj_ids = {
         n: f"n{i}"
         for i, (n, obj) in enumerate(assembly_hierarchy.nodes(data="obj_used"))
-        if obj is None
+        if assembly_hierarchy.nodes[n]["node_type"] == "atomic" and obj is None
     }
     nonobj_ids_inv = { v: k for k, v in nonobj_ids.items() }
 
@@ -415,6 +449,7 @@ def execute_command(agent, action_spec):
     # of parts or subassemblies to form smaller planning problems
     compression_graph = connection_graph.copy()
     min_chunk_size = 6; chunks_assembled = {}
+    invalid_chunk_sequences = []; current_chunk_sequence = []
     sa_ind = 0
     join_sequence = []
     # Record every 'assembly scope implication' such that if a set of certain
@@ -426,9 +461,8 @@ def execute_command(agent, action_spec):
     replan_attempts = 0
     # Continue until the target structure is fully compressed and planned for    
     while len(compression_graph) > 1:
-        # Subsample designated number of nodes by BFS from each 'outer' node
-        # (i.e., having only one neighbor node). Select one with the least
-        # non-objects, break tie randomly
+        # Subsample designated number of nodes by BFS from each leaf node.
+        # Select one with the least non-objects, break tie randomly.
         chunk_candidates = []
         for n, dg in compression_graph.degree:
             if dg > 1: continue
@@ -440,14 +474,14 @@ def execute_command(agent, action_spec):
                     next_node = next(bfs_gen)[0]
                     chunk.add(next_node)
                     for ante, cons in scope_implications.get(next_node, set()):
-                        flat_objs = {
+                        objs_flat = {
                             n for n in chunk if n not in chunks_assembled
                         }
-                        hidden_objs = {
+                        objs_hidden = {
                             o for n in chunk if n in chunks_assembled
                             for o in chunks_assembled[n]
                         }
-                        chunk_unrolled = flat_objs | hidden_objs
+                        chunk_unrolled = objs_flat | objs_hidden
                         if ante <= chunk_unrolled:
                             for s, objs in chunks_assembled.items():
                                 if cons in objs:
@@ -461,11 +495,29 @@ def execute_command(agent, action_spec):
             nonobj_count = len([u for u in chunk if u in nonobj_ids_inv])
             chunk_candidates.append((chunk, nonobj_count))
 
-        min_count = min(cnt for _, cnt in chunk_candidates)
-        chunk = random.sample([
-            cnk for cnk, cnt in chunk_candidates if cnt==min_count
-        ], 1)[0]
-        chunk_subgraph = compression_graph.subgraph(chunk)
+        chunk_candidates = sorted(chunk_candidates, key=lambda x: x[1])
+        for chunk, _ in chunk_candidates:
+            # Select chunk with smallest counts of non-objects possible,
+            # while ensuring that the selection doesn't result in an
+            # invalid chunk sequence (remembered so far)
+            potential_sequence = current_chunk_sequence + [chunk]
+            if potential_sequence not in invalid_chunk_sequences:
+                chunk_selected = chunk
+                break
+        else:
+            # All possible options would lead to invalid sequence. Remember
+            # the current sequence as invalid and start again.
+            compression_graph = connection_graph.copy()
+            chunks_assembled = {}
+            invalid_chunk_sequences.append(current_chunk_sequence)
+            current_chunk_sequence = []
+            sa_ind = 0
+            join_sequence = []
+            replan_attempts += 1
+            print(f"Deadend reached; starting from scratch... ({replan_attempts})")
+            continue
+
+        chunk_subgraph = compression_graph.subgraph(chunk_selected)
 
         # Load ASP encoding for planning sequence of atomic actions
         collision_checker = _PhysicalAssemblyPropagator(
@@ -556,6 +608,8 @@ def execute_command(agent, action_spec):
         if optimal_model is None:
             compression_graph = connection_graph.copy()
             chunks_assembled = {}
+            invalid_chunk_sequences.append(current_chunk_sequence)
+            current_chunk_sequence = []
             sa_ind = 0
             join_sequence = []
             replan_attempts += 1
@@ -595,6 +649,10 @@ def execute_command(agent, action_spec):
                 if v in compression_graph: compression_graph.remove_node(v)
                 if u not in chunk: compression_graph.add_edge(u, f"s{sa_ind}")
 
+        # Tracking sequence of selected chunks, so as to remember invalid
+        # sequences that led to deadend states and prevent following the
+        # exact same sequence again
+        current_chunk_sequence.append(chunk)
         # Remember which components constitute the new subassembly, while
         # removing old subassemblies in chunk that have been merged into
         # new subassembly
@@ -613,12 +671,89 @@ def execute_command(agent, action_spec):
     # Instantiate the high-level plan into an actual action sequence, with
     # all the necessary information fleshed out (to be passed to the Unity
     # environment as parameters)
-    print(0)
+    get_conc = lambda s: agent.lt_mem.lexicon.s2d[("va", s)][0][1]
+    pick_up_action = [get_conc("pick_up_left"), get_conc("pick_up_right")]
+    drop_action = [get_conc("drop_left"), get_conc("drop_right")]
+    assemble_action = [
+        get_conc("assemble_right_to_left"), get_conc("assemble_left_to_right")
+    ]
+
+    action_sequence = []
+    hands = [None, None]
+    obj2node_map = { v: k for k, v in collision_checker.node2obj_map.items() }
+
+    for s1, s2, o1, o2, res in join_sequence:
+        if s1 in hands or s2 in hands:
+            # Immediately using the subassembly built in the previous join
+            empty_side = hands.index(None)
+            occupied_side = list({0, 1} - {empty_side})[0]
+
+            # Pick up the other involved subassembly with the empty hand
+            pick_up_target = s2 if hands[occupied_side] == s1 else s1
+            action_sequence.append((
+                pick_up_action[empty_side], (pick_up_target,)
+            ))
+
+            # Keep the joining direction as same as previous join
+            direction = occupied_side
+        else:
+            if any(held is not None for held in hands):
+                # One hand occupied, but held object needs to be dropped as
+                # it is not used in this step
+                empty_side = hands.index(None)
+                occupied_side = list({0, 1} - {empty_side})[0]
+
+                action_sequence.append((drop_action[occupied_side], None))
+
+            # Boths hand are (now) empty; pick up s1 and s2 on the left and
+            # the right side each
+            action_sequence.append((pick_up_action[0], (s1,)))
+            action_sequence.append((pick_up_action[1], (s2,)))
+
+            # Random join direction
+            direction = random.randint(0, 1)
+
+        # Join s1 and s2 at appropriate contact point
+        node_o1 = obj2node_map[o1]; node_o2 = obj2node_map[o2]
+        cp_o1, cp_o2 = connect_edges[(node_o1, node_o2)]
+        cp_o1 = re.findall(r"p_(.*)_(.*)$", cp_o1)
+        cp_o2 = re.findall(r"p_(.*)_(.*)$", cp_o2)
+        cp_o1 = (int(cp_o1[0][0]), int(cp_o1[0][1]))
+        cp_o2 = (int(cp_o2[0][0]), int(cp_o2[0][1]))
+        action_sequence.append((
+            assemble_action[direction], (s1, s2, o1, o2, cp_o1, cp_o2, res)
+        ))
+
+        # Update hands status
+        hands = [None, None]
+        hands[direction] = res
+
+    # Drop the finished product on the table
+    empty_side = hands.index(None)
+    occupied_side = list({0, 1} - {empty_side})[0]
+    action_sequence.append((drop_action[occupied_side], None))
+
+    # Push appropriate agenda items and finish
+    agent.planner.agenda += [
+        ("execute_command", (action_type, action_params))
+        for action_type, action_params in action_sequence
+    ]
+
+    # Dict storing current progress (from agent's viewpoint)
+    agent.assembly_progress = {
+        "manipulator_states": [(None, None, None), (None, None, None)],
+        # Resp. left & right held object, manipulator pose, component masks
+        "committed_parts": {
+            oi: assembly_hierarchy.nodes[obj2node_map[oi]]["choice_conc"]
+            for oi in connection_graph
+        },
+        "subassembly_components": {}
+    }
 
 class _PhysicalAssemblyPropagator:
     def __init__(self, connections, objs_data, cheat_sheet):
         connection_graph, contacts = connections
-        nodes, nonobj_inds = objs_data
+        nodes, nonobj_ids = objs_data
         collision_table, part_names, cp_names = cheat_sheet
 
         self.connection_graph = connection_graph
@@ -638,14 +773,14 @@ class _PhysicalAssemblyPropagator:
 
         # (Injective) Mapping of individual objects to corresponding atomic
         # part instances in the collision table
-        all_objs = {
-            n: nodes[n]["obj_used"] or nonobj_inds[n]
+        self.node2obj_map = {
+            n: nodes[n]["obj_used"] or nonobj_ids[n]
             for u, v in contacts
             for n in [u, v]
         }
         obj2inst_map = {}; inst2obj_map = {}
-        while len(obj2inst_map) != len(all_objs):
-            for n, obj in all_objs.items():
+        while len(obj2inst_map) != len(self.node2obj_map):
+            for n, obj in self.node2obj_map.items():
                 # If already mapped
                 if obj in obj2inst_map: continue
 
@@ -672,8 +807,8 @@ class _PhysicalAssemblyPropagator:
                     cp_v = cp_indexing_inv[cp_names[cp_v]]
 
                     other = v if n == u else u
-                    if all_objs[other] not in obj2inst_map: continue
-                    inst_other = obj2inst_map[all_objs[other]]
+                    if self.node2obj_map[other] not in obj2inst_map: continue
+                    inst_other = obj2inst_map[self.node2obj_map[other]]
 
                     cp_n = cp_u if n == u else cp_v
                     cp_other = cp_v if n == u else cp_u
@@ -682,8 +817,8 @@ class _PhysicalAssemblyPropagator:
                     if full_sgn in template_parts_inv:
                         # Match found
                         inst = template_parts_inv[full_sgn]
-                        obj2inst_map[all_objs[n]] = inst
-                        inst2obj_map[inst] = all_objs[n]
+                        obj2inst_map[self.node2obj_map[n]] = inst
+                        inst2obj_map[inst] = self.node2obj_map[n]
                         break
 
         # Collision matrix translated to accommodate the context
@@ -917,6 +1052,177 @@ class _PhysicalAssemblyPropagator:
 
         # No connected source found
         return None
+
+def _execute_pick_up(agent, action_name, action_params):
+    """
+    Pick up a designated object. Object may not have been present (as far as
+    agent's visual perception is concerned) at the time of planning, in which
+    case agent must inquire the user first if there exists an instance of the
+    target concept in the scene. If yes, user provides a statement pointing
+    to an instance, so the object can be referenced in this method.
+    """
+    target = action_params[0]
+    target_info = agent.vision.scene[target]
+
+    if "pred_mask" in target_info:
+        # Existing object, provide the segmentation mask as action parameter
+        # to the Unity environment
+        agent_action = [
+            (action_name, {
+                "parameters": ("str|@DemRef",),     # Signals "provided as mask"
+                "pointing": { (4, 11): target_info["pred_mask"] }
+            })
+        ]
+        manip_ind = 0 if action_name.endswith("left") else 1
+        manip_state = agent.assembly_progress["manipulator_states"][manip_ind]
+        agent.assembly_progress["manipulator_states"][manip_ind] = \
+            (action_params[0],) + manip_state[1:]
+        agent.assembly_progress["subassembly_components"][target] = {target}
+    else:
+        # Non-object, need to match an object labelled to be an instance of
+        # the targetted concept
+        if False:
+            agent_action = []
+        else:
+            agent_action = [
+                ("generate", { "utterance": "foo", "pointing": {} })
+            ]
+
+    return agent_action
+
+def _execute_drop(agent, action_name):
+    """
+    Drop whatever is held in the manipulator on the designated side. Not a lot
+    of complications, no action parameters to consider; just signal the Unity
+    environment.
+    """
+    print(0)
+
+def _execute_assemble(agent, action_name, action_params):
+    """
+    Assemble two subassemblies held in each manipulator at the designated objects
+    and contact points. Agent must provide transformation (3D pose difference)
+    of a manipulator that will achieve such join as action parameters to Unity,
+    as opposed to the user who knows the ground-truth name handles of objects
+    and contact points in the environment. Perform pose estimation of relevant
+    objects from agent's visual input and compute pose difference. Necessary
+    information must have been provided from Unity environment as 'effects' of
+    previous actions.
+    """
+    state_left = agent.assembly_progress["manipulator_states"][0]
+    state_right = agent.assembly_progress["manipulator_states"][1]
+    obj_left, pose_left, masks_left = state_left
+    obj_right, pose_right, masks_right = state_right
+    components_left = agent.assembly_progress["subassembly_components"][obj_left]
+    components_right = agent.assembly_progress["subassembly_components"][obj_right]
+    types_left = {agent.assembly_progress["committed_parts"][c] for c in components_left}
+    types_right = {agent.assembly_progress["committed_parts"][c] for c in components_right}
+
+    # Classify 'reference' components with the masks with the largest sizes on resp.
+    # left & right, then estimate poses
+    ref_mask_left = sorted(masks_left, reverse=True, key=lambda msk: msk.sum())[0]
+    ref_mask_right = sorted(masks_right, reverse=True, key=lambda msk: msk.sum())[0]
+    # Extracting visual features
+    scene_img = agent.vision.latest_inputs[-1]
+    visual_prompts = visual_prompt_by_mask(
+        scene_img, blur_and_grayscale(scene_img), [ref_mask_left, ref_mask_right]
+    )
+    vis_model = agent.vision.model; vis_model.eval()
+    with torch.no_grad():
+        f_vecs = []
+        for vp in visual_prompts:
+            vp_processed = vis_model.dino_processor(images=vp, return_tensors="pt")
+            vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
+            vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
+            f_vecs.append(vp_dino_out.pooler_output.cpu().numpy()[0])
+    # Few-shot classification, with choices constrained among concepts which are
+    # known (as agent deems it) to be included in the left/right objects
+    fs_pred_left = agent.vision.fs_conc_pred(agent.lt_mem.exemplars, f_vecs[0], "pcls")
+    fs_pred_right = agent.vision.fs_conc_pred(agent.lt_mem.exemplars, f_vecs[1], "pcls")
+    fs_pred_left = max(
+        probs := { c: pr for c, pr in enumerate(fs_pred_left) if c in types_left },
+        key=probs.get
+    )
+    fs_pred_right = max(
+        probs := { c: pr for c, pr in enumerate(fs_pred_right) if c in types_right },
+        key=probs.get
+    )
+
+    # Estimate poses of the reference components on each side
+    structure_3d_left = agent.lt_mem.exemplars.object_3d[fs_pred_left][:3]
+    structure_3d_right = agent.lt_mem.exemplars.object_3d[fs_pred_right][:3]
+    with torch.no_grad():
+        pose_estimation_per_view_left = pose_estimation_with_mask(
+            scene_img, ref_mask_left, vis_model, structure_3d_left,
+            agent.vision.camera_intrinsics
+        )
+        pose_estimation_per_view_right = pose_estimation_with_mask(
+            scene_img, ref_mask_right, vis_model, structure_3d_right,
+            agent.vision.camera_intrinsics
+        )
+    best_estimation_left = sorted(
+        pose_estimation_per_view_left, key=lambda x: x[1]+x[2], reverse=True
+    )[0]
+    best_estimation_right = sorted(
+        pose_estimation_per_view_right, key=lambda x: x[1]+x[2], reverse=True
+    )[0]
+    best_estimation_left = transformation_matrix(*best_estimation_left[0])
+    best_estimation_right = transformation_matrix(*best_estimation_right[0])
+
+    # Relation among manipulator, object & contact point transformations:
+    # [Tr. of contact point in global coordinate]
+    # = [Tr. of part instance in global coordinate] *
+    #   [Tr. of contact point in part local coordinate]
+    # = [Tr. of manipulator in global coordinate] *
+    #   [Tr. of part instance in subassembly local coordinate] *
+    #   [Tr. of contact point in part local coordinate]
+    #
+    # Based on these relations, we first obtain [Tr. of contact point in global
+    # coordinate], then [Tr. of part instance in subassembly local coordinate],
+    # finally [Desired Tr. of manipulator in global coordinate] by equating
+    # transforms of the two contact points of interest in global coordinate.
+    print(0)
+
+def handle_action_effect(agent, effect):
+    """
+    Update agent's internal representation of relevant environment states, in
+    the face of obtaining feedback after performing a primitive environmental
+    action. In our scope, we are concerned with effects of two types of actions:
+    'pick_up' and 'assemble' actions.
+    """
+    effect_lit = [lit for lit in effect if lit.name.startswith("arel")][0]
+    action_name = int(effect_lit.name.split("_")[-1])
+    action_name = agent.lt_mem.lexicon.d2s[("arel", action_name)][0][1]
+
+    referents = agent.lang.dialogue.referents       # Shortcut var
+
+    if action_name.startswith("pick_up"):
+        # Pick-up action effects: pose of moved manipulator, Unity gameObject
+        # name of the pick-up target (*not used by learner agent), masks of
+        # all atomic parts included in the pick-up target subassembly
+        manip_rotation, manip_translation, _, *component_objs = [
+            arg for arg, _ in effect_lit.args[2:]
+        ]
+        manip_rotation = flip_quaternion_y(xyzw2wxyz([
+            float(val)
+            for val in referents["dis"][manip_rotation]["name"].split("/")
+        ]))
+        manip_translation = flip_position_y([
+            float(val)
+            for val in referents["dis"][manip_translation]["name"].split("/")
+        ])
+        manip_pose = (manip_rotation, manip_translation)
+        component_masks = [
+            agent.vision.scene[obj]["pred_mask"] for obj in component_objs
+        ]
+
+        manip_ind = 0 if action_name.endswith("left") else 1
+        manip_state = agent.assembly_progress["manipulator_states"][manip_ind]
+        agent.assembly_progress["manipulator_states"][manip_ind] = \
+            (manip_state[0],) + (manip_pose, component_masks)
+
+    if action_name.startswith("assemble"):
+        print(1)
 
 def _answer_domain_Q(agent, utt_pointer, translated):
     """
@@ -1177,7 +1483,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
         # Fetch teacher's last correction, which is the expected ground truth
         prev_statements_U = [
             stm for (ti, ci), (spk, stm) in prev_statements
-            if spk=="U" and \
+            if spk=="Teacher" and \
                 agent.lang.dialogue.clause_info[f"t{ti}c{ci}"]["domain_describing"] and \
                 not agent.lang.dialogue.clause_info[f"t{ti}c{ci}"]["irrealis"]
         ]
@@ -1187,7 +1493,7 @@ def _answer_nondomain_Q(agent, utt_pointer, translated):
         # predicate anticipated by taxonomy entailment
         prev_Qs_U = [
             (ques, presup) for _, (spk, ques, presup) in prev_Qs
-            if spk=="U" and "sp_isinstance" in {ql.name for ql in ques[1][0]}
+            if spk=="Teacher" and "sp_isinstance" in {ql.name for ql in ques[1][0]}
         ]
         probing_Q, probing_presup = prev_Qs_U[-1]
         # Process any 'concept conjunctions' provided in the presupposition into a more

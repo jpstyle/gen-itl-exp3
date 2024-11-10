@@ -22,6 +22,8 @@ class CompositeActions:
         return attempt_command(self.agent, utt_pointer)
     def execute_command(self, action_spec):
         return execute_command(self.agent, action_spec)
+    def handle_action_effect(self, effect):
+        return handle_action_effect(self.agent, effect)
 
     # Cognitive actions
     def identify_mismatch(self, rule):

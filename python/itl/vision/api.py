@@ -441,7 +441,13 @@ class VisionModule:
 
         # Incrementally update the existing scene graph with the output with the
         # detections best complying with the conditions provided
-        existing_objs = list(self.scene)
+        if self.scene is None:
+            self.scene = {}         # Initialize a new scene
+            existing_objs = []
+        else:
+            existing_objs = [
+                oi for oi, obj in self.scene.items() if "pred_mask" in obj
+            ]
 
         for oi, oj in product(existing_objs, new_objs):
             # Add new relation score slots for existing objects

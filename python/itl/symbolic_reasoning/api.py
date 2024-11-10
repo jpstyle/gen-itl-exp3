@@ -105,10 +105,13 @@ class SymbolicReasonerModule:
         # Understood dialogue record contents
         occurring_preds = set()
         for ti, (speaker, turn_clauses) in enumerate(dialogue_state.record):
-            # Nothing particular to do with agent's own utterances
-            if speaker == "A": continue
+            for ci, ((_, _, ante, cons), raw, _) in enumerate(turn_clauses):
+                if speaker == "Student" and not raw.startswith("# Effect:"):
+                    # Nothing particular to do with agent's own utterances generated
+                    # by comp_actions; action effects (starting with "# Effect:")
+                    # need processing though
+                    continue
 
-            for ci, ((_, _, ante, cons), _, _) in enumerate(turn_clauses):
                 ante_preds = [lit[:2] for lit in ante]
                 cons_preds = [lit[:2] for lit in cons]
 
@@ -222,7 +225,7 @@ class SymbolicReasonerModule:
 
         tok2sym_map = [atom.args[:2] for atom in opt_models[0] if atom.name == "pred_token"]
         tok2sym_map = {
-            tuple(token[0].split("_")): tuple(symbol[0].split("_"))
+            tuple(token[0].split("_")): ((spl := symbol[0].split("_"))[0], "_".join(spl[1:]))
             for token, symbol in tok2sym_map
         }
 

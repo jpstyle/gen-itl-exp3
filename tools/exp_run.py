@@ -40,14 +40,6 @@ from tools.message_side_channel import StringMsgChannel
 logger = logging.getLogger(__name__)
 TAB = "\t"
 
-# Integer indexing of action types for reference in Unity env
-ACT_TYPE_INDS = {
-    "PickUpLeft": 1, "PickUpRight": 2,
-    "DropLeft": 3, "DropRight": 4,
-    "AssembleRightToLeft": 5, "AssembleLeftToRight": 6,
-    "InspectLeft": 7, "InspectRight": 8
-}
-
 OmegaConf.register_new_resolver(
     "randid", lambda: str(uuid.uuid4())[:6]
 )
@@ -73,7 +65,7 @@ def main(cfg):
 
     # Path to save agent models during & after training
     if not cfg.agent.test_mode:
-        ckpt_path = os.path.join(cfg.paths.outputs_dir, "agent_model")    
+        ckpt_path = os.path.join(cfg.paths.outputs_dir, "agent_model")
         os.makedirs(ckpt_path, exist_ok=True)
 
     # Tensorboard writer to log learning progress
@@ -119,7 +111,7 @@ def main(cfg):
         calib_images = []
         for i in range(24):
             # Request image and wait
-            student_channel.send_string("System", f"Calibration image request: {i}", {})
+            student_channel.send_string("System", f"# Calibration image request: {i}", {})
             env.step()
 
             # Fetch image from response and append to list
@@ -154,12 +146,12 @@ def main(cfg):
 
     # Send end-of-request signal so that agent's default position is ensured and
     # chessboard pattern object is deactivated
-    student_channel.send_string("System", "Calibration image request: 24", {})
+    student_channel.send_string("System", "# Calibration image request: 24", {})
 
     # Send a request for orderings of part & color subtypes as specified in Unity
     # environment scene (stored in TeacherAgent instance), so that we can convert
     # randomly sampled initialization configs to environment in corresponding numbers
-    teacher_channel.send_string("System", "Subtype orderings request", {})
+    teacher_channel.send_string("System", "# Subtype orderings request", {})
 
     env.step()
 
@@ -168,8 +160,8 @@ def main(cfg):
     all_subtypes = {}
     while len(incoming_msgs) > 0:
         spk, utterance, _ = incoming_msgs.pop(0)
-        if spk == "System" and utterance.startswith("Subtype orderings response: "):
-            per_supertype = utterance.replace("Subtype orderings response: ", "")
+        if spk == "System" and utterance.startswith("# Subtype orderings response: "):
+            per_supertype = utterance.replace("# Subtype orderings response: ", "")
             per_supertype = per_supertype.split(" // ")
 
             for info_string in per_supertype:
@@ -188,8 +180,8 @@ def main(cfg):
         for field, value in sampled_inits.items():
             env_par_channel.set_float_parameter(field, value)
 
-        # # Request sending ground-truth mask info to teacher at the beginning
-        # teacher_channel.send_string("System", "GT mask request: cabin, load", {})
+        # Request sending ground-truth mask info to teacher at the beginning
+        student_channel.send_string("System", "# GT mask request: *", {})
 
         # Send teacher's episode-initial output---thus user's episode-initial input
         opening_output = teacher.initiate_dialogue()
@@ -200,6 +192,7 @@ def main(cfg):
 
         # Let the settings take effect and begin the episode
         env.reset()
+        new_env = True
 
         while True:
             # Keep running until either student or teacher terminates episode
@@ -220,7 +213,9 @@ def main(cfg):
                         agent_loop_input = {
                             "v_usr_in": None,
                             "l_usr_in": [],
-                            "pointing": []
+                            "speaker": [],
+                            "pointing": [],
+                            "new_env": new_env
                         }
 
                         # Obtain agent's visual observation from camera sensor
@@ -232,42 +227,75 @@ def main(cfg):
                         # Read messages stored in string message channel buffer
                         incoming_msgs = student_channel.incoming_message_buffer
 
-                        if len(incoming_msgs) > 0:
-                            while len(incoming_msgs) > 0:
-                                _, utterance, dem_refs = incoming_msgs.pop(0)
-                                # 1D to 2D according to visual scene dimension
-                                dem_refs = {
-                                    crange: np.array(mask).reshape(i_h, i_w)
-                                    for crange, mask in dem_refs.items()
-                                }
+                        sys_msg_only = True
+                        while len(incoming_msgs) > 0:
+                            spk, utterance, dem_refs = incoming_msgs.pop(0)
+                            # 1D to 2D according to visual scene dimension
+                            dem_refs = {
+                                crange: np.array(mask).reshape(i_h, i_w)
+                                for crange, mask in dem_refs.items()
+                            }
+                            if spk == "System" and utterance.startswith("# GT mask response: "):
+                                # As it stands, code enters here only at the beginning of each
+                                # episode, so can refresh student state with new_env of True
+                                # and empty user input
+                                student.loop(new_env=True)
+                                agent_loop_input["new_env"] = False
+                                # Run visual scene prediction with provided ground-truth masks
+                                student.vision.predict(
+                                    agent_loop_input["v_usr_in"], student.lt_mem.exemplars,
+                                    masks={
+                                        f"o{i}": v for i, v in enumerate(dem_refs.values())
+                                        if v.sum() > 100        # Remove small/null masks
+                                    }
+                                )
+                            else:
+                                # General case where message from Teacher or Student-side
+                                # action effect feedback from Unity environment has arrived
                                 agent_loop_input["l_usr_in"].append(utterance)
+                                agent_loop_input["speaker"].append(spk)
                                 agent_loop_input["pointing"].append(dem_refs)
+                                sys_msg_only = False
 
                         # ITL agent loop: process input and generate output (action)
-                        act_out = student.loop(**agent_loop_input)
+                        act_out = [] if sys_msg_only else student.loop(**agent_loop_input)
 
                         if len(act_out) > 0:
                             # Process action output accordingly by setting Unity MLAgent
                             # actions and sending string messages via side channel
                             action = b_spec.action_spec.empty_action(1)
-                            for act_type, act_data in act_out:
+                            for act_type, act_params in act_out:
                                 if act_type == "generate":
                                     action.discrete[0][0] = 1       # 'Utter' action
-                                    utterance = act_data[0]
+                                    utterance = act_params[0]
                                     dem_refs = {
                                         crange: mask.reshape(-1).tolist()
-                                        for crange, mask in act_data[1].items()
+                                        for crange, mask in act_params[1].items()
                                     }
                                     student_channel.send_string(
                                         "Student", utterance, dem_refs
                                     )
                                     if not utterance.startswith("#"):
                                         logger.info(f"L> {TAB}{utterance}")
+                                else:
+                                    # Physical action as planned and selected; set discrete
+                                    # action type and send string parameters via channel
+                                    action.discrete[0][1] = \
+                                        student.lt_mem.lexicon.s2d[("va", act_type)][0][1]
+                                    str_params = ", ".join(act_params["parameters"])
+                                    full_spec = f"# Action parameters: {str_params}"
+                                    dem_refs = {
+                                        crange: mask.reshape(-1).tolist()
+                                        for crange, mask in act_params["pointing"].items()
+                                    }
+                                    student_channel.send_string("System", full_spec, dem_refs)
 
                             # Finally apply actions
                             env.set_action_for_agent(b_name, dec_step.agent_id, action)
                         else:
-                            terminate = True
+                            # Terminate only if no act_out given despite non-system messages
+                            # were processed
+                            if not sys_msg_only: terminate = True
 
                     # Handle teacher's decision request
                     if b_name.startswith("TeacherBehavior"):
@@ -276,34 +304,37 @@ def main(cfg):
                         # Read messages stored in string message channel buffer
                         incoming_msgs = teacher_channel.incoming_message_buffer
 
-                        if len(incoming_msgs) > 0:
-                            while len(incoming_msgs) > 0:
-                                spk, utterance, dem_refs = incoming_msgs.pop(0)
-                                # 1D to 2D according to visual scene dimension
-                                dem_refs = {
-                                    crange: np.array(mask).reshape(i_h, i_w)
-                                    for crange, mask in dem_refs.items()
+                        while len(incoming_msgs) > 0:
+                            spk, utterance, dem_refs = incoming_msgs.pop(0)
+                            # 1D to 2D according to visual scene dimension
+                            dem_refs = {
+                                crange: np.array(mask).reshape(i_h, i_w)
+                                for crange, mask in dem_refs.items()
+                            }
+                            if spk == "System" and utterance.startswith("# GT mask response: "):
+                                # Retrieve and store requested GT mask info in teacher
+                                teacher.current_gt_masks = {
+                                    utterance[crange[0]:crange[1]]: msk
+                                    for crange, msk in dem_refs.items()
                                 }
-                                if spk == "System" and utterance.startswith("GT mask response: "):
-                                    # Retrieve and store requested GT mask info in teacher
-                                    teacher.current_gt_masks = {
-                                        utterance[crange[0]:crange[1]]: msk
-                                        for crange, msk in dem_refs.items()
-                                    }
-                                else:
-                                    agent_reactions.append((utterance, dem_refs))
+                            else:
+                                agent_reactions.append((utterance, dem_refs))
 
                         # Simulated teacher (user) response
                         user_response = teacher.react(agent_reactions)
 
                         if len(user_response) > 0:
                             action = b_spec.action_spec.empty_action(1)
-                            for act_type, act_args in user_response:
-                                if act_type == "Utter":
+                            for act_data in user_response:
+                                # Interpret None value as silent observation
+                                if act_data is None: continue
+
+                                act_type, act_params = act_data
+                                if act_type == "generate":
                                     # 'Utter' action
                                     action.discrete[0][0] = 1
-                                    utterance = act_args["utterance"]
-                                    dem_refs = act_args["pointing"]
+                                    utterance = act_params["utterance"]
+                                    dem_refs = act_params["pointing"]
                                     teacher_channel.send_string("Teacher", utterance, dem_refs)
                                     if not utterance.startswith("#"):
                                         logger.info(f"T> {TAB}{utterance}")
@@ -313,9 +344,10 @@ def main(cfg):
                                 else:
                                     # Physical actions for demonstration; set discrete action
                                     # type and send string parameters via channel
-                                    action.discrete[0][1] = ACT_TYPE_INDS[act_type]
-                                    str_params = ", ".join(act_args["parameters"])
-                                    full_spec = f"Action parameters: {str_params}"
+                                    action.discrete[0][1] = \
+                                        student.lt_mem.lexicon.s2d[("va", act_type)][0][1]
+                                    str_params = ", ".join(act_params["parameters"])
+                                    full_spec = f"# Action parameters: {str_params}"
                                     teacher_channel.send_string("System", full_spec, {})
 
                             # Finally apply actions
@@ -328,6 +360,7 @@ def main(cfg):
                 teacher.episode_records.append(teacher.current_episode_record)
                 break
             else:
+                new_env = False
                 env.step()
 
         for gt_conc, ep_log in teacher.current_episode_record.items():
