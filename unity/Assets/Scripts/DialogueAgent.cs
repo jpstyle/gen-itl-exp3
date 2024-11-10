@@ -7,12 +7,11 @@ using UnityEngine.Assertions;
 using UnityEngine.Perception.GroundTruth;
 using Unity.MLAgents;
 using Unity.MLAgents.Sensors;
+using Unity.MLAgents.Actuators;
 using Unity.MLAgents.Policies;
 using Random = UnityEngine.Random;
 
 public class DialogueAgent : Agent
-// Communication with dialogue UI and communication with Python backend may be
-// decoupled later?
 {
     // String identifier name for the dialogue participant agent
     public string dialogueParticipantID;
@@ -36,7 +35,7 @@ public class DialogueAgent : Agent
     public bool subtypeOrderingRequest;     // false by default
 
     // Stores any action parameters of string type
-    public readonly Queue<string> actionParameterBuffer = new();
+    public readonly Queue<(string, EntityRef)> actionParameterBuffer = new();
 
     // For visualizing handheld objects
     public Transform leftHand;
@@ -65,7 +64,7 @@ public class DialogueAgent : Agent
     private BehaviorType _behaviorType;
 
     // A bit of 'cheating' for stabilizing pose estimation results, as physical
-    // simulations may perturb rotation after dropping objects) Cache localRotations
+    // simulations may perturb rotation after dropping objects. Cache localRotations
     // of held objects when dropping, and restore when picking them
     // back up
     private Dictionary<string, Quaternion> _rotationCache;
@@ -114,6 +113,27 @@ public class DialogueAgent : Agent
         StartCoroutine(Utter());
     }
 
+    public override void OnActionReceived(ActionBuffers actionBuffers)
+    {
+        if (actionBuffers.DiscreteActions[0] == 1)
+        {
+            if (actionBuffers.DiscreteActions[1] == 0)
+                // Just 'Utter' action only
+                StartCoroutine(Utter());
+            else
+                // Both 'Utter' action and some physical action queued; utter first
+                // then act (in order to send any mask annotations based on 'before'
+                // state)
+                StartCoroutine(UtterThenAct(actionBuffers.DiscreteActions[1]));
+        }
+        else
+        {
+            // No 'Utter' action needed, just Act
+            if (actionBuffers.DiscreteActions[1] != 0)
+                StartCoroutine(Act(actionBuffers.DiscreteActions[1]));
+        }
+    }
+
     public void Update()
     {
         if (Time.time < _nextTimeToAct) return;
@@ -140,7 +160,8 @@ public class DialogueAgent : Agent
             {
                 // Fetch single message record from queue
                 var incomingMessage = incomingMsgBuffer.Dequeue();
-                
+                if (!incomingMessage) continue;     // Empty message: content-less ping
+
                 // (If any) Translate EnvEntity reference by UID to segmentation mask w.r.t.
                 // this agent's camera sensor
                 var demRefs = new Dictionary<(int, int), EntityRef>();
@@ -223,7 +244,7 @@ public class DialogueAgent : Agent
             // sending info to backend
             if (subtypeOrderingRequest)
             {
-                var responseString = "Subtype orderings response: ";
+                var responseString = "# Subtype orderings response: ";
                 var orderingInfo = SubtypeOrderings();
 
                 var responseSubstrings = new List<string>();
@@ -235,10 +256,7 @@ public class DialogueAgent : Agent
                 }
                 responseString += string.Join(" // ", responseSubstrings.ToArray());
 
-                var emptyDemRefs = new Dictionary<(int, int), EntityRef>();
-                backendMsgChannel.SendMessageToBackend(
-                    "System", responseString, emptyDemRefs
-                );
+                backendMsgChannel.SendMessageToBackend("System", responseString);
                 subtypeOrderingRequest = false;    // Reset flag
             }
 
@@ -280,7 +298,7 @@ public class DialogueAgent : Agent
         _maskCapturing = false;
     }
 
-    protected IEnumerator Utter()
+    private IEnumerator Utter()
     {
         // If a coroutine invocation is still running, do not start another; else,
         // set flag
@@ -293,62 +311,61 @@ public class DialogueAgent : Agent
             messagesToUtter.Add(outgoingMsgBuffer.Dequeue());
         
         // If no outgoing message to utter, can terminate here
-        if (messagesToUtter.Count == 0)
+        if (messagesToUtter.Count == 0 && gtMaskRequests.Count == 0)
         {
             _uttering = false;
             yield break;
         }
 
-        // Check if any of the messages has non-empty demonstrative references and
-        // thus segmentation masks need to be captured
-        var masksNeeded = messagesToUtter
-            .Select(m => m.Item3)
-            .Any(rfs => rfs is not null && rfs.Count > 0);
+        // Ensuring annotations are up to date
+        EnvEntity.annotationStorage.annotationsUpToDate = false;
+        yield return StartCoroutine(CaptureAnnotations());
 
-        // If needed, synchronously wait until masks are updated and captured
-        if (masksNeeded)
+        // If any ground-truth mask requests are pending, handle them here by
+        // sending info to backend
+        if (gtMaskRequests.Count > 0)
         {
-            yield return StartCoroutine(CaptureAnnotations());
+            var responseString = "# GT mask response: ";
+            var responseMasks = new Dictionary<(int, int), EntityRef>();
+            var stringPointer = responseString.Length;
 
-            // If any ground-truth mask requests are pending, handle them here by
-            // sending info to backend
-            if (gtMaskRequests.Count > 0)
+            var partStrings = new List<string>();
+            while (gtMaskRequests.Count > 0)
             {
-                var responseString = "GT mask response: ";
-                var responseMasks = new Dictionary<(int, int), EntityRef>();
-                var stringPointer = responseString.Length;
+                var req = gtMaskRequests.Dequeue();
 
-                var partStrings = new List<string>();
-                while (gtMaskRequests.Count > 0)
+                if (req == "*")
                 {
-                    var req = gtMaskRequests.Dequeue();
+                    // Requesting all existing (top-level) EnvEntities, enqueue them all
+                    Assert.IsTrue(gtMaskRequests.Count == 0);   // Should be the only request
+                    var topEntities = 
+                        FindObjectsByType<EnvEntity>(FindObjectsSortMode.None)
+                        .Where(
+                            ent => ent.gameObject.transform.parent is null
+                        );
+                    foreach (var ent in topEntities)
+                        gtMaskRequests.Enqueue(ent.gameObject.name);
+                }
+                else
+                {
                     partStrings.Add(req);
 
-                    var range = (stringPointer, stringPointer+req.Length);
-                    
-                    // Find relevant EnvEntity and fetch mask
-                    var foundEnt = FindObjectsByType<EnvEntity>(FindObjectsSortMode.None)
-                        .FirstOrDefault(
-                            ent =>
-                            {
-                                var parent = ent.gameObject.transform.parent;
-                                var hasParent = parent is not null;
-                                return hasParent && req == parent.gameObject.name;
-                            }
-                        );
+                    var range = (stringPointer, stringPointer + req.Length);
 
-                    if (foundEnt is null) throw new Exception("Invalid part type");
+                    // Find relevant EnvEntity and fetch mask
+                    var foundEnt = EnvEntity.FindByObjectPath("/" + req);
                     responseMasks[range] = new EntityRef(GetSensorMask(foundEnt));
 
                     stringPointer += req.Length;
-                    if (gtMaskRequests.Count > 0) stringPointer += 2;   // Account for ", " delimiter
+                    if (gtMaskRequests.Count > 0) stringPointer += 2;
+                        // Account for ", " delimiter
                 }
-                responseString += string.Join(", ", partStrings.ToArray());
-
-                backendMsgChannel.SendMessageToBackend(
-                    "System", responseString, responseMasks
-                );
             }
+            responseString += string.Join(", ", partStrings.ToArray());
+
+            backendMsgChannel.SendMessageToBackend(
+                "System", responseString, responseMasks
+            );
         }
 
         // Now utter individual messages
@@ -374,7 +391,7 @@ public class DialogueAgent : Agent
                             ent = EnvEntity.FindByObjectPath(demRef.stringRef);
                             break;
                         default:
-                            // Shouldn't reach here but anyways
+                            // Shouldn't reach here but anyway...
                             throw new Exception("Invalid reference data type?");
                     }
 
@@ -395,47 +412,79 @@ public class DialogueAgent : Agent
     }
 
     // ReSharper disable Unity.PerformanceAnalysis
-    protected IEnumerator Act(int actionType)
+    private IEnumerator Act(int actionType)
     {
         // If a coroutine invocation is still running, do not start another; else,
         // set flag
         if (_acting) yield break;
         _acting = true;
 
+        var actionEffect = "";
+        var referencedEntities = new Dictionary<(int, int), EnvEntity>();
+
         // Coroutine that executes specified physical action
         switch (actionType)
         {
-            case 1:
             case 2:
-                // PickUpLeft/Right action, parameter: (target object)
-                var targetName = actionParameterBuffer.Dequeue();
-                var targetEnt = EnvEntity.FindByObjectPath($"/{targetName}");
-                var withLeft = actionType % 2 == 1;
-                PickUp(targetEnt.gameObject, withLeft);
-                break;
             case 3:
+                // PickUpLeft/Right action, parameter: {target object}, where target
+                // may be designated by GameObject path or segmentation mask
+                var withLeft = actionType % 2 == 0;
+                var pickUpParam1 = actionParameterBuffer.Dequeue();
+                var targetName = pickUpParam1.Item1.Replace("str|", "");
+                EnvEntity targetEnt;
+                if (targetName == "@DemRef")
+                {
+                    var prmMask = pickUpParam1.Item2.maskRef;
+                    var screenMask = MaskCoordinateSwitch(prmMask, false);
+                    var targetDisplay = _cameraSensor.Camera.targetDisplay;
+                    targetEnt = EnvEntity.FindByMask(screenMask, targetDisplay, true);
+                    Assert.IsFalse(targetEnt.isBogus);
+                }
+                else
+                    targetEnt = EnvEntity.FindByObjectPath($"/{targetName}");
+                (actionEffect, referencedEntities) = PickUp(targetEnt, withLeft);
+                break;
             case 4:
+            case 5:
                 // DropLeft/Right action, parameter: ()
-                var fromLeft = actionType % 2 == 1;
+                var fromLeft = actionType % 2 == 0;
                 Drop(fromLeft);
                 break;
-            case 5:
             case 6:
-                // AssembleRtoL/LtoR action, parameter: {resultant subassembly string name,
-                // contact point L, contact point R, # of parts whose ground truth masks are
-                // requested, [those parts]}
-                var productName = actionParameterBuffer.Dequeue();
-                var leftPoint = actionParameterBuffer.Dequeue();
-                var rightPoint = actionParameterBuffer.Dequeue();
-                var rightToLeft = actionType % 2 == 1;
-                Assemble(productName, leftPoint, rightPoint, rightToLeft);
-                break;
             case 7:
+                // AssembleRtoL/LtoR action, two possible parameter signatures:
+                //  1) {resultant subassembly name, object/contact L, object/contact R}
+                //  2) {resultant subassembly name, manipulator transform}
+                var rightToLeft = actionType % 2 == 0;
+                var assembleParam1 = actionParameterBuffer.Dequeue();
+                var productName = assembleParam1.Item1.Replace("str|", "");
+                
+                var assembleParam2 = actionParameterBuffer.Dequeue();
+                if (assembleParam2.Item1.StartsWith("str|"))
+                {
+                    var leftPoint = assembleParam2.Item1.Replace("str|", "");
+                    var assembleParam3 = actionParameterBuffer.Dequeue();
+                    var rightPoint = assembleParam3.Item1.Replace("str|", "");
+                    (actionEffect, referencedEntities) = Assemble(
+                        productName, leftPoint, rightPoint, rightToLeft
+                    );
+                }
+                else
+                {
+                    Assert.IsTrue(assembleParam2.Item1.StartsWith("floats|"));
+                    var handTransform = assembleParam2.Item1
+                        .Replace("floats|", "").Split("/").Select(float.Parse).ToList();
+                }
+                break;
             case 8:
-                // InspectLeftRight action, parameter: (view angle index)
-                var inspectedObjName = actionParameterBuffer.Dequeue();
-                var viewAngleIndex = Convert.ToInt32(actionParameterBuffer.Dequeue());
-                var onLeft = actionType % 2 == 1;
+            case 9:
+                // InspectLeft/Right action, parameter: {view angle index}
+                var onLeft = actionType % 2 == 0;
+                var inspectParam1 = actionParameterBuffer.Dequeue();
+                var inspectParam2 = actionParameterBuffer.Dequeue();
+                var inspectedObjName = inspectParam1.Item1.Replace("str|", "");
+                var viewAngleIndex = Convert.ToInt32(inspectParam2.Item1.Replace("int|", ""));
                 Inspect(viewAngleIndex, inspectedObjName, onLeft);
                 break;
         }
@@ -445,17 +494,45 @@ public class DialogueAgent : Agent
 
         // Changes made to environment, Perception cameras need capture again
         EnvEntity.annotationStorage.annotationsUpToDate = false;
+        yield return StartCoroutine(CaptureAnnotations());
 
-        // Waiting several more frames to ensure visual observations (containing action
-        // post-conditions) are properly captured
-        for (var i=0; i < 10; i++)
-            yield return null;
+        // Report action effect to self iff the learner agent has carried out this action
+        if (actionEffect.Length > 0)
+        {
+            var demRefsSelf = new Dictionary<(int, int), EntityRef>();
+            var demRefsBroadcast = new Dictionary<(int, int), float[]>();
+            // Wait for masks to be updated if needed
+            if (referencedEntities is not null && referencedEntities.Count > 0)
+            {
+                foreach (var (range, ent) in referencedEntities)
+                {
+                    demRefsSelf[range] = new EntityRef(GetSensorMask(ent));
+                    demRefsBroadcast[range] = demRefsSelf[range].maskRef;
+                }
+            }
+
+            // To self and broadcast to others
+            if (this is StudentAgent)
+            {
+                // Student: Recording action effect and send to self's backend
+                backendMsgChannel.SendMessageToBackend(
+                    dialogueParticipantID, actionEffect, demRefsSelf
+                );
+                // Send a null message as content-less ping, so that student will
+                // request next step's decision from backend
+                incomingMsgBuffer.Enqueue(null);
+            }
+            // Student & Teacher: Broadcast action effect to student
+            dialogueChannel.CommitUtterance(
+                dialogueParticipantID, actionEffect, demRefsBroadcast
+            );
+        }
 
         // Reset flag on exit
         _acting = false;
     }
 
-    protected IEnumerator UtterThenAct(int actionType)
+    private IEnumerator UtterThenAct(int actionType)
     {
         // Coroutine that first invokes Utter(), waits until it finishes, and then
         // execute specified physical action
@@ -464,13 +541,21 @@ public class DialogueAgent : Agent
         yield return StartCoroutine(Act(actionType));
     }
 
-    private void PickUp(GameObject targetObj, bool withLeft)
+    private (string, Dictionary<(int, int), EnvEntity>) PickUp(EnvEntity targetEnt, bool withLeft)
     {
+        var directionString = withLeft ? "left" : "right";
+
+        // Action aftermath info; name of object picked up, pose of manipulator, masks
+        // of atomic parts contained in the object picked up
+        var actionEffect = $"# Effect: pick_up_{directionString}(";
+        var demRefs = new Dictionary<(int, int), EnvEntity>();
+
         // Pick up a target object on the tabletop with the specified hand
         var activeHand = withLeft ? leftHand : rightHand;
 
         // Move target object to hand position, reassign hand as the parent,
         // disable physics interaction
+        var targetObj = targetEnt.gameObject;
         targetObj.transform.parent = activeHand.transform;
         targetObj.transform.localPosition = Vector3.zero;
         if (_rotationCache.TryGetValue(targetObj.name, out var cachedRotation))
@@ -478,6 +563,33 @@ public class DialogueAgent : Agent
         var objRigidbody = targetObj.GetComponent<Rigidbody>();
         objRigidbody.isKinematic = true;
         objRigidbody.detectCollisions = false;
+
+        // Pose of moved manipulator, in camera coordinate
+        var camTr = _cameraSensor.Camera.transform;
+        var rot = Quaternion.Inverse(camTr.rotation) * activeHand.rotation;
+        var pos = camTr.InverseTransformPoint(activeHand.position);
+        var poseString = $"{rot.ToString("F4")},{pos.ToString("F4")}";
+        poseString = poseString.Replace("(", "").Replace(")", "").Replace(", ", "/");
+        actionEffect += poseString;
+
+        // Report Unity-side gameObject name of the picked up entity
+        actionEffect += "," + targetObj.name;
+
+        // Involved (atomic) EnvEntity masks after picking up
+        var offset = actionEffect.Length;
+        foreach (var ent in activeHand.GetComponentsInChildren<EnvEntity>())
+        {
+            if (!ent.isAtomic) continue;
+
+            var fragment = $",{ent.gameObject.name}";
+            var range = (offset + 1, offset + fragment.Length);
+            actionEffect += fragment;
+            demRefs[range] = ent;
+            offset += fragment.Length;
+        }
+        actionEffect += ")";
+
+        return (actionEffect, demRefs);
     }
 
     private void Drop(bool fromLeft)
@@ -530,7 +642,7 @@ public class DialogueAgent : Agent
         Physics.simulationMode = SimulationMode.FixedUpdate;
     }
 
-    private void Assemble(
+    private (string, Dictionary<(int, int), EnvEntity>) Assemble(
         string productName, string leftPoint, string rightPoint, bool rightToLeft
     )
     {
@@ -585,6 +697,8 @@ public class DialogueAgent : Agent
         Assert.IsNotNull(srcPoint); Assert.IsNotNull(tgtPoint);
 
         // Pose of moved manipulator before movement, in camera coordinate
+        // (Note to self: transform.InverseTransformPoint method returns properly transformed
+        // coordinate inv(R_tr)*(-t_tr+t_target). Well duh.)
         var camTr = _cameraSensor.Camera.transform;
         var rotBefore = Quaternion.Inverse(camTr.rotation) * srcHand.rotation;
         var posBefore = camTr.InverseTransformPoint(srcHand.position);
@@ -606,9 +720,8 @@ public class DialogueAgent : Agent
 
         // Queue manipulator pose change information to message to backend; pose (position,
         // quaternion) before, pose after
-        var directionString = rightToLeft ? "RightToLeft" : "LeftToRight";
-        var actionEffect = $"# Effect: Assemble{directionString}({beforeString},{afterString})";
-        dialogueChannel.CommitUtterance(dialogueParticipantID, actionEffect);
+        var directionString = rightToLeft ? "right_to_left" : "left_to_right";
+        var actionEffect = $"# Effect: assemble_{directionString}({beforeString},{afterString})";
 
         // Handles to subassembly objects held in source & target hands
         GameObject srcHeld = null; GameObject tgtHeld = null;
@@ -653,12 +766,14 @@ public class DialogueAgent : Agent
         // Move back the source hand to the original pose
         srcHand.localPosition = rightToLeft ? rightOriginalPosition : leftOriginalPosition;
         srcHand.localEulerAngles = Vector3.zero;
+
+        return (actionEffect, null);
     }
 
     private void Inspect(int viewIndex, string inspectedObjName, bool onLeft)
     {
         // Move the specified hand to 'observation' position, then rotate according to the
-        // specified viewing angle index. Index value of 16 indicates end of inspection,
+        // specified viewing angle index. Index value of 40 indicates end of inspection,
         // bring the hand back to the original position.
         var activeHand = onLeft ? leftHand : rightHand;
 

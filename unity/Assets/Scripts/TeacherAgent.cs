@@ -286,27 +286,6 @@ public class TeacherAgent : DialogueAgent
         EnvEntity.annotationStorage.annotationsUpToDate = false;
     }
 
-    public override void OnActionReceived(ActionBuffers actionBuffers)
-    {
-        if (actionBuffers.DiscreteActions[0] == 1)
-        {
-            if (actionBuffers.DiscreteActions[1] == 0)
-                // Just 'Utter' action only
-                StartCoroutine(Utter());
-            else
-                // Both 'Utter' action and some physical action queued; utter first
-                // then act (in order to send any mask annotations based on 'before'
-                // state)
-                StartCoroutine(UtterThenAct(actionBuffers.DiscreteActions[1]));
-        }
-        else
-        {
-            // No 'Utter' action needed, just Act
-            if (actionBuffers.DiscreteActions[1] != 0)
-                StartCoroutine(Act(actionBuffers.DiscreteActions[1]));
-        }
-    }
-
     public override void Heuristic(in ActionBuffers actionBuffers)
     {
         // Update annotation whenever needed

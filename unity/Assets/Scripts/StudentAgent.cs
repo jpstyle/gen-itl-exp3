@@ -1,4 +1,3 @@
-using UnityEngine;
 using Unity.MLAgents.Actuators;
 using Unity.MLAgents.SideChannels;
 
@@ -13,15 +12,6 @@ public class StudentAgent : DialogueAgent
         channelUuid = "a1a6b269-0dd3-442c-99c6-9c735ebe43e1";
         backendMsgChannel = new MessageSideChannel(channelUuid, this);
         SideChannelManager.RegisterSideChannel(backendMsgChannel);
-    }
-
-    public override void OnActionReceived(ActionBuffers actionBuffers)
-    {
-        if (actionBuffers.DiscreteActions[0] == 1)
-        {
-            // 'Utter' action
-            StartCoroutine(Utter());
-        }
     }
 
     public override void Heuristic(in ActionBuffers actionBuffers)

@@ -270,7 +270,7 @@ public class EnvEntity : MonoBehaviour
         return null;
     }
 
-    public static EnvEntity FindByMask(float[] msk, int displayId)
+    public static EnvEntity FindByMask(float[] msk, int displayId, bool rigidBodyOnly=false)
     {
         // Fetch EnvEntity with highest box-IoU on specified provided display (if exists).
         // Ideally we would use mask-IoU, but it takes too long and box-IoU is sufficiently
@@ -302,6 +302,9 @@ public class EnvEntity : MonoBehaviour
             var entBox = ent.boxes[displayId];
             if (!entBox.Overlaps(box)) continue;
 
+            // ReSharper disable once Unity.PerformanceCriticalCodeInvocation
+            if (rigidBodyOnly && !ent.gameObject.GetComponent<Rigidbody>()) continue;
+
             // Compute box intersection then IoU
             var intersectionX1 = Math.Max(entBox.x, box.x);
             var intersectionY1 = Math.Max(entBox.y, box.y);
@@ -328,7 +331,7 @@ public class EnvEntity : MonoBehaviour
         // represents an object instance (possibly not corresponding to any existing Unity
         // scene objects); create a new bogus EnvEntity and manually fill in the mask and
         // box annotation info
-        if (maxIoU < 0.9f)
+        if (maxIoU < 0.7f)
         {
             // Utilizing the max IoU as unique ID...
             var newUid = (int)(maxIoU * 1e6);

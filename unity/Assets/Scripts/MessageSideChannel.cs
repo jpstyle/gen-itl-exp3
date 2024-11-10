@@ -46,32 +46,40 @@ public class MessageSideChannel : SideChannel
         if (speaker == "System")
         {
             // Handle any calibration image requests
-            if (utterance.StartsWith("Calibration image request: "))
+            if (utterance.StartsWith("# Calibration image request: "))
             {
-                var request = utterance.Replace("Calibration image request: ", "");
+                var request = utterance.Replace("# Calibration image request: ", "");
                 _listeningAgent.calibrationImageRequest = Convert.ToInt32(request);
             }
 
             // Handle any part subtypes ordering request
-            if (utterance == "Subtype orderings request")
+            if (utterance == "# Subtype orderings request")
                 _listeningAgent.subtypeOrderingRequest = true;
 
             // Handle any ground-truth masks info requests
-            if (utterance.StartsWith("GT mask request: "))
+            if (utterance.StartsWith("# GT mask request: "))
             {
-                var requests = utterance.Replace("GT mask request: ", "");
+                var requests = utterance.Replace("# GT mask request: ", "");
                 foreach (var req in requests.Split(", "))
                     _listeningAgent.gtMaskRequests.Enqueue(req);
             }
 
             // Receive and store action parameters; string parameters (which are not
             // handled by MLAgent Package) are sent via this channel
-            if (utterance.StartsWith("Action parameters: "))
+            if (utterance.StartsWith("# Action parameters: "))
             {
-                var parameters = utterance.Replace("Action parameters: ", "");
+                var parameters = utterance.Replace("# Action parameters: ", "");
                 if (parameters != "")
-                    foreach (var prm in parameters.Split(", "))
-                        _listeningAgent.actionParameterBuffer.Enqueue(prm);
+                {
+                    var offset = 0;
+                    foreach (var prmString in parameters.Split(", "))
+                    {
+                        var prmRef = prmString == "str|@DemRef" ?
+                            demRefs[(offset+4, offset+11)] : null;
+                        _listeningAgent.actionParameterBuffer.Enqueue((prmString, prmRef));
+                        offset += prmString.Length + 2;
+                    }
+                }
             }
         }
 
@@ -81,7 +89,7 @@ public class MessageSideChannel : SideChannel
     }
 
     public void SendMessageToBackend(
-        string speaker, string utterance, Dictionary<(int, int), EntityRef> demRefs
+        string speaker, string utterance, Dictionary<(int, int), EntityRef> optionalDemRefs = null
     )
     {
         // Create OutgoingMessage instance (using for dispose at the end)
@@ -95,23 +103,27 @@ public class MessageSideChannel : SideChannel
         // start & end of corresponding demonstrative pronoun substring) and either
         // float[] ((soft) segmentation mask) or string (direct reference by string
         // name of EnvEntity)
-        foreach (var (range, demRef) in demRefs)
+        if (optionalDemRefs is not null)
         {
-            var (start, end) = range;
-            msgOut.WriteInt32(start); msgOut.WriteInt32(end);
-            switch (demRef.refType)
+            foreach (var (range, demRef) in optionalDemRefs)
             {
-                case EntityRefType.Mask:
-                    msgOut.WriteBoolean(true);
-                    msgOut.WriteFloatList(RleEncode(demRef.maskRef));
-                    break;
-                case EntityRefType.String:
-                    msgOut.WriteBoolean(false);
-                    msgOut.WriteString(demRef.stringRef);
-                    break;
-                default:
-                    // Shouldn't reach here but anyways
-                    throw new Exception("Invalid reference data type?");
+                var (start, end) = range;
+                msgOut.WriteInt32(start);
+                msgOut.WriteInt32(end);
+                switch (demRef.refType)
+                {
+                    case EntityRefType.Mask:
+                        msgOut.WriteBoolean(true);
+                        msgOut.WriteFloatList(RleEncode(demRef.maskRef));
+                        break;
+                    case EntityRefType.String:
+                        msgOut.WriteBoolean(false);
+                        msgOut.WriteString(demRef.stringRef);
+                        break;
+                    default:
+                        // Shouldn't reach here but anyways
+                        throw new Exception("Invalid reference data type?");
+                }
             }
         }
 
