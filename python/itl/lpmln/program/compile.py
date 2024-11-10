@@ -188,7 +188,7 @@ def _ground_and_index(prog):
     rules_obs = _Observer()
     ctl = clingo.Control(["--warn=none"])
     ctl.register_observer(rules_obs)
-    ctl.add("base", [], prog._pure_ASP_str())
+    ctl.add("base", [], prog.pure_ASP_str())
     ctl.ground([("base", [])])
 
     # All grounded atoms that are worth considering

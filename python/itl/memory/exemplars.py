@@ -132,8 +132,8 @@ class Exemplars:
         if conc_ind in self.object_3d:
             # Entry exists; interpret intent as adding contact points
             if contact_points is not None:
-                for cp_conc_ind, poses in contact_points.items():
-                    self.object_3d[conc_ind][3][cp_conc_ind] += poses
+                for cp_conc_ind, annos in contact_points.items():
+                    self.object_3d[conc_ind][3][cp_conc_ind] += annos
         else:
             # New entry
             if contact_points is None:

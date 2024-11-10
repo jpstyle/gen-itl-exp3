@@ -134,7 +134,7 @@ class Program:
         """
         return split_program(comp, atoms_map, grounded_rules_rel)
 
-    def _pure_ASP_str(self):
+    def pure_ASP_str(self):
         """
         Return string compilation into to pure ASP program string understandable by
         clingo. Primarily purpose is to ground the program to obtain a mapping between

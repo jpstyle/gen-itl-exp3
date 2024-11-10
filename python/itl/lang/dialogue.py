@@ -22,7 +22,7 @@ class DialogueManager:
         self.clause_info = {}       # Store any important information re. individual clauses
 
         # Each record is a 3-tuple of:
-        #   1) speaker: user ("U") or agent ("A")
+        #   1) speaker: user ("Teacher") or agent ("Student")
         #   2) logical form of utterance content
         #   3) original user input string
         self.record = []

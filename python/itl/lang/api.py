@@ -31,6 +31,8 @@ class LanguageModule:
 
         # Incorporate parsed scene graph into dialogue context
         for oi, obj in vis_scene.items():
+            if "pred_mask" not in obj: continue
+
             mask = obj["pred_mask"]
             self.dialogue.referents["env"][-1][oi] = {
                 "mask": mask,
@@ -41,7 +43,7 @@ class LanguageModule:
         # Register these indices as names, for starters
         self.dialogue.referent_names.update({ i: i for i in self.dialogue.referents["env"][-1] })
 
-    def understand(self, parses, pointing=None):
+    def understand(self, l_input, pointing=None):
         """
         Update dialogue state by interpreting the parsed NL input in the context
         of the ongoing dialogue.
@@ -50,113 +52,131 @@ class LanguageModule:
         the utterance, indicating the reference (represented as mask) made by the
         n'th occurrence of linguistic token. Mostly for programmed experiments.
         """
-        ti = len(self.dialogue.record)      # New dialogue turn index
-        new_record = []                     # New dialogue record for the turn
+        speakers, parses = l_input
+        ti = len(self.dialogue.record)      # Starting dialogue turn index
 
-        # New environment entities info for current timeframe
-        self.dialogue.referents["env"].append({ "_self": None, "_user": None})
-            # Always include self and user
+        # First segment language inputs into consecutive sequences of utterances
+        # given by same speakers (Doesn't do much in dialogues with only two
+        # participants, but for completeness' sake)
+        segments = []; consecutive_parses = []; last_speaker = None
+        for spk, parse in zip(speakers, parses):
+            if spk == last_speaker:
+                consecutive_parses.append(parse)
+            else:
+                # Speaker different from the last one, new speaker taking turn
+                # (except None speaker, which doesn't stand for any real one)
+                if last_speaker is not None:
+                    segments.append((last_speaker, consecutive_parses))
+                consecutive_parses = [parse]
+                last_speaker = spk
+        # Don't forget last consecutive segment
+        segments.append((last_speaker, consecutive_parses))
 
-        # For indexing clauses in dialogue turn
-        se2ci = defaultdict(lambda: len(se2ci))
+        for spk, parse_seq in segments:
+            # Record to be added for the turn
+            new_record = []
 
-        for si, parse in enumerate(parses):
-            clauses = parse["clauses"]
-            referents = parse["referents"]
-            source = parse["source"]
+            # For indexing clauses in dialogue turn
+            se2ci = defaultdict(lambda: len(se2ci))
 
-            ## Mapping referents to string identifiers within dialogue
-            # For indexing individual clauses
-            r2i = { ei: f"t{ti}c{se2ci[(si,ei)]}" for ei in clauses }
-            # For indexing referents within individual clauses
-            reindex_per_clause = { ei: 0 for ei in clauses }
-            for rf, v in referents.items():
-                if not rf.startswith("x"): continue
+            for si, parse in enumerate(parse_seq):
+                clauses = parse["clauses"]
+                referents = parse["referents"]
+                source = parse["source"]
 
-                ri_src_evt = r2i[v["source_evt"]]
-                referent_id = reindex_per_clause[v["source_evt"]]
-                reindex_per_clause[v["source_evt"]] += 1
-                r2i[rf] = f"{ri_src_evt}x{referent_id}"
+                ## Mapping referents to string identifiers within dialogue
+                # For indexing individual clauses
+                r2i = { ei: f"t{ti}c{se2ci[(si,ei)]}" for ei in clauses }
+                # For indexing referents within individual clauses
+                reindex_per_clause = { ei: 0 for ei in clauses }
+                for rf, v in referents.items():
+                    if not rf.startswith("x"): continue
 
-            # Add to the list of discourse referents
-            for rf, rf_info in referents.items():
-                if rf.startswith("x"):
-                    # Annotate instance referents (const terms)
-                    self.dialogue.referents["dis"][r2i[rf]] = {
-                        k: r2i.get(v, v) for k, v in rf_info.items()
-                    }
-                elif rf.startswith("e"):
-                    # Annotate eventuality referents (i.e. clauses)
-                    self.dialogue.clause_info[r2i[rf]] = {
-                        k: r2i.get(v, v) for k, v in rf_info.items()
-                    }
+                    ri_src_evt = r2i[v["source_evt"]]
+                    referent_id = reindex_per_clause[v["source_evt"]]
+                    reindex_per_clause[v["source_evt"]] += 1
+                    r2i[rf] = f"{ri_src_evt}x{referent_id}"
 
-            # Handle certain hard assignments
-            for rf, rf_info in referents.items():
-                if rf_info.get("dem_ref"):
-                    # Demonstrately referenced entities
-                    assert pointing is not None and len(pointing) > si
+                # Add to the list of discourse referents
+                for rf, rf_info in referents.items():
+                    if rf.startswith("x"):
+                        # Annotate instance referents (const terms)
+                        self.dialogue.referents["dis"][r2i[rf]] = {
+                            k: r2i.get(v, v) for k, v in rf_info.items()
+                        }
+                    elif rf.startswith("e"):
+                        # Annotate eventuality referents (i.e. clauses)
+                        self.dialogue.clause_info[r2i[rf]] = {
+                            k: r2i.get(v, v) for k, v in rf_info.items()
+                        }
 
-                    dem_mask = pointing[si][rf_info["dem_ref"]].astype(bool)
-                    pointed = self.dialogue.dem_point(dem_mask)
-                    self.dialogue.assignment_hard[r2i[rf]] = pointed
-            for _, _, ante, cons in clauses.values():
-                literals = ante + cons
-                for lit in literals:
-                    # Referenced by pronouns
-                    if lit[:2] == ("sp", "pronoun1"):
-                        self.dialogue.assignment_hard[r2i[lit[2][0]]] = "_user"
-                    if lit[:2] == ("sp", "pronoun2"):
-                        self.dialogue.assignment_hard[r2i[lit[2][0]]] = "_self"
+                # Handle certain hard assignments
+                for rf, rf_info in referents.items():
+                    if rf_info.get("dem_ref"):
+                        # Demonstrately referenced entities
+                        assert pointing is not None and len(pointing) > si
 
-            # ASP-compatible translation
-            for ev_id, (gq, bvars, ante, cons) in clauses.items():
-                if len(bvars) > 0:
-                    # See if any presuppositions can be extracted out of the content;
-                    # any literals that do not involve bound variables specified by
-                    # `bvars`
-                    presup = [
-                        l for l in ante if len(bvars & set(l[2])) == 0
-                    ] + [
-                        l for l in cons if len(bvars & set(l[2])) == 0
-                    ]
-                    ante = [l for l in ante if len(bvars & set(l[2])) > 0]
-                    cons = [l for l in cons if len(bvars & set(l[2])) > 0]
-                else:
-                    # No bound variables (not any type of quantification)
-                    assert gq is None
-                    presup = []
+                        dem_mask = pointing[si][rf_info["dem_ref"]].astype(bool)
+                        pointed = self.dialogue.dem_point(dem_mask)
+                        self.dialogue.assignment_hard[r2i[rf]] = pointed
+                for _, _, ante, cons in clauses.values():
+                    literals = ante + cons
+                    for lit in literals:
+                        # Referenced by pronouns
+                        if lit[:2] == ("sp", "pronoun1"):
+                            self.dialogue.assignment_hard[r2i[lit[2][0]]] = "_user"
+                        if lit[:2] == ("sp", "pronoun2"):
+                            self.dialogue.assignment_hard[r2i[lit[2][0]]] = "_self"
 
-                formatted_data = _map_and_format((bvars, ante, cons), referents, r2i)
+                # ASP-compatible translation
+                for ev_id, (gq, bvars, ante, cons) in clauses.items():
+                    if len(bvars) > 0:
+                        # See if any presuppositions can be extracted out of the content;
+                        # any literals that do not involve bound variables specified by
+                        # `bvars`
+                        presup = [
+                            l for l in ante if len(bvars & set(l[2])) == 0
+                        ] + [
+                            l for l in cons if len(bvars & set(l[2])) == 0
+                        ]
+                        ante = [l for l in ante if len(bvars & set(l[2])) > 0]
+                        cons = [l for l in cons if len(bvars & set(l[2])) > 0]
+                    else:
+                        # No bound variables (not any type of quantification)
+                        assert gq is None
+                        presup = []
 
-                mood = referents[ev_id]["mood"]
-                match mood:
-                    case "." | "~":
-                        # Propositions, infinitives
-                        pass        # Nothing special to do here
+                    formatted_data = _map_and_format((bvars, ante, cons), referents, r2i)
 
-                    case "?":
-                        # Questions
+                    mood = referents[ev_id]["mood"]
+                    match mood:
+                        case "." | "~":
+                            # Propositions, infinitives
+                            pass        # Nothing special to do here
 
-                        # Record turn-clause index of unanswered question
-                        self.dialogue.unanswered_Qs.add((ti, se2ci[(si, ev_id)]))
+                        case "?":
+                            # Questions
 
-                    case "!":
-                        # Commands
-                        
-                        # Record turn-clause index of unexecuted command
-                        self.dialogue.unexecuted_commands.add((ti, se2ci[(si, ev_id)]))
-                
-                    case _:
-                        # ???
-                        raise ValueError("Invalid sentence mood")
+                            # Record turn-clause index of unanswered question
+                            self.dialogue.unanswered_Qs.add((ti, se2ci[(si, ev_id)]))
 
-                new_record.append(((gq,)+formatted_data, source[ev_id], mood))
+                        case "!":
+                            # Commands
+                            
+                            # Record turn-clause index of unexecuted command
+                            self.dialogue.unexecuted_commands.add((ti, se2ci[(si, ev_id)]))
+                    
+                        case _:
+                            # ???
+                            raise ValueError("Invalid sentence mood")
 
-                if len(presup) > 0:
-                    raise NotImplementedError
+                    new_record.append(((gq,)+formatted_data, source[ev_id], mood))
 
-        self.dialogue.record.append(("U", new_record))    # Add new record
+                    if len(presup) > 0:
+                        raise NotImplementedError
+
+            self.dialogue.record.append((spk, new_record))    # Add new record
+            ti += 1         # New turn commences (if any further segments exist)
 
     def acknowledge(self):
         """ Push an acknowledging utterance to generation buffer """
@@ -189,7 +209,7 @@ class LanguageModule:
                     return_val.append(("generate", (surface_form, dem_refs)))
 
             # Dialogue record update
-            self.dialogue.record.append(("A", new_record))
+            self.dialogue.record.append(("Student", new_record))
 
             self.dialogue.to_generate = []
 

@@ -12,7 +12,9 @@ from skimage.morphology import opening, closing
 from skimage.measure import label
 from sklearn.cluster import KMeans
 from torchvision.ops import masks_to_boxes, box_convert
-from transformers import AutoImageProcessor, Dinov2Model, SamProcessor, SamModel
+from transformers import (
+    AutoImageProcessor, Dinov2Model, SamProcessor, SamModel, pipeline
+)
 
 from ..utils import blur_and_grayscale, visual_prompt_by_mask
 
@@ -55,8 +57,6 @@ class VisualSceneAnalyzer(nn.Module):
         following types of data for each recognized instance:
             1) a visual feature embedding
             2) an instance segmentation mask
-            3) a 'confidence' score, as to how certain the module is about the
-               quality of the mask returned 
         for each object (candidate) detected.
 
         Can be optionally provided with a list of additional segmentation masks
@@ -72,10 +72,8 @@ class VisualSceneAnalyzer(nn.Module):
         components. Then visual embeddings are extracted, and the confidence scores
         are computed with the provided binary classifiers.
 
-        If neither are provided, run ensemble prediction instead; i.e., first run
-        segmentation prediction conditioned with the general description of "an
-        object", recognize object instances as connected components, then extract
-        visual embeddings.
+        If neither are provided, run ensemble prediction instead; i.e., run the
+        'segment everything' pipeline, then extract visual embeddings.
         """
         # Preprocessing input image & prompts
         img_provided = image is not None
@@ -100,19 +98,9 @@ class VisualSceneAnalyzer(nn.Module):
             )
             dino_embs = dino_processed_input.last_hidden_state[:,1:]
 
-            # Prepare grid prompt for ensemble prediction
-            w_g = 3; h_g = 2
-            grid_points = [
-                [[orig_size[0] * i/(w_g+1), orig_size[1] * j/(h_g+1)]]
-                for i, j in product(range(1,w_g+1), range(1,h_g+1))
-            ]
-
             # Processing for promptable segmenter
-            sam_processed_input = self.sam_processor(
-                images=image, input_points=grid_points, return_tensors="pt"
-            )
+            sam_processed_input = self.sam_processor(images=image, return_tensors="pt")
             pixel_values = sam_processed_input.pixel_values.to(self.sam.device)
-            sam_grid_prompts = sam_processed_input.input_points.to(self.sam.device)
             sam_reshaped_size = sam_processed_input.reshaped_input_sizes.to(self.sam.device)
             sam_embs = self.sam.get_image_embeddings(
                 pixel_values=pixel_values, return_dict=True
@@ -123,7 +111,7 @@ class VisualSceneAnalyzer(nn.Module):
 
             # Cache image and processing results
             self.processed_img_cached = (
-                image, bg_image, dino_embs, sam_embs, sam_grid_prompts,
+                image, bg_image, dino_embs, sam_embs,
                 orig_size, sam_reshaped_size
             )
         else:
@@ -132,9 +120,8 @@ class VisualSceneAnalyzer(nn.Module):
             image = self.processed_img_cached[0]
             bg_image = self.processed_img_cached[1]
             sam_embs = self.processed_img_cached[3]
-            sam_grid_prompts = self.processed_img_cached[4]
-            orig_size = self.processed_img_cached[5]
-            sam_reshaped_size = self.processed_img_cached[6]
+            orig_size = self.processed_img_cached[4]
+            sam_reshaped_size = self.processed_img_cached[5]
 
         # Obtain masks in different manners according to the provided info
         if masks_provided:
@@ -158,46 +145,24 @@ class VisualSceneAnalyzer(nn.Module):
             masks_all = masks_int
 
         else:
-            # We don't really need ensemble prediction in our experiments though... Let's
-            # skip this for a while
-            masks_all = []
-
-            # # Condition with the grid of points prepared above to obtain a batch of mask
-            # # proposals, then postprocess by NMS to remove any duplicates
-            # w_o, h_o = orig_size
+            # Ensemble prediction. 'Segment everything' pipeline returns a list of
+            # candidate masks and corresponding scores, ranked in descending order.
+            # Masks may overlap, possibly delineating object wholes and parts.
+            sam_pipeline = pipeline(
+                model=self.sam,
+                image_processor=self.sam_processor.image_processor,
+                task="mask-generation",
+                points_per_crop=48,     # Less false negatives than the default (32)
+                device=self.sam.device
+            )
+            proposals = sam_pipeline(image, pred_iou_thresh=0.8)
+                # Less false negatives than the default (0.88)
             
-            # # Run SAM on grid
-            # sam_preds = self.sam(
-            #     image_embeddings=sam_embs.expand(len(sam_grid_prompts),-1,-1,-1),
-            #     input_points=sam_grid_prompts
-            # )
-            # sam_masks = self.sam_processor.image_processor.post_process_masks(
-            #     masks=sam_preds.pred_masks.cpu(),
-            #     original_sizes=[(h_o, w_o)]*len(sam_preds.pred_masks),
-            #     reshaped_input_sizes=sam_reshaped_size.expand(len(sam_preds.pred_masks), -1)
-            # )
-            # sam_masks = torch.stack(sam_masks).view(-1, h_o, w_o)
-            # valid_inds = torch.stack([msk.sum() > 0 for msk in sam_masks])
-            # sam_masks = sam_masks[valid_inds]
-
-            # # Collect masks and keep the largest chunks among the disconnected bits
-            # sam_masks = [label(msk.numpy(), return_num=True) for msk in sam_masks]
-            # sam_masks = [
-            #     max([msk==i+1 for i in range(num_chunks)], key=lambda x: x.sum())
-            #     for msk, num_chunks in sam_masks
-            # ]
-            # sam_masks = torch.stack([torch.tensor(msk) for msk in sam_masks])
-
-            # # Run NMS to remove duplicates with worse qualities
-            # sam_boxes = masks_to_boxes(sam_masks)
-            # sam_scores = sam_preds.iou_scores.cpu().view(-1)[valid_inds]
-            # kept_inds = batched_nms(
-            #     sam_boxes, sam_scores, torch.zeros(sam_boxes.shape[0]), 0.5
-            # )
-            # masks_all = [opening(closing(msk.numpy())) for msk in sam_masks[kept_inds]]
+            # Note: Returned masks are sorted by segmentation confidence score
+            masks_all = proposals["masks"]
 
         # Filter out invalid (empty or extremely small) masks
-        masks_all = [msk.astype(bool) for msk in masks_all if msk.sum() > 500]
+        masks_all = [msk.astype(bool) for msk in masks_all if msk.sum() > 150]
 
         # If we have valid masks, obtain visual feature embeddings corresponding to each
         # mask instance by applying a series of 'visual prompt engineering' process, and 
@@ -219,45 +184,8 @@ class VisualSceneAnalyzer(nn.Module):
             # Empty list of segmentation masks; occurs when search returned zero matches
             vis_embs = np.zeros((0, self.dino.config.hidden_size), dtype="float32")
             masks_all = np.zeros((0, image.height, image.width), dtype="float32")
-            scores_all = np.zeros((0,), dtype="float32")
 
-            return vis_embs, masks_all, scores_all
-
-        # Obtain the confidence scores, again in different manners according to the info
-        # provided
-        if masks_provided:
-            # Ground truths provided by external source (i.e., user), treat the provided
-            # masks as golden, i.e. having scores of 1.0
-            scores_all = [1.0] * len(masks)
-
-        elif search_conds_provided:
-            # Assess the quality of the masks found using the provided binary concept
-            # classifiers
-            scores_all = []
-            for emb in vis_embs:
-                agg_score = 1.0     # Start from 1.0 and keep taking t-norms (min here)
-                for conjunct in search_conds:
-                    # Obtain t-conorms (max here) across disjunct concepts in the conjunct
-                    conjunct_score = max(
-                        bin_clf.predict_proba(emb[None])[0][1].item() \
-                            if bin_clf is not None else 0.5
-                        for _, bin_clf in conjunct
-                    )
-                    # Obtain t-norm between the conjunct score and aggregate score
-                    agg_score = min(conjunct_score, agg_score)
-
-                # Append final score for the embedding
-                scores_all.append(agg_score)
-
-        else:
-            # See above for skipping ensemble prediction
-            scores_all = []
-
-            # # For ensemble prediction with the general text prompt, use the maximum float
-            # # values in each mask as confidence score
-            # scores_all = sam_scores[kept_inds].numpy().tolist()
-
-        return vis_embs, masks_all, scores_all
+        return vis_embs, masks_all
 
     def _conditioned_segment(self, exemplar_prompts):
         """

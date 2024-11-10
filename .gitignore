@@ -2,6 +2,7 @@
 /outputs
 /assets/*
 !/assets/domain_knowledge/
+!/assets/planning_encoding/
 xsession.log
 
 ## Python
