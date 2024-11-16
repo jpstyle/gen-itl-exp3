@@ -156,8 +156,17 @@ class ITLAgent:
         assert len(usr_in) == len(pointing) == len(speaker)
 
         if len(usr_in) > 0:
-            parsed_input = self.lang.semantic.nl_parse(usr_in, pointing)
-            self.lang.latest_input = (speaker, parsed_input)
+            if speaker == ["Teacher"] and usr_in == ["# Observing"]:
+                # Special case of user's acknowledgement signalled by silent
+                # observation. Clear the null item on the top of the agenda
+                # stack so that agent can proceed with the pending action plan.
+                if self.planner.agenda[0] == ('execute_command', (None, None)):
+                    self.planner.agenda.pop(0)
+                self.lang.latest_input = None
+            else:
+                # General case NL input
+                parsed_input = self.lang.semantic.nl_parse(usr_in, pointing)
+                self.lang.latest_input = (speaker, parsed_input)
         else:
             self.lang.latest_input = None
 

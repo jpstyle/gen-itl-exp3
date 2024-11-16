@@ -52,10 +52,12 @@ missile_truck:
         - [["wheel"], [["large_wheel", true, [0]]]]
 
 dump_truck:
-    exists:
-        - [["hemtt_cabin"], []]
     forall:
         - [["fender"], [["gold", true, [0]]]]
+
+container_truck:
+    exists:
+        - [["fender"], [["double_fender", true, [0]]]]
 
 fire_truck:
     exists:

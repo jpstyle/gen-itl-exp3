@@ -28,6 +28,14 @@ base_truck:
 dump_truck:
     supertype: truck
     parts:
+        cabin: quad_cabin
+        load: dumper
+    part_attributes: null
+
+container_truck:
+    supertype: truck
+    parts:
+        cabin: hemtt_cabin
         load: dumper
     part_attributes: null
 

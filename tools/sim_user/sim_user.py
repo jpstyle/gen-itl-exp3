@@ -18,6 +18,39 @@ singularize = inflect.engine().singular_noun
 pluralize = inflect.engine().plural
 
 MATCH_THRES = 0.9
+VALID_JOINS = {
+    (("wheel", "bolt"), ("bolt", "bolt")),
+    (("fl_fender", "wheel"), ("wheel", "bolt")),
+    (("fl_fender", "wheel"), ("bolt", "bolt")),
+    (("fr_fender", "wheel"), ("wheel", "bolt")),
+    (("fr_fender", "wheel"), ("bolt", "bolt")),
+    (("bl_fender", "wheel"), ("wheel", "bolt")),
+    (("bl_fender", "wheel1"), ("wheel", "bolt")),
+    (("bl_fender", "wheel1"), ("bolt", "bolt")),
+    (("bl_fender", "wheel2"), ("wheel", "bolt")),
+    (("bl_fender", "wheel2"), ("bolt", "bolt")),
+    (("br_fender", "wheel"), ("wheel", "bolt")),
+    (("br_fender", "wheel1"), ("wheel", "bolt")),
+    (("br_fender", "wheel1"), ("bolt", "bolt")),
+    (("br_fender", "wheel2"), ("wheel", "bolt")),
+    (("br_fender", "wheel2"), ("bolt", "bolt")),
+    (("chassis_front", "cabin1"), ("cabin", "front1")),
+    (("chassis_front", "cabin1"), ("bolt", "bolt")),
+    (("chassis_front", "cabin2"), ("bolt", "bolt")),
+    (("chassis_front", "lfw"), ("fl_fender", "wheel")),
+    (("chassis_front", "rfw"), ("fr_fender", "wheel")),
+    (("chassis_back", "load"), ("load", "back")),
+    (("chassis_back", "load"), ("bolt", "bolt")),
+    (("chassis_back", "lfw0"), ("bl_fender", "wheel")),
+    (("chassis_back", "lfw1"), ("bl_fender", "wheel1")),
+    (("chassis_back", "rfw0"), ("bl_fender", "wheel")),
+    (("chassis_back", "rfw1"), ("br_fender", "wheel1")),
+    (("chassis_front", "center"), ("chassis_center", "front")),
+    (("chassis_front", "center"), ("bolt", "bolt")),
+    (("chassis_center", "back"), ("chassis_back", "center")),
+    (("chassis_center", "back"), ("bolt", "bolt")),
+}
+VALID_JOINS |= {(p2, p1) for p1, p2 in VALID_JOINS}     # Symmetric
 
 class SimulatedTeacher:
     
@@ -75,7 +108,14 @@ class SimulatedTeacher:
         Preparation of a new interaction episode, comprising random initialization
         of the task for the episode and queueing of target concepts to teach
         """
-        self.current_episode_record = {}
+        self.current_episode_record = {
+            # Track state of ongoing assembly progress, either observed or demonstrated
+            "assembly_state": {
+                "left": None, "right": None,
+                "subassemblies": defaultdict(set),
+                "aliases": {}
+            }
+        }
         self.target_task = target_task
 
         # These constraints are always included in order to account for physically
@@ -169,9 +209,6 @@ class SimulatedTeacher:
                 # Sample a valid workplan for demonstration and load for execution
                 sampled_plan = _sample_demo_plan(copy.deepcopy(sampled_parts))
                 self.ongoing_demonstration = sampled_plan
-                self.assembly_state = {
-                    "left": None, "right": None, "subassemblies": defaultdict(set)
-                }
 
                 # Notify agent that user will demonstrate how to build one
                 response.append((
@@ -204,7 +241,7 @@ class SimulatedTeacher:
                     # Keep popping and executing plan actions until plan is empty
                     act_type, act_params = self.ongoing_demonstration.pop(0)
                     # Shortcuts
-                    assem_st = self.assembly_state
+                    assem_st = self.current_episode_record["assembly_state"]
                     subassems = assem_st["subassemblies"]
 
                     # Annotate physical action to be executed for this step, communicated
@@ -222,10 +259,7 @@ class SimulatedTeacher:
                             "utterance": f"{act_str_prefix}({target})",
                             "pointing": { crange: "/" + act_params[0] }
                         }
-                        if act_type.endswith("left"):
-                            assem_st["left"] = target
-                        else:
-                            assem_st["right"] = target
+                        assem_st["left" if act_type.endswith("left") else "right"] = target
                         if target not in subassems:
                             subassems[target].add(target)
 
@@ -268,12 +302,8 @@ class SimulatedTeacher:
                         act_anno = { "utterance": act_str, "pointing": dict(pointings) }
                         subassems[subassembly] = \
                             subassems.pop(assem_st["left"]) | subassems.pop(assem_st["right"])
-                        if act_type.endswith("left"):
-                            assem_st["left"] = subassembly
-                            assem_st["right"] = None
-                        else:
-                            assem_st["left"] = None
-                            assem_st["right"] = subassembly
+                        assem_st["left"] = subassembly if act_type.endswith("left") else None
+                        assem_st["right"] = None if act_type.endswith("left") else subassembly
 
                     elif act_type.startswith("inspect"):
                         # For inspect~ actions, provide integer index of (relative) viewpoint
@@ -304,14 +334,86 @@ class SimulatedTeacher:
                     response.append(("generate", act_anno))
                     if act_dscr is not None: response.append(("generate", act_dscr))
 
+            elif utt.startswith("# Action:"):
+                # Agent action intent; somewhat like reading into the agent's 'mind'
+                # for convenience's sake
+                assem_st = self.current_episode_record["assembly_state"]
+
+                if utt.startswith("# Action: pick_up"):
+                    # Obtain agent-side naming of the targetted object
+                    side, target = re.findall(r"# Action: pick_up_(.*)\((.*)\)$", utt)[0]
+                    assem_st[side] = target
+
+                if utt.startswith("# Action: assemble"):
+                    # Obtain intent of joining the target subassembly pairs at which
+                    # component parts
+                    _, params = re.findall(r"# Action: assemble_(.*)\((.*)\)$", utt)[0]
+                    _, _, part_left, part_right = params.split(",")
+                    assem_st["join_intent"] = (part_left, part_right)
+
+                response.append((None, None))
+
             elif utt.startswith("# Effect:"):
                 # Action effect feedback from Unity environment, determine whether the
                 # latest action was incorrect and agent needs to be interrupted
+                assem_st = self.current_episode_record["assembly_state"]
 
-                # Value of None stands for continuing observing agent's plan execution
-                # without interrupting (recall that if len(response)==0, current episode
-                # will be terminated; None is appended in order to prevent that)
-                response.append(None)
+                interrupted = False
+                if utt.startswith("# Effect: pick_up"):
+                    # Effect of pick up action
+                    side, effects = re.findall(r"# Effect: pick_up_(.*)\((.*)\)$", utt)[0]
+                    obj_picked_up = effects.split(",")[2]
+
+                    agent_side_alias = assem_st.pop(side)
+                    assem_st["aliases"][agent_side_alias] = obj_picked_up
+                    assem_st[side] = obj_picked_up
+
+                    if False:
+                        # Interrupt if agent has picked up an object not needed in the
+                        # desired goal structure, or if agent is holding a pair of objects
+                        # that should not be assembled
+                        interrupted = True
+
+                if utt.startswith("# Effect: assemble"):
+                    # Effect of assemble action; interested in closest contact points
+                    direction, effects = re.findall(r"# Effect: assemble_(.*)\((.*)\)$", utt)[0]
+                    if direction.endswith("left"):
+                        part_tgt, part_src = assem_st.pop("join_intent")
+                    else:
+                        part_src, part_tgt = assem_st.pop("join_intent")
+                    part_src = assem_st["aliases"][part_src]
+                    part_tgt = assem_st["aliases"][part_tgt]
+                    part_src, _ = re.findall(r"t_(.*)_(\d+)$", part_src)[0]
+                    part_tgt, _ = re.findall(r"t_(.*)_(\d+)$", part_tgt)[0]
+                    valid_joins = [
+                        ((part1, cp1), (part2, cp2))
+                        for (part1, cp1), (part2, cp2) in VALID_JOINS
+                        if part1 == part_src and part2 == part_tgt
+                    ]
+
+                    effects = effects.split(",")
+                    num_cp_pairs = int(effects[0])
+                    cp_pairs = effects[1:1+4*num_cp_pairs]
+                    cp_pairs = [cp_pairs[4*i:4*(i+1)] for i in range(num_cp_pairs)]
+                    cp_pairs = [
+                        (tuple(cp_src.split("/")), tuple(cp_tgt.split("/")))
+                        for cp_src, cp_tgt, _, _ in cp_pairs
+                    ]
+
+                    if False:
+                        # Interrupt if agent has assembled a pair of objects at incorrect
+                        # contact point, which is determined by checking whether top 3
+                        # contact point pairs contain a valid join for this episode's
+                        # goal structure.
+                        # (Do we also need to threshold the difference value? Do we want
+                        # to be more strict?)
+                        interrupted = True
+
+                    print(0)
+
+                if not interrupted:
+                    # No interruption needs to be made, keep observing...
+                    response.append(("generate", { "utterance": "# Observing", "pointing": {} }))
 
             elif utt == "OK.":
                 # No further interaction needed; effectively terminates current episode
@@ -642,7 +744,7 @@ def _sample_ASP(
 def _sample_demo_plan(sampled_parts):
     """
     Helper method factored out for sampling a valid assembly plan that builds
-    a valid instance of truck structure. Since we (and the teacher) already knows
+    a valid instance of truck structure. Since we (and the teacher) already know
     the desired structure, let's specify a partial order plan by a set of subgoals
     with precedence constraints and sample a valid instantiation accordingly.
     """

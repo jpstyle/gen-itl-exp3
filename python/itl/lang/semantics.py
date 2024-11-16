@@ -29,7 +29,8 @@ class SemanticParser:
             #   3) "# Action/Effect: {action_type}({parameters})"
             #   4) "This is a {concept_type}."
             #   5) "Pick up a {part_type}." or "Pick up the subassembly."
-            #   6) ...
+            #   6) "# Observing"
+            #   7) ...
             if re.match(r"Build a (.*)\.$", utt):
                 # 1) Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -184,6 +185,13 @@ class SemanticParser:
                     clauses = {}
                     referents = {}
                     source = { "e0": utt }
+
+            elif utt == "# Observing":
+                # Special input string signalling that the user is continuing
+                # observing agent's plan execution towards goal...
+                clauses = {}
+                referents = {}
+                source = { "e0": utt }
 
             else:
                 # Don't know how to process other patterns

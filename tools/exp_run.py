@@ -265,6 +265,8 @@ def main(cfg):
                             # actions and sending string messages via side channel
                             action = b_spec.action_spec.empty_action(1)
                             for act_type, act_params in act_out:
+                                if act_type is None: continue       # Nothing to do
+
                                 if act_type == "generate":
                                     action.discrete[0][0] = 1       # 'Utter' action
                                     utterance = act_params[0]
@@ -326,10 +328,9 @@ def main(cfg):
                         if len(user_response) > 0:
                             action = b_spec.action_spec.empty_action(1)
                             for act_data in user_response:
-                                # Interpret None value as silent observation
-                                if act_data is None: continue
-
                                 act_type, act_params = act_data
+                                if act_type is None: continue       # Nothing to do
+
                                 if act_type == "generate":
                                     # 'Utter' action
                                     action.discrete[0][0] = 1
