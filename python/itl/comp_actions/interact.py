@@ -13,12 +13,12 @@ import yaml
 import torch
 import numpy as np
 import networkx as nx
+from numpy.linalg import inv
 from clingo import Control, SymbolType, Number, Function
 
 from ..vision.utils import (
-    xyzw2wxyz, flip_position_y, flip_quaternion_y,
-    blur_and_grayscale, visual_prompt_by_mask, pose_estimation_with_mask,
-    transformation_matrix
+    xyzw2wxyz, flip_position_y, flip_quaternion_y, rmat2quat,
+    blur_and_grayscale, visual_prompt_by_mask, transformation_matrix
 )
 from ..lpmln import Literal
 from ..lpmln.utils import flatten_cons_ante, wrap_args
@@ -171,6 +171,14 @@ def execute_command(agent, action_spec):
     """
     action_type, action_params = action_spec
 
+    if action_type is None:
+        # Special token representing the policy 'wait until teacher reaction,
+        # either by silent observation or interruption for corrective feedback'.
+        # Block execution of remaining plan steps, looping indefinitely until
+        # teacher's reaction.
+        agent.planner.agenda.insert(0, ("execute_command", (None, None)))
+        return [(None, None)]
+
     # Currently considered commands: some long-term commands that requiring
     # long-horizon planning (e.g., 'build'), and some primitive actions that
     # are to be executed---that is, signaled to Unity environment---immediately
@@ -181,13 +189,21 @@ def execute_command(agent, action_spec):
             return
 
         case "pick_up_left" | "pick_up_right":
-            return _execute_pick_up(agent, action_name, action_params)
+            agent_action = _execute_pick_up(agent, action_name, action_params)
+            # Wait before executing the rest of the plan until teacher reacts
+            # (either with silent observation or interruption)
+            agent.planner.agenda.insert(0, ("execute_command", (None, None)))
+            return agent_action
 
         case "drop_left" | "drop_right":
             return _execute_drop(agent, action_name)
 
         case "assemble_right_to_left" | "assemble_left_to_right":
-            return _execute_assemble(agent, action_name, action_params)
+            agent_action = _execute_assemble(agent, action_name, action_params)
+            # Wait before executing the rest of the plan until teacher reacts
+            # (either with silent observation or interruption)
+            agent.planner.agenda.insert(0, ("execute_command", (None, None)))
+            return agent_action
 
 def _execute_build(agent, action_params):
     """
@@ -458,7 +474,8 @@ def _execute_build(agent, action_params):
     # of 'precedence constraints'.
     scope_implications = { n: set() for n in connection_graph }
 
-    replan_attempts = 0
+    valid_joins_cached = set(); invalid_joins_cached = set()
+    replan_attempts = 0; query_count = 0
     # Continue until the target structure is fully compressed and planned for    
     while len(compression_graph) > 1:
         # Subsample designated number of nodes by BFS from each leaf node.
@@ -514,7 +531,13 @@ def _execute_build(agent, action_params):
             sa_ind = 0
             join_sequence = []
             replan_attempts += 1
-            print(f"Deadend reached; starting from scratch... ({replan_attempts})")
+            query_count += collision_checker.query_count
+            valid_joins_cached |= collision_checker.valid_joins
+            invalid_joins_cached |= collision_checker.invalid_joins
+            log_msg = f"Attempt #{replan_attempts}: "
+            log_msg += "Deadend reached; starting from scratch... "
+            log_msg += f"({query_count} calls total)"
+            print(log_msg)
             continue
 
         chunk_subgraph = compression_graph.subgraph(chunk_selected)
@@ -523,7 +546,8 @@ def _execute_build(agent, action_params):
         collision_checker = _PhysicalAssemblyPropagator(
             (connection_graph, connect_edges),
             (dict(assembly_hierarchy.nodes(data=True)), nonobj_ids),
-            (collision_table, part_names, cp_oracle)
+            (collision_table, part_names, cp_oracle),
+            (valid_joins_cached, invalid_joins_cached)
         )
         plan_ctl = Control(["--warn=none"])
         plan_ctl.register_propagator(collision_checker)
@@ -613,7 +637,13 @@ def _execute_build(agent, action_params):
             sa_ind = 0
             join_sequence = []
             replan_attempts += 1
-            print(f"Deadend reached; starting from scratch... ({replan_attempts})")
+            query_count += collision_checker.query_count
+            valid_joins_cached |= collision_checker.valid_joins
+            invalid_joins_cached |= collision_checker.invalid_joins
+            log_msg = f"Attempt #{replan_attempts}: "
+            log_msg += "Deadend reached, starting from scratch... "
+            log_msg += f"({query_count} calls total)"
+            print(log_msg)
             continue
 
         # Project model into join action sequence and extract action
@@ -668,6 +698,13 @@ def _execute_build(agent, action_params):
 
         sa_ind += 1
 
+    replan_attempts += 1
+    query_count += collision_checker.query_count
+    log_msg = f"Attempt #{replan_attempts}: "
+    log_msg += "Working plan found "
+    log_msg += f"({query_count} calls total)"
+    print(log_msg)
+
     # Instantiate the high-level plan into an actual action sequence, with
     # all the necessary information fleshed out (to be passed to the Unity
     # environment as parameters)
@@ -693,9 +730,6 @@ def _execute_build(agent, action_params):
             action_sequence.append((
                 pick_up_action[empty_side], (pick_up_target,)
             ))
-
-            # Keep the joining direction as same as previous join
-            direction = occupied_side
         else:
             if any(held is not None for held in hands):
                 # One hand occupied, but held object needs to be dropped as
@@ -710,8 +744,29 @@ def _execute_build(agent, action_params):
             action_sequence.append((pick_up_action[0], (s1,)))
             action_sequence.append((pick_up_action[1], (s2,)))
 
-            # Random join direction
-            direction = random.randint(0, 1)
+        # Determine joining direction by comparing the degrees of the involved
+        # part nodes: smaller to larger. If the degrees are equal, break tie
+        # by comparing average neighbor degree.
+        deg_handle = lambda n: (
+            connection_graph.degree[n],
+            nx.average_neighbor_degree(connection_graph)[n]
+        )
+        if deg_handle(o1) >= deg_handle(o2):
+            # o1 is more 'central', o2 is more 'peripheral'; join o2 to o1
+            if s1 in hands:
+                direction = 1 if hands.index(None) == 0 else 0
+            elif s2 in hands:
+                direction = 0 if hands.index(None) == 0 else 1
+            else:
+                direction = 0
+        else:
+            # o2 is more 'central', o1 is more 'peripheral'; join o1 to o2
+            if s1 in hands:
+                direction = 0 if hands.index(None) == 0 else 1
+            elif s2 in hands:
+                direction = 1 if hands.index(None) == 0 else 0
+            else:
+                direction = 1
 
         # Join s1 and s2 at appropriate contact point
         node_o1 = obj2node_map[o1]; node_o2 = obj2node_map[o2]
@@ -720,9 +775,24 @@ def _execute_build(agent, action_params):
         cp_o2 = re.findall(r"p_(.*)_(.*)$", cp_o2)
         cp_o1 = (int(cp_o1[0][0]), int(cp_o1[0][1]))
         cp_o2 = (int(cp_o2[0][0]), int(cp_o2[0][1]))
-        action_sequence.append((
-            assemble_action[direction], (s1, s2, o1, o2, cp_o1, cp_o2, res)
-        ))
+        if s1 in hands:
+            if hands.index(None) == 0:
+                # s1 held in right hand
+                join_params = (s2, s1, o2, o1, cp_o2, cp_o1, res)
+            else:
+                # s1 held in left hand
+                join_params = (s1, s2, o1, o2, cp_o1, cp_o2, res)
+        elif s2 in hands:
+            if hands.index(None) == 0:
+                # s2 held in right hand
+                join_params = (s1, s2, o1, o2, cp_o1, cp_o2, res)
+            else:
+                # s2 held in left hand
+                join_params = (s2, s1, o2, o1, cp_o2, cp_o1, res)
+        else:
+            # Use join parameter order as-is
+            join_params = (s1, s2, o1, o2, cp_o1, cp_o2, res)
+        action_sequence.append((assemble_action[direction], join_params))
 
         # Update hands status
         hands = [None, None]
@@ -742,19 +812,22 @@ def _execute_build(agent, action_params):
     # Dict storing current progress (from agent's viewpoint)
     agent.assembly_progress = {
         "manipulator_states": [(None, None, None), (None, None, None)],
-        # Resp. left & right held object, manipulator pose, component masks
+            # Resp. left & right held object, manipulator pose, component masks
         "committed_parts": {
             oi: assembly_hierarchy.nodes[obj2node_map[oi]]["choice_conc"]
             for oi in connection_graph
         },
-        "subassembly_components": {}
+        "part_identifiers": {},
+            # Stores Unity-side identifiers mapped to individual atomic parts
+        "connection_graph": {}
     }
 
 class _PhysicalAssemblyPropagator:
-    def __init__(self, connections, objs_data, cheat_sheet):
+    def __init__(self, connections, objs_data, cheat_sheet, test_result_cached):
         connection_graph, contacts = connections
         nodes, nonobj_ids = objs_data
         collision_table, part_names, cp_names = cheat_sheet
+        valid_joins, invalid_joins = test_result_cached
 
         self.connection_graph = connection_graph
 
@@ -840,8 +913,14 @@ class _PhysicalAssemblyPropagator:
         self.assembly_status = None
 
         # For caching inclusion-minimal invalid object set pairs that
-        # cannot be joined
-        self.invalid_joins = set()
+        # can/cannot be joined
+        self.valid_joins = valid_joins
+        self.invalid_joins = invalid_joins
+
+        # Count of how many times the oracle was queried; in case we do not
+        # have any access to oracle and need to resort to some path planning
+        # algorithm, this number could bear more practical significance!
+        self.query_count = 0
 
     def init(self, init):
         # Storage of atoms of interest by argument & time step handle
@@ -935,14 +1014,24 @@ class _PhysicalAssemblyPropagator:
                 # Nothing about this join action has been updated, can skip
                 continue
 
-            # Bipartite atomic-atomic collision check, then union across
-            # the pairwise checks to obtain collision test result
             objs_s1 = frozenset(status["parts"][t][s1])
             objs_s2 = frozenset(status["parts"][t][s2])
-            
-            if len(objs_s1) == 0 or len(objs_s2) == 0:
-                # Vacuous join, always treat as 'not impossible' (i.e.,
-                # doesn't rule out model due to physical collision)
+
+            # Checking if join can be verified to be valid without querying
+            # the oracle. Note that if either of objs_s1 or objs_s2 is empty,
+            # the vacuous join will always be treated as 'not impossible';
+            # i.e., not ruled out due to physical collision.
+            for cached_s1, cached_s2 in self.valid_joins:
+                if objs_s1 <= cached_s1 and objs_s2 <= cached_s2:
+                    verified_by_cache = True
+                    break
+                if objs_s1 <= cached_s2 and objs_s2 <= cached_s1:
+                    verified_by_cache = True
+                    break
+            else:
+                verified_by_cache = False
+
+            if verified_by_cache:
                 join_possible = True
             else:
                 subset_cached_as_invalid = any(
@@ -954,17 +1043,23 @@ class _PhysicalAssemblyPropagator:
                     # Some subset pair recognized and cached as invalid
                     join_possible = False
                 else:
-                    # Test against table needed
+                    # Test against table needed; bipartite atomic-atomic
+                    # collision check, then union across the pairwise checks
+                    # to obtain collision test result
                     collision_directions = set.union(*[
                         self.collision_table.get((o_s1, o_s2), set())
                         for o_s1, o_s2 in product(objs_s1, objs_s2)
                     ])
+                    self.query_count += 1       # Update count
                     # Collision-free join is possible when the resultant
                     # union does not have six members, standing for each
                     # direction of assembly, hence a feasible join path
                     join_possible = len(collision_directions) < 6
 
-            if not join_possible:
+            if join_possible:
+                # Cache valid join
+                self.valid_joins.add(frozenset([objs_s1, objs_s2]))
+            else:
                 # Join of this subassembly pair proved to be unreachable
                 # while including current object members; add nogood
                 # as appropriate and return
@@ -985,6 +1080,7 @@ class _PhysicalAssemblyPropagator:
                     and control.propagate()
                 if not may_continue:
                     return
+                
 
     def undo(self, thread_id, assignment, changes):
         status = self.assembly_status[thread_id]
@@ -1062,22 +1158,40 @@ def _execute_pick_up(agent, action_name, action_params):
     to an instance, so the object can be referenced in this method.
     """
     target = action_params[0]
-    target_info = agent.vision.scene[target]
+    target_info = agent.vision.scene.get(target, {})
 
-    if "pred_mask" in target_info:
-        # Existing object, provide the segmentation mask as action parameter
-        # to the Unity environment
+    if target in agent.assembly_progress["connection_graph"]:
+        # Subassembly with name determined by agent, can provide the string
+        # name handle as parameter to Unity environment
         agent_action = [
             (action_name, {
-                "parameters": ("str|@DemRef",),     # Signals "provided as mask"
-                "pointing": { (4, 11): target_info["pred_mask"] }
-            })
+                "parameters": (f"str|{target}", "str|SA"), "pointing": {}
+            }),
+            ("generate", (f"# Action: {action_name}({target})", {}))
         ]
         manip_ind = 0 if action_name.endswith("left") else 1
-        manip_state = agent.assembly_progress["manipulator_states"][manip_ind]
         agent.assembly_progress["manipulator_states"][manip_ind] = \
-            (action_params[0],) + manip_state[1:]
-        agent.assembly_progress["subassembly_components"][target] = {target}
+            (action_params[0], None, None)
+
+    elif "env_name" in target_info:
+        # Existing atomic object, provide the environment side name
+        env_name = target_info["env_name"]
+        estim_type = agent.assembly_progress["committed_parts"][target]
+        estim_type = agent.lt_mem.lexicon.d2s[("pcls", estim_type)][0][1]
+        agent_action = [
+            (action_name, {
+                "parameters": (f"str|{env_name}", f"str|{estim_type}"),
+                "pointing": {}
+            }),
+            ("generate", (f"# Action: {action_name}({target})", {}))
+        ]
+        manip_ind = 0 if action_name.endswith("left") else 1
+        agent.assembly_progress["manipulator_states"][manip_ind] = \
+            (action_params[0], None, None)
+        singleton_gr = nx.DiGraph()
+        singleton_gr.add_node(target)
+        agent.assembly_progress["connection_graph"][target] = singleton_gr
+
     else:
         # Non-object, need to match an object labelled to be an instance of
         # the targetted concept
@@ -1096,78 +1210,43 @@ def _execute_drop(agent, action_name):
     of complications, no action parameters to consider; just signal the Unity
     environment.
     """
-    print(0)
+    agent_action = [(action_name, { "parameters": (), "pointing": {} })]
+    return agent_action
 
 def _execute_assemble(agent, action_name, action_params):
     """
     Assemble two subassemblies held in each manipulator at the designated objects
-    and contact points. Agent must provide transformation (3D pose difference)
-    of a manipulator that will achieve such join as action parameters to Unity,
-    as opposed to the user who knows the ground-truth name handles of objects
+    and contact points. Agent must provide desired transformation of the manipulator
+    to move, such that the movement will achieve such join as action parameters to
+    Unity---as opposed to the user who knows the ground-truth name handles of objects
     and contact points in the environment. Perform pose estimation of relevant
     objects from agent's visual input and compute pose difference. Necessary
     information must have been provided from Unity environment as 'effects' of
     previous actions.
     """
-    state_left = agent.assembly_progress["manipulator_states"][0]
-    state_right = agent.assembly_progress["manipulator_states"][1]
-    obj_left, pose_left, masks_left = state_left
-    obj_right, pose_right, masks_right = state_right
-    components_left = agent.assembly_progress["subassembly_components"][obj_left]
-    components_right = agent.assembly_progress["subassembly_components"][obj_right]
-    types_left = {agent.assembly_progress["committed_parts"][c] for c in components_left}
-    types_right = {agent.assembly_progress["committed_parts"][c] for c in components_right}
+    obj_left, obj_right = action_params[:2]
+    part_left, part_right = action_params[2:4]
+    cp_left, cp_right = action_params[4:6]
+    product_name = action_params[6]
 
-    # Classify 'reference' components with the masks with the largest sizes on resp.
-    # left & right, then estimate poses
-    ref_mask_left = sorted(masks_left, reverse=True, key=lambda msk: msk.sum())[0]
-    ref_mask_right = sorted(masks_right, reverse=True, key=lambda msk: msk.sum())[0]
-    # Extracting visual features
-    scene_img = agent.vision.latest_inputs[-1]
-    visual_prompts = visual_prompt_by_mask(
-        scene_img, blur_and_grayscale(scene_img), [ref_mask_left, ref_mask_right]
-    )
-    vis_model = agent.vision.model; vis_model.eval()
-    with torch.no_grad():
-        f_vecs = []
-        for vp in visual_prompts:
-            vp_processed = vis_model.dino_processor(images=vp, return_tensors="pt")
-            vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
-            vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
-            f_vecs.append(vp_dino_out.pooler_output.cpu().numpy()[0])
-    # Few-shot classification, with choices constrained among concepts which are
-    # known (as agent deems it) to be included in the left/right objects
-    fs_pred_left = agent.vision.fs_conc_pred(agent.lt_mem.exemplars, f_vecs[0], "pcls")
-    fs_pred_right = agent.vision.fs_conc_pred(agent.lt_mem.exemplars, f_vecs[1], "pcls")
-    fs_pred_left = max(
-        probs := { c: pr for c, pr in enumerate(fs_pred_left) if c in types_left },
-        key=probs.get
-    )
-    fs_pred_right = max(
-        probs := { c: pr for c, pr in enumerate(fs_pred_right) if c in types_right },
-        key=probs.get
-    )
+    mnp_state_left = agent.assembly_progress["manipulator_states"][0]
+    mnp_state_right = agent.assembly_progress["manipulator_states"][1]
+    held_left, pose_mnp_left, poses_part_left = mnp_state_left
+    held_right, pose_mnp_right, poses_part_right = mnp_state_right
+    graph_left = agent.assembly_progress["connection_graph"][held_left]
+    graph_right = agent.assembly_progress["connection_graph"][held_right]
 
-    # Estimate poses of the reference components on each side
-    structure_3d_left = agent.lt_mem.exemplars.object_3d[fs_pred_left][:3]
-    structure_3d_right = agent.lt_mem.exemplars.object_3d[fs_pred_right][:3]
-    with torch.no_grad():
-        pose_estimation_per_view_left = pose_estimation_with_mask(
-            scene_img, ref_mask_left, vis_model, structure_3d_left,
-            agent.vision.camera_intrinsics
-        )
-        pose_estimation_per_view_right = pose_estimation_with_mask(
-            scene_img, ref_mask_right, vis_model, structure_3d_right,
-            agent.vision.camera_intrinsics
-        )
-    best_estimation_left = sorted(
-        pose_estimation_per_view_left, key=lambda x: x[1]+x[2], reverse=True
-    )[0]
-    best_estimation_right = sorted(
-        pose_estimation_per_view_right, key=lambda x: x[1]+x[2], reverse=True
-    )[0]
-    best_estimation_left = transformation_matrix(*best_estimation_left[0])
-    best_estimation_right = transformation_matrix(*best_estimation_right[0])
+    # Sanity checks
+    assert obj_left == held_left and obj_right == held_right
+    assert part_left in graph_left and part_right in graph_right
+
+    tmat_part_left = transformation_matrix(*poses_part_left[part_left])
+    tmat_part_right = transformation_matrix(*poses_part_right[part_right])
+
+    part_conc_left = agent.assembly_progress["committed_parts"][part_left]
+    part_conc_right = agent.assembly_progress["committed_parts"][part_right]
+    structure_3d_left = agent.lt_mem.exemplars.object_3d[part_conc_left]
+    structure_3d_right = agent.lt_mem.exemplars.object_3d[part_conc_right]
 
     # Relation among manipulator, object & contact point transformations:
     # [Tr. of contact point in global coordinate]
@@ -1178,10 +1257,101 @@ def _execute_assemble(agent, action_name, action_params):
     #   [Tr. of contact point in part local coordinate]
     #
     # Based on these relations, we first obtain [Tr. of contact point in global
-    # coordinate], then [Tr. of part instance in subassembly local coordinate],
-    # finally [Desired Tr. of manipulator in global coordinate] by equating
+    # coordinate] and [Tr. of part instance in subassembly local coordinate],
+    # then [Desired Tr. of manipulator in global coordinate] by equating
     # transforms of the two contact points of interest in global coordinate.
-    print(0)
+    tmat_cp_local_left = structure_3d_left[3][cp_left[0]][cp_left[1]][0]
+    tmat_cp_local_right = structure_3d_right[3][cp_right[0]][cp_right[1]][0]
+    tmat_cp_local_left = transformation_matrix(*tmat_cp_local_left)
+    tmat_cp_local_right = transformation_matrix(*tmat_cp_local_right)
+    if action_name.endswith("left"):
+        # Target is on left, move right manipulator
+        tmat_tgt_part = tmat_part_left
+        tmat_src_part = tmat_part_right
+        tmat_tgt_cp_local = tmat_cp_local_left
+        tmat_src_cp_local = tmat_cp_local_right
+        tmat_mnp_before = transformation_matrix(*pose_mnp_right)
+    else:
+        # Target is on right, move left manipulator
+        assert action_name.endswith("right")
+        tmat_tgt_part = tmat_part_right
+        tmat_src_part = tmat_part_left
+        tmat_tgt_cp_local = tmat_cp_local_right
+        tmat_src_cp_local = tmat_cp_local_left
+        tmat_mnp_before = transformation_matrix(*pose_mnp_left)
+    tmat_tgt_cp_global = tmat_tgt_part @ tmat_tgt_cp_local
+    tmat_part_offset = inv(tmat_mnp_before) @ tmat_src_part
+    tmat_mnp_desired = tmat_tgt_cp_global @ \
+        inv(tmat_part_offset @ tmat_src_cp_local)
+
+    # Update assembly progress state by joining the connection graphs, annotating
+    # the new edge with relative transformation between the two involved parts.
+    # Edge direction: target to source.
+    tmat_part_moved = tmat_mnp_desired @ tmat_part_offset
+    tmat_rel = inv(tmat_tgt_part) @ tmat_part_moved
+    graph_joined = nx.compose(graph_left, graph_right)
+    if action_name.endswith("left"):
+        graph_joined.add_edge(part_left, part_right, rel_tr=tmat_rel)
+    else:
+        graph_joined.add_edge(part_right, part_left, rel_tr=tmat_rel)
+    agent.assembly_progress["connection_graph"][product_name] = graph_joined
+    # Remove used objects from connection graph listing
+    del agent.assembly_progress["connection_graph"][obj_left]
+    del agent.assembly_progress["connection_graph"][obj_right]
+    # Update objects held in manipulators
+    src_side = 1 if action_name.endswith("left") else 0
+    tgt_side = 0 if action_name.endswith("left") else 1
+    agent.assembly_progress["manipulator_states"][src_side] = (None,) * 3
+    agent.assembly_progress["manipulator_states"][tgt_side] = \
+        (product_name, None, None)
+
+    # # Dev code for visually inspecting the result of the joining action;
+    # # uncomment, copy, paste and run in debugger for sanity check
+    # import open3d as o3d
+    # parts_sorted = list(nx.topological_sort(graph_joined))
+    # point_clouds = []
+    # for part in parts_sorted:
+    #     part_conc = agent.assembly_progress["committed_parts"][part]
+    #     pcl = agent.lt_mem.exemplars.object_3d[part_conc][0]
+    #     pcl = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl))
+    #     pcl.paint_uniform_color(np.random.rand(3))
+
+    #     connection_path = next(nx.shortest_simple_paths(
+    #         graph_joined, parts_sorted[0], part
+    #     ))
+    #     tmat_abs = np.eye(4)
+    #     while len(connection_path) > 1:
+    #         # Need to aggregate relative transformations
+    #         u = connection_path.pop(0)
+    #         v = connection_path[0]
+    #         tmat_rel = graph_joined.edges[(u, v)]["rel_tr"]
+    #         tmat_abs = tmat_rel @ tmat_abs
+
+    #     pcl.transform(tmat_abs)
+    #     point_clouds.append(pcl)
+    # o3d.visualization.draw_geometries(point_clouds)
+
+    # Deconstruct the desired transformation matrix into quaternion and position,
+    # serialized into action parameter string
+    rot_mnp_desired = flip_quaternion_y(rmat2quat(tmat_mnp_desired[:3,:3]))
+    pos_mnp_desired = flip_position_y(tmat_mnp_desired[:3,3].tolist())
+    rot_serialized = "/".join(f"{a:.4f}" for a in rot_mnp_desired)
+    pos_serialized = "/".join(f"{a:.4f}" for a in pos_mnp_desired)
+    agent_action = [
+        (action_name, {
+            "parameters": (
+                f"str|{product_name}",      # Also provide product name
+                f"floats|{rot_serialized}", f"floats|{pos_serialized}"
+            ),
+            "pointing": {}
+        }),
+        ("generate", (
+            f"# Action: {action_name}({','.join(action_params[:4])},{product_name})",
+            {})
+        )
+    ]
+
+    return agent_action
 
 def handle_action_effect(agent, effect):
     """
@@ -1194,35 +1364,79 @@ def handle_action_effect(agent, effect):
     action_name = int(effect_lit.name.split("_")[-1])
     action_name = agent.lt_mem.lexicon.d2s[("arel", action_name)][0][1]
 
-    referents = agent.lang.dialogue.referents       # Shortcut var
+    # Shortcut vars
+    referents = agent.lang.dialogue.referents
+    part_identifiers = agent.assembly_progress["part_identifiers"]
+
+    # Utility method for parsing serialized float lists passed as action effect
+    parse_floats = lambda ai: tuple(
+        float(v)
+        for v in referents["dis"][effect_lit.args[ai][0]]["name"].split("/")
+    )
 
     if action_name.startswith("pick_up"):
-        # Pick-up action effects: pose of moved manipulator, Unity gameObject
-        # name of the pick-up target (*not used by learner agent), masks of
-        # all atomic parts included in the pick-up target subassembly
-        manip_rotation, manip_translation, _, *component_objs = [
-            arg for arg, _ in effect_lit.args[2:]
-        ]
-        manip_rotation = flip_quaternion_y(xyzw2wxyz([
-            float(val)
-            for val in referents["dis"][manip_rotation]["name"].split("/")
-        ]))
-        manip_translation = flip_position_y([
-            float(val)
-            for val in referents["dis"][manip_translation]["name"].split("/")
-        ])
-        manip_pose = (manip_rotation, manip_translation)
-        component_masks = [
-            agent.vision.scene[obj]["pred_mask"] for obj in component_objs
-        ]
-
+        # Pick-up action effects: Unity gameObject name of the pick-up target*,
+        # pose of moved manipulator, poses of all atomic parts included in the
+        # pick-up target subassembly after picking up (*: not used by learner
+        # agent)
         manip_ind = 0 if action_name.endswith("left") else 1
         manip_state = agent.assembly_progress["manipulator_states"][manip_ind]
+        num_parts = int(referents["dis"][effect_lit.args[5][0]]["name"])
+
+        # Manipulator pose after picking up
+        manip_pose = (
+            flip_quaternion_y(xyzw2wxyz(parse_floats(3))),
+            flip_position_y(parse_floats(4))
+        )
+
+        # Track string identifiers referring to each part instance,
+        # which is revealed every time a singleton wrapper object
+        # is picked up in Unity environment (identifiable by number
+        # of parts whose poses are reported: 1 for singletons)
+        if num_parts == 1:
+            part_uid = referents["dis"][effect_lit.args[6][0]]["name"]
+            part_identifiers[part_uid] = manip_state[0]
+
+        # Poses of individual parts in the object picked up
+        part_poses = {}
+        for i in range(num_parts):
+            part_uid = referents["dis"][effect_lit.args[6+3*i][0]]["name"]
+            part_poses[part_identifiers[part_uid]] = (
+                flip_quaternion_y(xyzw2wxyz(parse_floats(6+3*i+1))),
+                flip_position_y(parse_floats(6+3*i+2))
+            )
+
         agent.assembly_progress["manipulator_states"][manip_ind] = \
-            (manip_state[0],) + (manip_pose, component_masks)
+            (manip_state[0],) + (manip_pose, part_poses)
 
     if action_name.startswith("assemble"):
-        print(1)
+        # Assemble action effects: closest contact point pairs after the joining
+        # movement*, pose of target-side manipulator, masks of all atomic parts
+        # included in the assembled product (*: not used by learner agent)
+        manip_ind = 0 if action_name.endswith("left") else 1
+        manip_state = agent.assembly_progress["manipulator_states"][manip_ind]
+        num_cp_pairs = int(referents["dis"][effect_lit.args[4][0]]["name"])
+        ind_offset = 5 + 4 * num_cp_pairs
+        num_parts = int(referents["dis"][effect_lit.args[ind_offset][0]]["name"])
+
+        # Target-site manipulator pose after joining
+        manip_pose = (
+            flip_quaternion_y(xyzw2wxyz(parse_floats(2))),
+            flip_position_y(parse_floats(3))
+        )
+
+        # Poses of individual parts in the object picked up
+        part_poses = {}; 
+        for i in range(num_parts):
+            arg_start_ind = ind_offset + 1 + 3 * i
+            part_uid = referents["dis"][effect_lit.args[arg_start_ind][0]]["name"]
+            part_poses[part_identifiers[part_uid]] = (
+                flip_quaternion_y(xyzw2wxyz(parse_floats(arg_start_ind+1))),
+                flip_position_y(parse_floats(arg_start_ind+2))
+            )
+
+        agent.assembly_progress["manipulator_states"][manip_ind] = \
+            (manip_state[0],) + (manip_pose, part_poses)
 
 def _answer_domain_Q(agent, utt_pointer, translated):
     """

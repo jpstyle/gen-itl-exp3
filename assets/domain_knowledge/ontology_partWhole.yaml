@@ -79,15 +79,3 @@ large_back_right_fw_unit:
         large_br_fender: 1
         large_wheel: 1
         bolt: 1
-
-double_back_left_fw_unit:
-    parts:
-        double_bl_fender: 1
-        normal_wheel: 2
-        bolt: 2
-
-double_back_right_fw_unit:
-    parts:
-        double_br_fender: 1
-        normal_wheel: 2
-        bolt: 2

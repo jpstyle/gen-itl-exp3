@@ -236,20 +236,20 @@ class VisualSceneAnalyzer(nn.Module):
 
         # Process zoomed images and extract features
         resize_multipliers = [
-            sqrt(lr_mask_area / z_msk.sum()) * dino_config.patch_size
-            for z_msk in masks
+            sqrt(lr_mask_area / msk.sum()) * dino_config.patch_size
+            for msk in masks
         ]
         images_processed = [
             dino_processor.preprocess(
-                images=[z_img], do_resize=True,
-                size={ "shortest_edge": int(mpl * min(z_img.width, z_img.height)) },
+                images=[img], do_resize=True,
+                size={ "shortest_edge": int(mpl * min(img.width, img.height)) },
                 return_tensors="pt"
             )
-            for z_img, mpl in zip(images, resize_multipliers)
+            for img, mpl in zip(images, resize_multipliers)
         ]
 
         patch_features = []; lr_masks = []; lr_dims = []
-        for pr_img, z_msk in zip(images_processed, masks):
+        for pr_img, msk in zip(images_processed, masks):
             # Extract patch-level features from the images and resize masks
             features = dino(
                 pr_img.pixel_values.to(dino.device), return_dict=True
@@ -275,7 +275,7 @@ class VisualSceneAnalyzer(nn.Module):
             ).permute(0,2,3,1)
             lr_height, lr_width = features.shape[1:3]
             mask_resized = cv.resize(
-                z_msk.astype(int), (lr_width, lr_height),
+                msk.astype(int), (lr_width, lr_height),
                 interpolation=cv.INTER_NEAREST_EXACT
             )
 

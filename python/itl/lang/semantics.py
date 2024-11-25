@@ -29,7 +29,8 @@ class SemanticParser:
             #   3) "# Action/Effect: {action_type}({parameters})"
             #   4) "This is a {concept_type}."
             #   5) "Pick up a {part_type}." or "Pick up the subassembly."
-            #   6) ...
+            #   6) "# Observing"
+            #   7) ...
             if re.match(r"Build a (.*)\.$", utt):
                 # 1) Imperative command to build an instance of the specified concept
                 # from parts available in the scene
