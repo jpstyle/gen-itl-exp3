@@ -282,7 +282,7 @@ public class DialogueAgent : Agent
         // Camera to which the CameraSensorComponent is attached
         yield return null;      // Wait for a frame to render
         _perCam.RequestCapture();
-        for (var i=0; i < 5; i++)
+        for (var i = 0; i < 5; i++)
             yield return null;
         // Waiting several more frames to ensure annotations were captured (This is
         // somewhat ad hoc indeed... but it works)
@@ -420,7 +420,6 @@ public class DialogueAgent : Agent
         _acting = true;
 
         var actionEffect = "";
-        var referencedEntities = new Dictionary<(int, int), EnvEntity>();
 
         // Coroutine that executes specified physical action
         switch (actionType)
@@ -432,24 +431,16 @@ public class DialogueAgent : Agent
                 var withLeft = actionType % 2 == 0;
                 var pickUpParam1 = actionParameterBuffer.Dequeue();
                 var targetName = pickUpParam1.Item1.Replace("str|", "");
-                EnvEntity targetEnt;
-                if (targetName == "@DemRef")
-                {
-                    var prmMask = pickUpParam1.Item2.maskRef;
-                    var screenMask = MaskCoordinateSwitch(prmMask, false);
-                    var targetDisplay = _cameraSensor.Camera.targetDisplay;
-                    targetEnt = EnvEntity.FindByMask(screenMask, targetDisplay, true);
-                    Assert.IsFalse(targetEnt.isBogus);
-                }
-                else
-                    targetEnt = EnvEntity.FindByObjectPath($"/{targetName}");
-                (actionEffect, referencedEntities) = PickUp(targetEnt, withLeft);
+                var targetEnt = EnvEntity.FindByObjectPath($"/{targetName}");
+                var pickUpParam2 = actionParameterBuffer.Dequeue();
+                var labelKey = pickUpParam2.Item1.Replace("str|", "");
+                actionEffect = PickUp(targetEnt, labelKey, withLeft);
                 break;
             case 4:
             case 5:
                 // DropLeft/Right action, parameter: ()
                 var fromLeft = actionType % 2 == 0;
-                Drop(fromLeft);
+                actionEffect = Drop(fromLeft);
                 break;
             case 6:
             case 7:
@@ -466,15 +457,25 @@ public class DialogueAgent : Agent
                     var leftPoint = assembleParam2.Item1.Replace("str|", "");
                     var assembleParam3 = actionParameterBuffer.Dequeue();
                     var rightPoint = assembleParam3.Item1.Replace("str|", "");
-                    (actionEffect, referencedEntities) = Assemble(
-                        productName, leftPoint, rightPoint, rightToLeft
-                    );
+                    actionEffect = Assemble(productName, leftPoint, rightPoint, rightToLeft);
                 }
                 else
                 {
                     Assert.IsTrue(assembleParam2.Item1.StartsWith("floats|"));
-                    var handTransform = assembleParam2.Item1
+                    var rotation = assembleParam2.Item1
                         .Replace("floats|", "").Split("/").Select(float.Parse).ToList();
+                    var rotationQuaternion = new Quaternion(
+                        rotation[1], rotation[2], rotation[3], rotation[0]
+                    );          // wxyz to xyzw
+                    var assembleParam3 = actionParameterBuffer.Dequeue();
+                    var position = assembleParam3.Item1
+                        .Replace("floats|", "").Split("/").Select(float.Parse).ToList();
+                    var positionVector3 = new Vector3(
+                        position[0], position[1], position[2]
+                    );          // xyz
+                    actionEffect = Assemble(
+                        productName, rotationQuaternion, positionVector3, rightToLeft
+                    );
                 }
                 break;
             case 8:
@@ -485,7 +486,7 @@ public class DialogueAgent : Agent
                 var inspectParam2 = actionParameterBuffer.Dequeue();
                 var inspectedObjName = inspectParam1.Item1.Replace("str|", "");
                 var viewAngleIndex = Convert.ToInt32(inspectParam2.Item1.Replace("int|", ""));
-                Inspect(viewAngleIndex, inspectedObjName, onLeft);
+                actionEffect = Inspect(viewAngleIndex, inspectedObjName, onLeft);
                 break;
         }
 
@@ -499,24 +500,12 @@ public class DialogueAgent : Agent
         // Report action effect to self iff the learner agent has carried out this action
         if (actionEffect.Length > 0)
         {
-            var demRefsSelf = new Dictionary<(int, int), EntityRef>();
-            var demRefsBroadcast = new Dictionary<(int, int), float[]>();
-            // Wait for masks to be updated if needed
-            if (referencedEntities is not null && referencedEntities.Count > 0)
-            {
-                foreach (var (range, ent) in referencedEntities)
-                {
-                    demRefsSelf[range] = new EntityRef(GetSensorMask(ent));
-                    demRefsBroadcast[range] = demRefsSelf[range].maskRef;
-                }
-            }
-
             // To self and broadcast to others
             if (this is StudentAgent)
             {
                 // Student: Recording action effect and send to self's backend
                 backendMsgChannel.SendMessageToBackend(
-                    dialogueParticipantID, actionEffect, demRefsSelf
+                    dialogueParticipantID, actionEffect
                 );
                 // Send a null message as content-less ping, so that student will
                 // request next step's decision from backend
@@ -524,7 +513,7 @@ public class DialogueAgent : Agent
             }
             // Student & Teacher: Broadcast action effect to student
             dialogueChannel.CommitUtterance(
-                dialogueParticipantID, actionEffect, demRefsBroadcast
+                dialogueParticipantID, actionEffect
             );
         }
 
@@ -541,14 +530,13 @@ public class DialogueAgent : Agent
         yield return StartCoroutine(Act(actionType));
     }
 
-    private (string, Dictionary<(int, int), EnvEntity>) PickUp(EnvEntity targetEnt, bool withLeft)
+    private string PickUp(EnvEntity targetEnt, string labelKey, bool withLeft)
     {
         var directionString = withLeft ? "left" : "right";
 
-        // Action aftermath info; name of object picked up, pose of manipulator, masks
-        // of atomic parts contained in the object picked up
+        // Action aftermath info to return; name of object picked up, pose of
+        // manipulator, poses of atomic parts contained in the object picked up
         var actionEffect = $"# Effect: pick_up_{directionString}(";
-        var demRefs = new Dictionary<(int, int), EnvEntity>();
 
         // Pick up a target object on the tabletop with the specified hand
         var activeHand = withLeft ? leftHand : rightHand;
@@ -564,6 +552,9 @@ public class DialogueAgent : Agent
         objRigidbody.isKinematic = true;
         objRigidbody.detectCollisions = false;
 
+        // Report Unity-side gameObject name of the picked up entity
+        actionEffect += targetObj.name + ",";
+
         // Pose of moved manipulator, in camera coordinate
         var camTr = _cameraSensor.Camera.transform;
         var rot = Quaternion.Inverse(camTr.rotation) * activeHand.rotation;
@@ -572,40 +563,65 @@ public class DialogueAgent : Agent
         poseString = poseString.Replace("(", "").Replace(")", "").Replace(", ", "/");
         actionEffect += poseString;
 
-        // Report Unity-side gameObject name of the picked up entity
-        actionEffect += "," + targetObj.name;
-
-        // Involved (atomic) EnvEntity masks after picking up
-        var offset = actionEffect.Length;
+        // Some invariants re. provided string label key
+        if (labelKey == "SA")
+            // Pick-up target is a non-atomic subassembly
+            Assert.IsTrue(targetEnt.closestChildren.Count > 1);
+        else
+            // Pick-up target is an atomic part, where labelKey value of "GT" would
+            // act as 'skeleton key' that would always fetch ground-truth pose
+            Assert.IsTrue(targetEnt.closestChildren.Count == 1);
+        
+        // Involved (atomic) EnvEntity poses after picking up
+        var atomicPartCount = 0;
+        var partPosesString = "";
         foreach (var ent in activeHand.GetComponentsInChildren<EnvEntity>())
         {
             if (!ent.isAtomic) continue;
+            atomicPartCount++;
 
-            var fragment = $",{ent.gameObject.name}";
-            var range = (offset + 1, offset + fragment.Length);
-            actionEffect += fragment;
-            demRefs[range] = ent;
-            offset += fragment.Length;
+            // Unique identifier for tracking the part
+            partPosesString += $",{ent.uid}";
+
+            // 3D pose of the part
+            var partTr = ent.gameObject.transform;
+            var partRot = Quaternion.Inverse(camTr.rotation) * partTr.rotation;
+            var partPos = camTr.InverseTransformPoint(partTr.position);
+
+            // Add random perturbations to the ground-truth pose value if the target
+            // entity is an atomic part, where label key provided is not the skeleton
+            // key "GT" and is invalid. This simulates inaccurate pose estimation due
+            // to incorrect part type assumption.
+            if (labelKey != "GT" && labelKey != "SA")
+            {
+                if (!ent.licensedLabels.Contains(labelKey))
+                {
+                    partRot = Random.rotationUniform;
+                    partPos += Random.onUnitSphere * 0.1f;
+                }
+            }
+
+            var poseSerialized = $"{partRot.ToString("F4")},{partPos.ToString("F4")}";
+            poseSerialized = poseSerialized.Replace("(", "").Replace(")", "").Replace(", ", "/");
+            partPosesString += $",{poseSerialized}";
         }
-        actionEffect += ")";
+        actionEffect += $",{atomicPartCount}{partPosesString})";
 
-        return (actionEffect, demRefs);
+        return actionEffect;
     }
 
-    private void Drop(bool fromLeft)
+    private string Drop(bool fromLeft)
     {
+        var directionString = fromLeft ? "left" : "right";
+        
+        // Action aftermath info to return; none as of now
+        var actionEffect = $"# Effect: drop_{directionString}()";
+
         // Drop an object currently held in the specified hand onto the tabletop
         var activeHand = fromLeft ? leftHand : rightHand;
 
-        // Get handle of object (implicit assumption; max one item can be held per
-        // manipulator)
-        GameObject heldObj = null;
-        foreach (Transform tr in activeHand.transform)
-        {
-            heldObj = tr.gameObject;
-            break;
-        }
-        Assert.IsNotNull(heldObj);
+        // Get handle of object
+        var heldObj = activeHand.transform.GetChild(0).gameObject;
 
         // Cache the current local rotation so that it can be restored later
         _rotationCache[heldObj.name] = heldObj.transform.localRotation;
@@ -622,7 +638,7 @@ public class DialogueAgent : Agent
         else
         {
             xPos = _mainPartitionPosition.x + Random.Range(-0.21f, 0.21f);
-            zPos = _mainPartitionPosition.z + Random.Range(-0.08f, 0.12f);
+            zPos = _mainPartitionPosition.z + Random.Range(-0.06f, 0.12f);
         }
         var volume = GetBoundingVolume(heldObj);
         var yPos = _mainPartitionPosition.y + volume.extents.y + 0.06f;
@@ -635,17 +651,24 @@ public class DialogueAgent : Agent
         objRigidbody.isKinematic = false;
         objRigidbody.detectCollisions = true;
         Physics.simulationMode = SimulationMode.Script;
-        for (var i=0; i<2000; i++)
-        {
+        for (var i = 0; i < 2000; i++)
             Physics.Simulate(Time.fixedDeltaTime);
-        }
         Physics.simulationMode = SimulationMode.FixedUpdate;
+
+        return actionEffect;
     }
 
-    private (string, Dictionary<(int, int), EnvEntity>) Assemble(
+    private string Assemble(
         string productName, string leftPoint, string rightPoint, bool rightToLeft
     )
     {
+        var directionString = rightToLeft ? "right_to_left" : "left_to_right";
+
+        // Action aftermath info to return; poses (position, quaternion) of the
+        // manipulator before and after movement, poses of atomic parts contained
+        // in the assembled product
+        var actionEffect = $"# Effect: assemble_{directionString}(";
+
         // Assemble two subassemblies held in each hand as guided by the specified
         // target contact points, left-to-right or right-to-left
         var leftTargetParsed = leftPoint.Split("/");
@@ -675,8 +698,9 @@ public class DialogueAgent : Agent
         foreach (var candidateEnt in srcHand.GetComponentsInChildren<EnvEntity>())
         {
             if (candidateEnt.gameObject.name != srcAtomicPart) continue;
-            foreach (Transform candidatePt in candidateEnt.gameObject.transform)
+            for (var i = 0; i < candidateEnt.gameObject.transform.childCount; i++)
             {
+                var candidatePt = candidateEnt.gameObject.transform.GetChild(i);
                 if (candidatePt.gameObject.name != srcPointName) continue;
                 srcPoint = candidatePt;
                 break;
@@ -686,8 +710,9 @@ public class DialogueAgent : Agent
         foreach (var candidateEnt in tgtHand.GetComponentsInChildren<EnvEntity>())
         {
             if (candidateEnt.gameObject.name != tgtAtomicPart) continue;
-            foreach (Transform candidatePt in candidateEnt.gameObject.transform)
+            for (var i = 0; i < candidateEnt.gameObject.transform.childCount; i++)
             {
+                var candidatePt = candidateEnt.gameObject.transform.GetChild(i);
                 if (candidatePt.gameObject.name != tgtPointName) continue;
                 tgtPoint = candidatePt;
                 break;
@@ -718,33 +743,19 @@ public class DialogueAgent : Agent
         var afterString = $"{rotAfter.ToString("F4")},{posAfter.ToString("F4")}";
         afterString = afterString.Replace("(", "").Replace(")", "").Replace(", ", "/");
 
-        // Queue manipulator pose change information to message to backend; pose (position,
-        // quaternion) before, pose after
-        var directionString = rightToLeft ? "right_to_left" : "left_to_right";
-        var actionEffect = $"# Effect: assemble_{directionString}({beforeString},{afterString})";
+        actionEffect += $"{beforeString},{afterString}";
 
         // Handles to subassembly objects held in source & target hands
-        GameObject srcHeld = null; GameObject tgtHeld = null;
-        foreach (Transform tr in srcHand.transform)
-        {
-            srcHeld = tr.gameObject;
-            break;
-        }
-        foreach (Transform tr in tgtHand.transform)
-        {
-            tgtHeld = tr.gameObject;
-            break;
-        }
-        Assert.IsNotNull(srcHeld); Assert.IsNotNull(tgtHeld);
+        var srcHeld = srcHand.transform.GetChild(0).gameObject;
+        var tgtHeld = tgtHand.transform.GetChild(0).gameObject;
 
         // Obtain pre-assembly bounding volume for later repositioning of children parts
         var beforeVolume = GetBoundingVolume(tgtHeld);
 
         // Merge the two subassemblies, 'releasing' from source hand by reassigning
         // parent transforms of parts in the source subassembly
-        var childrenParts = new List<Transform>();
-        foreach (Transform tr in srcHeld.transform) childrenParts.Add(tr);
-        foreach (var tr in childrenParts) tr.parent = tgtHeld.transform;
+        for (var i = srcHeld.transform.childCount-1; i > -1; i--)
+            srcHeld.transform.GetChild(i).parent = tgtHeld.transform;
 
         // Obtain post-assembly bounding volume for later repositioning of children parts
         var afterVolume = GetBoundingVolume(tgtHeld);
@@ -760,30 +771,201 @@ public class DialogueAgent : Agent
 
         // Repositioning children prefabs in merged subassembly so the center of the
         // bounding volume becomes origin of the local space
-        foreach (Transform child in tgtHeld.transform)
-            child.position += beforeVolume.center - afterVolume.center;
+        for (var i = 0; i < tgtHand.transform.childCount; i++)
+            tgtHand.transform.GetChild(i).position += beforeVolume.center - afterVolume.center;
 
         // Move back the source hand to the original pose
         srcHand.localPosition = rightToLeft ? rightOriginalPosition : leftOriginalPosition;
         srcHand.localEulerAngles = Vector3.zero;
 
-        return (actionEffect, null);
+        // Involved (atomic) EnvEntity poses on target side after assembly
+        var atomicPartCount = 0;
+        var partPosesString = "";
+        foreach (var ent in tgtHand.GetComponentsInChildren<EnvEntity>())
+        {
+            if (!ent.isAtomic) continue;
+            atomicPartCount++;
+
+            // Unique identifier for tracking the part
+            partPosesString += $",{ent.uid}";
+
+            // 3D pose of the part
+            var partTr = ent.gameObject.transform;
+            var partRot = Quaternion.Inverse(camTr.rotation) * partTr.rotation;
+            var partPos = camTr.InverseTransformPoint(partTr.position);
+
+            var poseSerialized = $"{partRot.ToString("F4")},{partPos.ToString("F4")}";
+            poseSerialized = poseSerialized.Replace("(", "").Replace(")", "").Replace(", ", "/");
+            partPosesString += $",{poseSerialized}";
+        }
+        actionEffect += $",{atomicPartCount}{partPosesString})";
+
+        return actionEffect;
     }
 
-    private void Inspect(int viewIndex, string inspectedObjName, bool onLeft)
+    private string Assemble(
+        string productName, Quaternion targetRot, Vector3 targetPos, bool rightToLeft
+    )
+    {
+        var directionString = rightToLeft ? "right_to_left" : "left_to_right";
+
+        // Action aftermath info to return; pose of target-side manipulator, up to
+        // three closest contact point pairs and their pose (rotation and position)
+        // differences, poses of atomic parts contained in the assembled product
+        var actionEffect = $"# Effect: assemble_{directionString}(";
+
+        // Source & target hands appropriately determined by `rightToLeft` parameter
+        var srcHand = rightToLeft ? rightHand : leftHand;
+        var tgtHand = rightToLeft ? leftHand : rightHand;
+
+        // Desired rotation and position of manipulator to be moved are in the camera
+        // coordinate; cast to values in global coordinate and set manipulator pose
+        // accordingly
+        var camTr = _cameraSensor.Camera.transform;
+        srcHand.rotation = camTr.rotation * targetRot;
+        srcHand.position = camTr.TransformPoint(targetPos);
+
+        // Handles to subassembly objects held in source & target hands+
+        var srcHeld = srcHand.transform.GetChild(0).gameObject;
+        var tgtHeld = tgtHand.transform.GetChild(0).gameObject;
+
+        // Consider all possible bipartite matching of contact points included in
+        // each manipulator, compute rotation and position differences
+        var cpsSrc = srcHeld.GetComponent<EnvEntity>().closestChildren
+            .Select(ent => ent.gameObject.transform)
+            .SelectMany(tr => tr.Cast<Transform>().ToList())
+            .Where(obj => obj.name.StartsWith("cp_")).ToList();
+        var cpsTgt = tgtHeld.GetComponent<EnvEntity>().closestChildren
+            .Select(ent => ent.gameObject.transform)
+            .SelectMany(tr => tr.Cast<Transform>().ToList())
+            .Where(obj => obj.name.StartsWith("cp_")).ToList();
+        var cpPairs = new List<(GameObject, GameObject, float, float)>();
+        foreach (var cpTrSrc in cpsSrc)
+        foreach (var cpTrTgt in cpsTgt)
+        {
+            var cpSrc = cpTrSrc.gameObject;
+            var cpTgt = cpTrTgt.gameObject;
+            var positionDiff = Vector3.Distance(cpTrSrc.position, cpTrTgt.position);
+            var positionMatch = Mathf.Exp(
+                -Mathf.Pow(positionDiff, 2) / (2 * Mathf.Pow(0.05f, 2))
+            );      // Use Gaussian kernel with sigma of 0.1 to compute position match score 
+            var rotationMatch = Math.Abs(Quaternion.Dot(cpTrSrc.rotation, cpTrTgt.rotation));
+            cpPairs.Add((cpSrc, cpTgt, positionMatch, rotationMatch));
+        }
+
+        // 'Snap' by contact point pair with the smallest pose difference, equating
+        // their poses
+        cpPairs = cpPairs
+            .OrderByDescending(pair => pair.Item3 + pair.Item4).ToList();
+        var bestPair = cpPairs.First();
+        var bestCpSrc = bestPair.Item1.transform;
+        var bestCpTgt = bestPair.Item2.transform;
+
+        // Get relative pose (position & rotation) from source to target points, then
+        // further adjust manipulator pose to snap
+        var relativeRotation = bestCpTgt.rotation * Quaternion.Inverse(bestCpSrc.rotation);
+        srcHand.rotation = relativeRotation * srcHand.rotation;
+        var relativePosition = bestCpTgt.position - bestCpSrc.position;
+        srcHand.position += relativePosition;
+
+        // Obtain pre-assembly bounding volume for later repositioning of children parts
+        var beforeVolume = GetBoundingVolume(tgtHeld);
+
+        // Merge the two subassemblies, 'releasing' from source hand by reassigning
+        // parent transforms of parts in the source subassembly
+        for (var i = srcHeld.transform.childCount-1; i > -1; i--)
+            srcHeld.transform.GetChild(i).parent = tgtHeld.transform;
+
+        // Obtain post-assembly bounding volume for later repositioning of children parts
+        var afterVolume = GetBoundingVolume(tgtHeld);
+
+        // Finish merging by destroying source subassembly and renaming target subassembly
+        // with the provided string name
+        srcHeld.GetComponent<EnvEntity>().enabled = false;
+        Destroy(srcHeld);
+        tgtHeld.name = productName;
+
+        // Update children of resulting subassembly
+        tgtHeld.GetComponent<EnvEntity>().UpdateClosestChildren();
+
+        // Repositioning children prefabs in merged subassembly so the center of the
+        // bounding volume becomes origin of the local space
+        for (var i = 0; i < tgtHand.transform.childCount; i++)
+            tgtHand.transform.GetChild(i).position += beforeVolume.center - afterVolume.center;
+
+        // Move back the source hand to the original pose
+        srcHand.localPosition = rightToLeft ? rightOriginalPosition : leftOriginalPosition;
+        srcHand.localEulerAngles = Vector3.zero;
+
+        // Pose of target side manipulator, in camera coordinate
+        var rot = Quaternion.Inverse(camTr.rotation) * tgtHand.rotation;
+        var pos = camTr.InverseTransformPoint(tgtHand.position);
+        var poseString = $"{rot.ToString("F4")},{pos.ToString("F4")}";
+        poseString = poseString.Replace("(", "").Replace(")", "").Replace(", ", "/");
+        actionEffect += $"{poseString}";
+
+        // Report up to three contact point pairs with the closest distances 
+        var pairCount = 0;
+        var matchStrings = new List<string>();
+        foreach (var (cpSrc, cpTgt, positionMatch, rotationMatch) in cpPairs)
+        {
+            if (pairCount < 3)
+                pairCount++;
+            else
+                break;
+
+            var partTypeSrc = cpSrc.transform.parent.gameObject;
+            var partTypeTgt = cpTgt.transform.parent.gameObject;
+            var srcString = $"{partTypeSrc.name}/{cpSrc.name.Replace("cp_", "")}";
+            var tgtString = $"{partTypeTgt.name}/{cpTgt.name.Replace("cp_", "")}";
+            var posMatchString = positionMatch.ToString("F4");
+            var rotMatchString = rotationMatch.ToString("F4");
+            var matchString = $"{srcString},{tgtString},{posMatchString},{rotMatchString}";
+            matchStrings.Add(matchString);
+        }
+
+        actionEffect += $",{pairCount}";
+        foreach (var matchString in matchStrings) actionEffect += $",{matchString}";
+
+        // Involved (atomic) EnvEntity poses on target side after assembly
+        var atomicPartCount = 0;
+        var partPosesString = "";
+        foreach (var ent in tgtHand.GetComponentsInChildren<EnvEntity>())
+        {
+            if (!ent.isAtomic) continue;
+            atomicPartCount++;
+
+            // Unique identifier for tracking the part
+            partPosesString += $",{ent.uid}";
+
+            // 3D pose of the part
+            var partTr = ent.gameObject.transform;
+            var partRot = Quaternion.Inverse(camTr.rotation) * partTr.rotation;
+            var partPos = camTr.InverseTransformPoint(partTr.position);
+
+            var poseSerialized = $"{partRot.ToString("F4")},{partPos.ToString("F4")}";
+            poseSerialized = poseSerialized.Replace("(", "").Replace(")", "").Replace(", ", "/");
+            partPosesString += $",{poseSerialized}";
+        }
+        actionEffect += $",{atomicPartCount}{partPosesString})";
+
+        return actionEffect;
+    }
+
+    private string Inspect(int viewIndex, string inspectedObjName, bool onLeft)
     {
         // Move the specified hand to 'observation' position, then rotate according to the
         // specified viewing angle index. Index value of 40 indicates end of inspection,
         // bring the hand back to the original position.
+        var directionString = onLeft ? "left" : "right";
+
+        // Action aftermath info to return; 3d pose of the object being inspected,
+        // in camera coordinate
+        var actionEffect = $"# Effect: inspect_{directionString}(";
+
         var activeHand = onLeft ? leftHand : rightHand;
 
-        GameObject heldObj = null;
-        foreach (Transform tr in activeHand.transform)
-        {
-            heldObj = tr.gameObject;
-            break;
-        }
-        Assert.IsNotNull(heldObj);
+        var heldObj = activeHand.transform.GetChild(0).gameObject;
         Assert.IsTrue(heldObj.name == inspectedObjName);
 
         var distance = Vector3.Distance(
@@ -831,6 +1013,18 @@ public class DialogueAgent : Agent
             relativeViewPoint.localPosition = Vector3.forward * distance;
             relativeViewCenter.rotation = inspectOriginalRotation;
         }
+
+        // 3d pose of object in camera coordinate needed to adjust for ground-truth
+        // poses passed later
+        var camTr = _cameraSensor.Camera.transform;
+        var partTr = heldObj.transform.GetChild(0);
+        var rot = Quaternion.Inverse(camTr.rotation) * partTr.rotation;
+        var pos = camTr.InverseTransformPoint(partTr.position);
+        var poseString = $"{rot.ToString("F4")},{pos.ToString("F4")}";
+        poseString = poseString.Replace("(", "").Replace(")", "").Replace(", ", "/");
+        actionEffect += $"{poseString})";
+
+        return actionEffect;
     }
 
     protected static Bounds GetBoundingVolume(GameObject subassembly)

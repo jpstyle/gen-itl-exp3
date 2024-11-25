@@ -12,6 +12,11 @@ public class EnvEntity : MonoBehaviour
     // environment. This class is responsible for doing two things; 1) assigning
     // a unique identifier, 2) obtaining instance segmentation masks whenever needed
 
+    // List of natural language labels with which dialogue participants are allowed
+    // to refer to EnvEntity instances of the type. Defined only for atomic part
+    // objects.
+    public List<string> licensedLabels = new();
+    
     // Storage of segmentation masks, maintained as dictionary from target display
     // id to corresponding color32
     public Dictionary<int, Color32[]> masks;
@@ -36,7 +41,8 @@ public class EnvEntity : MonoBehaviour
     public static StorageEndpoint annotationStorage;
 
     // Storage of closest EnvEntity children; may be empty
-    private List<EnvEntity> _closestChildren;
+    [HideInInspector]
+    public List<EnvEntity> closestChildren;
 
     // Boolean flag whether this entity has its up-to-date segmentation masks (per camera)
     // computed and ready
@@ -76,13 +82,10 @@ public class EnvEntity : MonoBehaviour
         // search frontier stops expanding as soon as another EnvEntity instance is
         // encountered; result may be empty
         var closestChildren = new List<EnvEntity>();
-        
-        // A Unity peculiarity exploited here is that Transform component of a GameObject
-        // implements IEnumerable interface to enumerate its immediate children
-        // (Unity doesn't have a built-in method for enumerating immediate children of
-        // a GameObject, just (recursive) one for all descendants)
-        foreach (Transform tr in gObj.transform)
+
+        for (var i = 0; i < gObj.transform.childCount; i++)
         {
+            var tr = gObj.transform.GetChild(i);
             var childGObj = tr.gameObject;
             if (!childGObj.activeInHierarchy) continue;     // Disregard inactive gameObjects
 
@@ -90,7 +93,7 @@ public class EnvEntity : MonoBehaviour
             if (childEntity is null)
                 // If EnvEntity component not found, recurse on the child gameObject; otherwise,
                 // add to list and do not recurse further
-                closestChildren = closestChildren.Concat(ClosestChildren(tr.gameObject)).ToList();
+                closestChildren = closestChildren.Concat(ClosestChildren(childGObj)).ToList();
             else
             {
                 // If EnvEntity component disabled, disregard (gameObject likely to be destroyed)
@@ -143,7 +146,7 @@ public class EnvEntity : MonoBehaviour
             var extremitiesPerDisplay = new Dictionary<int, (float, float, float, float)>();
             var newMaskPerDisplay = new Dictionary<int,Color32[]>();
 
-            foreach (var cEnt in _closestChildren)
+            foreach (var cEnt in closestChildren)
             {
                 // Recursively call for the child entity to ensure its mask is computed
                 cEnt.UpdateAnnotations();
@@ -206,8 +209,8 @@ public class EnvEntity : MonoBehaviour
     public void UpdateClosestChildren()
     {
         // Find and store closest EnvEntity children at the time invoked
-        _closestChildren = ClosestChildren(gameObject);
-        isAtomic = _closestChildren.Count == 0;
+        closestChildren = ClosestChildren(gameObject);
+        isAtomic = closestChildren.Count == 0;
     }
     
     // Initialize static fields (in Unity, this is preferred rather than using the standard

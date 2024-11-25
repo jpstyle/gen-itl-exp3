@@ -177,9 +177,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3a611df269dde2ed0bb259fb39c2ea5a, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  licensedLabels:
+  - normal_wheel
   uid: 
   isAtomic: 0
   isBogus: 0
+  closestChildren: []
 --- !u!114 &3725844002290406638
 MonoBehaviour:
   m_ObjectHideFlags: 0

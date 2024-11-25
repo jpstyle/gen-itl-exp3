@@ -159,9 +159,13 @@ public class TeacherAgent : DialogueAgent
             targetTypes[("cabin", "t0")],
             partitions[0], 
             targetColors[("cabin", "t0")],
-            "t"
+            "t",
+            distractorGroups.Count == 0
         );
-        InstantiateLoad(targetTypes[("load", "t0")], partitions[1], "t");
+        InstantiateLoad(
+            targetTypes[("load", "t0")], partitions[1], "t",
+            distractorGroups.Count == 0
+        );
         InstantiateChassisFB(
             new List<int>
             {
@@ -169,13 +173,15 @@ public class TeacherAgent : DialogueAgent
                 targetTypes[("chassis_back", "t0")]
             },
             partitions[2],
-            "t"
+            "t",
+            distractorGroups.Count == 0
         );
         InstantiateChassisC(
             targetTypes[("chassis_center", "t0")],
             partitions[3],
             targetColors[("chassis_center", "t0")],
-            "t"
+            "t",
+            distractorGroups.Count == 0
         );
         InstantiateFenders(
             new List<int>
@@ -193,7 +199,8 @@ public class TeacherAgent : DialogueAgent
                 targetColors[("bl_fender", "t0")],
                 targetColors[("br_fender", "t0")]
             },
-            "t"
+            "t",
+            distractorGroups.Count == 0
         );
         InstantiateWheels(
             targetTypes
@@ -201,14 +208,16 @@ public class TeacherAgent : DialogueAgent
                 .OrderBy(x => x.Key.Item2)
                 .Select(x => x.Value).ToList(),
             partitions[5],
-            "t"
+            "t",
+            distractorGroups.Count == 0
         );
         InstantiateBolts(targetTypes
                 .Where(x => x.Key.Item1 == "bolt")
                 .OrderBy(x => x.Key.Item2)
                 .Select(x => x.Value).ToList(),
             partitions[6],
-            "t"
+            "t",
+            distractorGroups.Count == 0
         );
 
         for (var i=0; i<distractorGroups.Count; i++)
@@ -322,7 +331,8 @@ public class TeacherAgent : DialogueAgent
     private static void InstantiateAtomicPrefab(
         GameObject prefab, Material colorMaterial, GameObject partition,
         string wrapperName, string instanceName,
-        Vector3 wrapperPos, Vector3 wrapperRot, Vector3 prtRot
+        Vector3 wrapperPos, Vector3 wrapperRot, Vector3 prtRot,
+        bool licenseSupertypeLabel
     )
     {
         // Helper methods for initializing sampled parts on sampled locations
@@ -342,6 +352,15 @@ public class TeacherAgent : DialogueAgent
         // Instantiate provided cabin type with generalized name
         var prefabInstance = Instantiate(prefab, wrapper.transform);
         prefabInstance.name = instanceName;
+
+        // Add part supertype name (passed as instanceName parameter) to the list
+        // of licensed NL string names, if not already included
+        if (licenseSupertypeLabel)
+        {
+            var labelList = prefabInstance.GetComponent<EnvEntity>().licensedLabels;
+            if (!labelList.Contains(instanceName))
+                labelList.Add(instanceName);
+        }
 
         // Apply color to colorable meshes 
         foreach (var mesh in prefabInstance.GetComponentsInChildren<MeshRenderer>())
@@ -375,25 +394,28 @@ public class TeacherAgent : DialogueAgent
         partition.transform.eulerAngles = Vector3.zero;
     }
     private void InstantiateCabin(
-        int typeIndex, GameObject partition, int colorIndex, string identifier
+        int typeIndex, GameObject partition, int colorIndex, string identifier,
+        bool licenseSupertypeLabel = false
     )
     {
         // Define position w.r.t. partition coordinate
-        var xPosition = Random.Range(-0.04f, 0.04f);
-        var zPosition = Random.Range(-0.04f, 0.04f);
-        var wrapperPos = new Vector3(xPosition, 0f, zPosition);
+        var wrapperPos = Vector3.zero;
 
         // Apply random rotations to the parent partition object
-        var rotY = 180f * Random.Range(0, 2) + Random.Range(-5f, 5f);
+        var rotY = 90f * Random.Range(0, 4) + Random.Range(-5f, 5f);
         var prtRot = new Vector3(0f, rotY, 0f);
 
         InstantiateAtomicPrefab(
             cabinTypes[typeIndex], colors[colorIndex], partition,
             $"{identifier}_cabin_0", "cabin",
-            wrapperPos, Vector3.zero, prtRot
+            wrapperPos, Vector3.zero, prtRot,
+            licenseSupertypeLabel
         );
     }
-    private void InstantiateLoad(int typeIndex, GameObject partition, string identifier)
+    private void InstantiateLoad(
+        int typeIndex, GameObject partition, string identifier,
+        bool licenseSupertypeLabel = false
+    )
     {
         // Define position w.r.t. partition coordinate
         var wrapperPos = Vector3.zero;
@@ -405,11 +427,13 @@ public class TeacherAgent : DialogueAgent
         InstantiateAtomicPrefab(
             loadTypes[typeIndex], null, partition,
             $"{identifier}_load_0", "load",
-            wrapperPos, Vector3.zero, prtRot
+            wrapperPos, Vector3.zero, prtRot,
+            licenseSupertypeLabel
         );
     }
     private void InstantiateChassisFB(
-        List<int> typeIndices, GameObject partition, string identifier
+        List<int> typeIndices, GameObject partition, string identifier,
+        bool licenseSupertypeLabel = false
     )
     {
         // Define positions w.r.t. partition coordinate
@@ -433,34 +457,36 @@ public class TeacherAgent : DialogueAgent
             .ForEach(config => InstantiateAtomicPrefab(
                 config.Item1, null, partition,
                 config.Item3, config.Item4,
-                wrapperPos[config.Item2], Vector3.zero, prtRot
+                wrapperPos[config.Item2], Vector3.zero, prtRot,
+                licenseSupertypeLabel
             ));
     }
     private void InstantiateChassisC(
-        int typeIndex, GameObject partition, int centerColorIndex, string identifier
+        int typeIndex, GameObject partition, int centerColorIndex, string identifier,
+        bool licenseSupertypeLabel = false
     )
     {
         // Define position w.r.t. partition coordinate
-        var xPosition = Random.Range(-0.04f, 0.04f);
-        var zPosition = Random.Range(-0.04f, 0.04f);
-        var wrapperPos = new Vector3(xPosition, 0f, zPosition);
+        var wrapperPos = Vector3.zero;
 
         // Apply random rotation to the parent partition object
-        var rotY = 180f * Random.Range(0, 2) + Random.Range(-5f, 5f);
+        var rotY = 90f * Random.Range(0, 4) + Random.Range(-5f, 5f);
         var prtRot = new Vector3(0f, rotY, 0f);
-        
+
         InstantiateAtomicPrefab(
             centerChassisTypes[typeIndex], colors[centerColorIndex], partition,
             $"{identifier}_chassis_center_0", "chassis_center",
-            wrapperPos, Vector3.zero, prtRot
+            wrapperPos, Vector3.zero, prtRot,
+            licenseSupertypeLabel
         );
     }
     private void InstantiateFenders(
-        List<int> typeIndices, GameObject partition, List<int> colorIndices, string identifier
+        List<int> typeIndices, GameObject partition, List<int> colorIndices, string identifier,
+        bool licenseSupertypeLabel = false
     )
     {
         // Define positions & rotations w.r.t. partition coordinate
-        var xRotations = new List<float> { -90f, 90f, -90f, 90f };
+        var xRotations = new List<float> { 90f, -90f, 90f, -90f };
         var zPositions = new List<float> {-0.09f, -0.03f, 0.03f, 0.09f};
         var randomIndices = Enumerable.Range(0, 4).ToList();
         Shuffle(randomIndices);
@@ -495,11 +521,13 @@ public class TeacherAgent : DialogueAgent
                 InstantiateAtomicPrefab(
                     config.Item1, colors[colorIndices[config.Item2]], partition,
                     config.Item3, config.Item4,
-                    wrapperPos[config.Item2], wrapperRot[config.Item2], prtRot
+                    wrapperPos[config.Item2], wrapperRot[config.Item2], prtRot,
+                    licenseSupertypeLabel
                 ));
     }
     private void InstantiateWheels(
-        List<int> typeIndices, GameObject partition, string identifier
+        List<int> typeIndices, GameObject partition, string identifier,
+        bool licenseSupertypeLabel = false
     )
     {
         // Valid (x,z)-positions to sample from
@@ -526,12 +554,14 @@ public class TeacherAgent : DialogueAgent
             InstantiateAtomicPrefab(
                 wheelTypes[typeIndices[i]], null, partition,
                 $"{identifier}_wheel_{i}", "wheel",
-                wrapperPos, wrapperRot, prtRot
+                wrapperPos, wrapperRot, prtRot,
+                licenseSupertypeLabel
             );
         }
     }
     private void InstantiateBolts(
-        List<int> typeIndices, GameObject partition, string identifier
+        List<int> typeIndices, GameObject partition, string identifier,
+        bool licenseSupertypeLabel = false
     )
     {
         // Valid (x,z)-positions to sample from
@@ -560,7 +590,8 @@ public class TeacherAgent : DialogueAgent
             InstantiateAtomicPrefab(
                 boltTypes[typeIndices[i]], null, partition,
                 $"{identifier}_bolt_{i}", "bolt",
-                wrapperPos, wrapperRot, prtRot
+                wrapperPos, wrapperRot, prtRot,
+                licenseSupertypeLabel
             );
         }
     }
