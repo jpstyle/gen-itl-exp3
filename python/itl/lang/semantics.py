@@ -186,13 +186,6 @@ class SemanticParser:
                     referents = {}
                     source = { "e0": utt }
 
-            elif utt == "# Observing":
-                # Special input string signalling that the user is continuing
-                # observing agent's plan execution towards goal...
-                clauses = {}
-                referents = {}
-                source = { "e0": utt }
-
             else:
                 # Don't know how to process other patterns
                 raise ValueError(f"Cannot parse input: '{utt}'")

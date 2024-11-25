@@ -20,8 +20,7 @@ from sklearn.decomposition import PCA
 
 from ..vision.utils import (
     blur_and_grayscale, visual_prompt_by_mask, rmat2quat, xyzw2wxyz,
-    flip_position_y, flip_quaternion_y, transformation_matrix,
-    pose_estimation_with_mask
+    flip_position_y, flip_quaternion_y, transformation_matrix
 )
 from ..lpmln import Literal
 from ..lpmln.utils import flatten_cons_ante, wrap_args
@@ -31,32 +30,6 @@ EPS = 1e-10                 # Value used for numerical stabilization
 SR_THRES = 0.8              # Mismatch surprisal threshold
 U_IN_PR = 0.99              # How much the agent values information provided by the user
 
-# Pre-specified poses (quaternion & position pair) of 3D inspection viewpoints
-R = 0.3; Tr = (0, 0, R); theta_H = radians(70); theta_L = radians(50)
-H1 = cos(theta_H/2); H2 = sin(theta_H/2); L1 = cos(theta_L/2); L2 = sin(theta_L/2)
-## (qw/qx/qy/qz quaternion, tx/ty/tz position); rotation first, then translation
-Y_ROTATIONS = [th1+th2 for th1, th2 in product([0, 90, 180, 270], [0, 20])]
-VP_POSES = [
-    # 'Southern-high' loop
-    ((H1*cos(th := radians(th_y / 2)), H2*cos(th), H1*sin(th), H2*sin(th)), Tr)
-    for th_y in Y_ROTATIONS
-] + [
-    # 'Southern-low' loop
-    ((L1*cos(th := radians(th_y / 2)), L2*cos(th), L1*sin(th), L2*sin(th)), Tr)
-    for th_y in Y_ROTATIONS
-] + [
-    # 'Equator' loop
-    ((cos(th := radians(th_y / 2)), 0, sin(th), 0), Tr)
-    for th_y in Y_ROTATIONS
-] + [
-    # 'Northern-low' loop
-    ((L1*cos(th := radians(th_y / 2)), -L2*cos(th), L1*sin(th), -L2*sin(th)), Tr)
-    for th_y in Y_ROTATIONS
-] + [
-    # 'Northern-high' loop
-    ((H1*cos(th := radians(th_y / 2)), -H2*cos(th), H1*sin(th), -H2*sin(th)), Tr)
-    for th_y in Y_ROTATIONS
-]
 # Connectivity graph that represents pairs of 3D inspection images to be cross-referenced
 CON_GRAPH = nx.Graph()
 for i in range(8):
@@ -715,14 +688,14 @@ def analyze_demonstration(agent, demo_data):
     value_assignment = agent.symbolic.value_assignment
 
     prev_img = None         # Stores previous steps' visual observations
-    inspect_data = { "img": {}, "msk": {} }
+    inspect_data = { "img": {}, "msk": {}, "pose": {} }
             # Buffer of 3d object instance views from inspect_~ actions
 
     # Sequentially process each demonstration step
     current_held = [None, None]; current_assembly_info = None
-    nonatomic_subassemblies = set(); nl_labeling = {}
-    vision_2d_data = defaultdict(list)
-    vision_3d_data = {}; assembly_sequence = []
+    part_identifiers = {}; nonatomic_subassemblies = set()
+    nl_labeling = {}
+    vision_2d_data = defaultdict(list); vision_3d_data = {}; assembly_sequence = []
     for img, annotations, env_refs in demo_data:
         # Appropriately handle each annotation
         for (_, _, ante, cons), raw, mood in annotations:
@@ -756,7 +729,7 @@ def analyze_demonstration(agent, demo_data):
                                     if rf_dis.startswith(lit.args[0][0]) and rf_env == lit.args[2][0]
                                 ][0]
                                 target_info = referents["dis"][target_info]
-                                current_held[left_or_right] = target_info["name"]
+                                current_held[left_or_right] = (target_info["name"], {})
 
                                 if target_info["name"] not in nonatomic_subassemblies:
                                     # Atomic part type to be remembered, record (image, mask)
@@ -766,37 +739,28 @@ def analyze_demonstration(agent, demo_data):
 
                             case "drop":
                                 # drop_~ action
-                                lastly_dropped = current_held[left_or_right]
+                                lastly_dropped, _ = current_held[left_or_right]
                                 current_held[left_or_right] = None
 
                             case "assemble":
-                                # assemble_~ action; record 2d visual data (image + masks)
-                                # and assembly action info, then remember non-atomic subassemblies
-                                # (distinguished by string name handle)
-                                component_masks = {
-                                    # Provided ground-truth masks for potentially involved components
-                                    referents["dis"][rf_dis]["name"]: env_refs[rf_env]["mask"]
-                                    for msk_arg, _ in lit.args[6:]
-                                    for rf_dis, rf_env in value_assignment.items()
-                                    if rf_dis.startswith(lit.args[0][0]) and msk_arg == rf_env
-                                }
-                                # Add 2d vision exemplars as well iff an object being assembled is atomic
-                                for obj in current_held:
-                                    if obj in vision_2d_data:
-                                        vision_2d_data[obj].append((prev_img, component_masks[obj]))
+                                # assemble_~ action; record current step's assembly action info,
+                                # then remember non-atomic subassemblies (distinguished by string
+                                # name handle)
 
                                 # Annotation about this join
                                 current_assembly_info = [
                                     (current_held[0], referents["dis"][lit.args[3][0]]["name"]),
                                     (current_held[1], referents["dis"][lit.args[4][0]]["name"]),
-                                    prev_img, component_masks, referents["dis"][lit.args[2][0]]["name"]
+                                    referents["dis"][lit.args[2][0]]["name"]
                                 ]
 
                                 # Update hand states
-                                current_held[left_or_right] = referents["dis"][lit.args[2][0]]["name"]
+                                current_held[left_or_right] = (
+                                    referents["dis"][lit.args[2][0]]["name"], {}
+                                )
                                 current_held[(left_or_right+1) % 2] = None
 
-                                nonatomic_subassemblies.add(current_held[left_or_right])
+                                nonatomic_subassemblies.add(current_held[left_or_right][0])
 
                             case "inspect":
                                 # inspect_~ action; collect all views for 3D reconstruction
@@ -817,22 +781,54 @@ def analyze_demonstration(agent, demo_data):
                         if conc_type != "arel": continue
                         conc_ind = int(conc_ind)
 
+                        # Utility method for parsing serialized float lists passed
+                        # as action effect
+                        parse_floats = lambda ai: tuple(
+                            float(v)
+                            for v in referents["dis"][lit.args[ai][0]]["name"].split("/")
+                        )
+
                         # Handle each action accordingly (actions 2~9 to be handled
                         # in our scope)
                         act_name = agent.lt_mem.lexicon.d2s[(conc_type, conc_ind)][0][1]
                         act_type = act_name.split("_")[0]
                         left_or_right = 0 if act_name.endswith("left") else 1
                         match act_type:
+                            case "pick":
+                                # pick_up_~ action; record (ground-truth) poses of individual
+                                # atomic parts contained in the object picked up; beginning
+                                # from the sixth argument, each given in the order of string
+                                # identifier, rotation, position)
+                                num_parts = int(referents["dis"][lit.args[5][0]]["name"])
+
+                                # Track string identifiers referring to each part instance,
+                                # which is revealed every time a singleton wrapper object
+                                # is picked up in Unity environment (identifiable by number
+                                # of parts whose poses are reported: 1 for singletons)
+                                if num_parts == 1:
+                                    part_uid = referents["dis"][lit.args[6][0]]["name"]
+                                    part_identifiers[part_uid] = current_held[left_or_right][0]
+
+                                # Update poses of individual parts
+                                part_poses = current_held[left_or_right][1]
+                                for i in range(num_parts):
+                                    part_uid = referents["dis"][lit.args[6+3*i][0]]["name"]
+                                    part_poses[part_identifiers[part_uid]] = (
+                                        flip_quaternion_y(xyzw2wxyz(parse_floats(6+3*i+1))),
+                                        flip_position_y(parse_floats(6+3*i+2))
+                                    )
+
                             case "assemble":
-                                # assemble_~ action; record manipulator poses
-                                parse_values = lambda ai: tuple(
-                                    float(v) for v in referents["dis"][lit.args[ai][0]]["name"].split("/")
-                                )
+                                # assemble_~ action; record poses of moved manipulator before
+                                # & after movement, and poses of part instances contained in
+                                # the assembly product
                                 mnp_pose_before = (
-                                    xyzw2wxyz(parse_values(2)), parse_values(3)
+                                    flip_quaternion_y(xyzw2wxyz(parse_floats(2))),
+                                    flip_position_y(parse_floats(3))
                                 )
                                 mnp_pose_after = (
-                                    xyzw2wxyz(parse_values(4)), parse_values(5)
+                                    flip_quaternion_y(xyzw2wxyz(parse_floats(4))),
+                                    flip_position_y(parse_floats(5))
                                 )
                                 current_assembly_info += [
                                     "RToL" if left_or_right==0 else "LToR",
@@ -840,12 +836,33 @@ def analyze_demonstration(agent, demo_data):
                                 ]
                                 assembly_sequence.append(tuple(current_assembly_info))
 
+                                num_parts = int(referents["dis"][lit.args[6][0]]["name"])
+                                part_poses = current_held[left_or_right][1]
+                                for i in range(num_parts):
+                                    part_uid = referents["dis"][lit.args[7+3*i][0]]["name"]
+                                    part_poses[part_identifiers[part_uid]] = (
+                                        flip_quaternion_y(xyzw2wxyz(parse_floats(7+3*i+1))),
+                                        flip_position_y(parse_floats(7+3*i+2))
+                                    )
+
+                                # Making way for a new one (not necessary, just signposting)
                                 current_assembly_info = None
+
+                            case "inspect":
+                                # inspect_~ action; 3d poses of the object being inspected
+                                # in camera coordinate, where the camera is put at different
+                                # vantage points. Needed for appropriately adjusting ground
+                                # truth poses passed from Unity environment.
+                                if view_ind < 40:
+                                    inspect_data["pose"][view_ind] = (
+                                        flip_quaternion_y(xyzw2wxyz(parse_floats(2))),
+                                        flip_position_y(parse_floats(3))
+                                    )
 
                 elif raw.startswith("Pick up a"):
                     # NL description providing labeling of the atomic part just
                     # picked up with a pick_up~ action
-                    nl_labeling[current_held[left_or_right]] = \
+                    nl_labeling[current_held[left_or_right][0]] = \
                         re.findall(r"Pick up a (.*)\.$", raw)[0]
 
                 elif raw.startswith("This is a"):
@@ -860,16 +877,24 @@ def analyze_demonstration(agent, demo_data):
                 raise NotImplementedError
 
         if len(inspect_data["img"]) == 40 and len(inspect_data["msk"]) == 40:
+            inst_inspected = current_held[left_or_right][0]
+
             # Reconstruct 3D structure of the inspected object instance
             reconstruction = agent.vision.reconstruct_3d_structure(
-                inspect_data["img"], inspect_data["msk"],
-                VP_POSES, CON_GRAPH, STORE_VP_INDS,
+                inspect_data["img"], inspect_data["msk"], inspect_data["pose"],
+                CON_GRAPH, STORE_VP_INDS,
                 # resolution_multiplier=1.25
             )
-            vision_3d_data[current_held[left_or_right]] = reconstruction
+            vision_3d_data[inst_inspected] = reconstruction
+
+            # Add select examples to 2D classification data as well
+            vision_2d_data[inst_inspected] += [
+                (inspect_data["img"][view_ind], inspect_data["msk"][view_ind])
+                for view_ind in STORE_VP_INDS[4:8]
+            ]
 
             # Make way for new data
-            inspect_data = { "img": {}, "msk": {} }
+            inspect_data = { "img": {}, "msk": {}, "pose": {} }
 
         prev_img = img
 
@@ -948,144 +973,43 @@ def analyze_demonstration(agent, demo_data):
     assembly_trees = {}             # Trees representing (sub)assembly structures
 
     for assembly_step in assembly_sequence:
-        with torch.no_grad():
-            # Unpacking assembly step information
-            involved_objs = assembly_step[:2]
-            image, component_masks, resulting_subassembly = assembly_step[2:5]
-            direction, *manip_poses = assembly_step[5:8]
-            foo = assembly_step[8:]
+        # Unpacking assembly step information
+        (obj_l, part_poses_l), contact_l = assembly_step[0]
+        (obj_r, part_poses_r), contact_r = assembly_step[1]
+        resulting_subassembly = assembly_step[2]
+        direction, pose_src_manip_before, pose_src_manip_after = assembly_step[3:6]
 
-            # Select reference masks by which the target components' poses
-            # will be estimated; may be the very components themselves, or
-            # some other assembly-connected proxy components when the targets
-            # are heavily occluded (hence very small mask area)
-            selected_components = []; selected_masks = []
-            for obj, cp in involved_objs:
-                if obj in assembly_trees:
-                    # Involved object is a subassembly built in a previous step,
-                    # *may* need to select a mask if heavily occluded
-                    subassembly = assembly_trees[obj]
-                    mask_criteria = {
-                        # Tuple of (whether type agrees, mask area); prioritize
-                        # type agreement, fall back to next best only if and only if
-                        # mask area is too small
-                        n: (hdl==cp.split("/")[0], component_masks[n].sum())
-                        for n, hdl in subassembly.nodes(data="part_handle")
-                    }
-                    components_sorted = sorted(
-                        subassembly.nodes, reverse=True, key=lambda n: mask_criteria[n]
-                    )
-                    # Select the top two: The explicitly mentioned part (which may
-                    # be heavily occluded), and another part with the largest mask
-                    # area among the rest as a fallback in case of heavy occlusion
-                    selected = components_sorted[:2]
-                else:
-                    # Only atomic component part, use its mask
-                    selected = [obj]
+        # Find in each subassembly the parts that are directly joined by the
+        # assemble action
+        # (One ugly assumption made here is that contact points can be uniquely
+        # specified by string name handle used in Unity)
+        part_supertype_l = contact_l.split("/")[0]
+        part_supertype_r = contact_r.split("/")[0]
+        part_conc_ind_l, part_pose_l = [
+            (inst2conc_map[inst], pose) for inst, pose in part_poses_l.items()
+            if part_supertype_l in inst
+        ][0]
+        part_conc_ind_r, part_pose_r = [
+            (inst2conc_map[inst], pose) for inst, pose in part_poses_r.items()
+            if part_supertype_r in inst
+        ][0]
+        tmat_l = transformation_matrix(*part_pose_l)
+        tmat_r = transformation_matrix(*part_pose_r)
 
-                selected_components.append(selected)
-                selected_masks.append([component_masks[obj] for obj in selected])
-
-            # For each of the lefthand & righthand side
-            involved_parts_info = []            # For storing part concepts and poses
-            for insts, masks in zip(selected_components, selected_masks):
-                pose_estimation_results = []
-                for inst, mask in zip(insts, masks):
-                    # Skip on obvious occlusion, i.e., if mask area of instance in
-                    # a subassembly is too small
-                    if len(masks) > 1 and mask.sum() < 3000:
-                        continue
-
-                    # Reference concept for the atomic part instance
-                    conc_ind = inst2conc_map[inst]
-                    # Fetch 3D structure stored in XB for the concept: points in cloud,
-                    # view information, descriptors
-                    structure_3d = agent.lt_mem.exemplars.object_3d[conc_ind][:3]
-
-                    # 3D pose estimation guided by segmentation mask
-                    pose_estimation_per_view = pose_estimation_with_mask(
-                        image, mask, vis_model, structure_3d, agent.vision.camera_intrinsics
-                    )
-                    # Append results to list
-                    pose_estimation_results += [
-                        (conc_ind, inst, pose, reproj_score, overlap_score)
-                        for pose, reproj_score, overlap_score in pose_estimation_per_view
-                    ]
-
-                # Select the best pose estimation result with highest score
-                best_estimation = sorted(
-                    pose_estimation_results, key=lambda x: x[3]+x[4], reverse=True
-                )[0]
-                involved_parts_info.append(
-                    best_estimation[:2]+(transformation_matrix(*best_estimation[2]),)
-                )
-
-        # Resolve any (chain of) indirect pose estimation via connected parts
-        assert len(involved_parts_info) == 2
-        for side in [0, 1]:         # Left (0) or right (1)
-            obj, cp = involved_objs[side]
-            if obj in assembly_trees:
-                subassembly = assembly_trees[obj]
-                inst_estimated = involved_parts_info[side][1]
-                inst_goal = [
-                    n for n, hdl in subassembly.nodes(data="part_handle")
-                    if hdl == cp.split("/")[0]
-                ][0]
-                if inst_estimated != inst_goal:
-                    # Get a shortest connection path
-                    connection_path = next(nx.shortest_simple_paths(
-                        subassembly, inst_estimated, inst_goal
-                    ))
-                    u = connection_path.pop(0); v = connection_path.pop(0)
-                    tmat_u = involved_parts_info[side][2]
-                    while True:
-                        part_conc_u = subassembly.nodes[u]["part_conc"]
-                        part_conc_v = subassembly.nodes[v]["part_conc"]
-                        cp_u, i_u = subassembly.edges[(u, v)]["contact"][u]
-                        cp_v, i_v = subassembly.edges[(u, v)]["contact"][v]
-                        pose_cp_u, _ = \
-                            agent.lt_mem.exemplars.object_3d[part_conc_u][3][cp_u][i_u]
-                        pose_cp_v, _ = \
-                            agent.lt_mem.exemplars.object_3d[part_conc_v][3][cp_v][i_v]
-                        tmat_cp_u = transformation_matrix(*pose_cp_u)
-                        tmat_cp_v = transformation_matrix(*pose_cp_v)
-                        tmat_v = tmat_u @ tmat_cp_u @ inv(tmat_cp_v)
-
-                        # Update component concept and transformation info
-                        involved_parts_info[side] = \
-                            (part_conc_v, involved_parts_info[side][1], tmat_v)
-
-                        # Break if reached end of chain
-                        if len(connection_path) == 0: break
-
-                        # Next chain link
-                        u = v; tmat_u = tmat_v; v = connection_path.pop(0)
-
-        part_l_conc_ind, _, tmat_l = involved_parts_info[0]
-        part_r_conc_ind, _, tmat_r = involved_parts_info[1]
-
-        # Infer contact point from the estimated object poses and manipulator
+        # Infer contact point from the ground-truth object poses and manipulator
         # movement
         if direction == "RToL":
             tmat_tgt_obj = tmat_l; tmat_src_obj_before = tmat_r
-            tgt_conc_ind = part_l_conc_ind; src_conc_ind = part_r_conc_ind
-            pcl_tgt = agent.lt_mem.exemplars.object_3d[part_l_conc_ind][0]
-            pcl_src = agent.lt_mem.exemplars.object_3d[part_r_conc_ind][0]
+            tgt_conc_ind = part_conc_ind_l; src_conc_ind = part_conc_ind_r
+            pcl_tgt = agent.lt_mem.exemplars.object_3d[part_conc_ind_l][0]
+            pcl_src = agent.lt_mem.exemplars.object_3d[part_conc_ind_r][0]
         else:
             tmat_tgt_obj = tmat_r; tmat_src_obj_before = tmat_l
-            tgt_conc_ind = part_r_conc_ind; src_conc_ind = part_l_conc_ind
-            pcl_tgt = agent.lt_mem.exemplars.object_3d[part_r_conc_ind][0]
-            pcl_src = agent.lt_mem.exemplars.object_3d[part_l_conc_ind][0]
+            tgt_conc_ind = part_conc_ind_r; src_conc_ind = part_conc_ind_l
+            pcl_tgt = agent.lt_mem.exemplars.object_3d[part_conc_ind_r][0]
+            pcl_src = agent.lt_mem.exemplars.object_3d[part_conc_ind_l][0]
         pcl_tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_tgt))
         pcl_src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_src))
-        pose_src_manip_before = (
-            flip_quaternion_y(manip_poses[0][0]),
-            flip_position_y(manip_poses[0][1])
-        )
-        pose_src_manip_after = (
-            flip_quaternion_y(manip_poses[1][0]),
-            flip_position_y(manip_poses[1][1])
-        )
 
         # Relation among manipulator & object transformations:
         # [Tr. of src object after movement]
@@ -1139,8 +1063,8 @@ def analyze_demonstration(agent, demo_data):
         cp_r_conc_ind = agent.vision.add_concept("pcls")
         cp_tgt_conc_ind = cp_l_conc_ind if direction == "RToL" else cp_r_conc_ind
         cp_src_conc_ind = cp_r_conc_ind if direction == "RToL" else cp_l_conc_ind
-        oracle_tag_cp_tgt = involved_objs[0 if direction == "RToL" else 1][1]
-        oracle_tag_cp_src = involved_objs[1 if direction == "RToL" else 0][1]
+        oracle_tag_cp_tgt = contact_l if direction == "RToL" else contact_r
+        oracle_tag_cp_src = contact_r if direction == "RToL" else contact_l
 
         # Register contact point type and pose info
         agent.lt_mem.exemplars.add_exs_3d(
@@ -1154,32 +1078,29 @@ def analyze_demonstration(agent, demo_data):
 
         # Add new subassembly tree by adding concept-annotated part nodes and
         # connecting them with contact-annotated edges
-        # (One ugly assumption made here is that contact points can be uniquely
-        # specified by string name handle used in Unity)
-        (obj_l, cp_l), (obj_r, cp_r) = involved_objs
         if obj_l in assembly_trees:
             subassembly_l = assembly_trees.pop(obj_l)
         else:
             subassembly_l = nx.Graph()
             subassembly_l.add_node(
-                obj_l, part_conc=part_l_conc_ind, part_handle=cp_l.split("/")[0]
+                obj_l, part_conc=part_conc_ind_l, part_handle=part_supertype_l
             )
         if obj_r in assembly_trees:
             subassembly_r = assembly_trees.pop(obj_r)
         else:
             subassembly_r = nx.Graph()
             subassembly_r.add_node(
-                obj_r, part_conc=part_r_conc_ind, part_handle=cp_r.split("/")[0]
+                obj_r, part_conc=part_conc_ind_r, part_handle=part_supertype_r
             )
 
         assembly_trees[resulting_subassembly] = nx.union(subassembly_l, subassembly_r)
         part_node_l = [
             n for n in subassembly_l.nodes
-            if subassembly_l.nodes[n]["part_handle"] in cp_l
+            if subassembly_l.nodes[n]["part_handle"] in contact_l
         ][0]
         part_node_r = [
             n for n in subassembly_r.nodes
-            if subassembly_r.nodes[n]["part_handle"] in cp_r
+            if subassembly_r.nodes[n]["part_handle"] in contact_r
         ][0]
         assembly_trees[resulting_subassembly].add_edge(
             part_node_l, part_node_r,

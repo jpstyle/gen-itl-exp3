@@ -23,7 +23,7 @@ import warnings
 warnings.filterwarnings("ignore")
 from PIL import Image
 from collections import defaultdict
-from itertools import product
+from itertools import product, groupby
 
 import hydra
 import numpy as np
@@ -79,7 +79,7 @@ def main(cfg):
     # Two types of task to teach/learn:
     #   "build_truck_supertype": Learn how to build instances of the broad truck
     #       supertype, where main learning targets are the types of constituent
-    #       parts, valid assembly pairs and contact points and the general desired
+    #       parts, valid assembly pairs, contact points and the general desired
     #       'assembly topology'
     #   "build_truck_subtype": Learn how to build fine-grained subtypes of trucks,
     #       where main learning targets are ontology rules (definitions and constraints)
@@ -180,6 +180,23 @@ def main(cfg):
         for field, value in sampled_inits.items():
             env_par_channel.set_float_parameter(field, value)
 
+        if target_task == "build_truck_supertype":
+            # Fix the pool of possible subtypes into only the sampled ones for
+            # the remaining episodes (except color attributes)
+            occurring_subtypes = {
+                (f_spl[0], value) for field, value in sampled_inits.items()
+                if (f_spl := field.split("/"))[1] == "type"
+            }
+            occurring_subtypes = groupby(sorted(occurring_subtypes), lambda x: x[0])
+            for supertype, sampled_subtypes in occurring_subtypes:
+                # Replace unoccurring subtypes with None rather than deleting
+                # in order to preserve indices
+                sampled_subtypes = [i for _, i in sampled_subtypes]
+                all_subtypes[supertype] = [
+                    subtype if i in sampled_subtypes else None
+                    for i, subtype in enumerate(all_subtypes[supertype])
+                ]
+
         # Request sending ground-truth mask info to teacher at the beginning
         student_channel.send_string("System", "# GT mask request: *", {})
 
@@ -249,6 +266,11 @@ def main(cfg):
                                         if v.sum() > 100        # Remove small/null masks
                                     }
                                 )
+                                # Record instance names used in the environment side associated
+                                # with each object
+                                for i, crange in enumerate(dem_refs):
+                                    env_name = utterance[crange[0]:crange[1]]
+                                    student.vision.scene[f"o{i}"]["env_name"] = env_name
                             else:
                                 # General case where message from Teacher or Student-side
                                 # action effect feedback from Unity environment has arrived

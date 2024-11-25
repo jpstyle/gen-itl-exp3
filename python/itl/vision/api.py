@@ -567,7 +567,7 @@ class VisionModule:
         with torch.no_grad():
             # Obtain (flattened) patch-level features and corresponding masks extracted from
             # the zoomed images
-            lr_mask_area = 800
+            lr_mask_area = 600
             patch_features, lr_masks, lr_dims = self.model.lr_features_from_masks(
                 zoomed_images, zoomed_masks, lr_mask_area, resolution_multiplier
             )
@@ -649,7 +649,7 @@ class VisionModule:
         ]
 
         # Collect points and filter by 2D reprojection vs. masks
-        for msk, (quat, trns) in zip(masks.values(), viewpoint_poses):
+        for msk, (quat, trns) in zip(masks.values(), viewpoint_poses.values()):
             # Project to 2D image coordinate from this viewing angle
             cam_K, distortion_coeffs = self.camera_intrinsics
             rmat = quat2rmat(quat)

@@ -19,21 +19,14 @@ pluralize = inflect.engine().plural
 
 MATCH_THRES = 0.9
 VALID_JOINS = {
-    (("wheel", "bolt"), ("bolt", "bolt")),
     (("fl_fender", "wheel"), ("wheel", "bolt")),
     (("fl_fender", "wheel"), ("bolt", "bolt")),
     (("fr_fender", "wheel"), ("wheel", "bolt")),
     (("fr_fender", "wheel"), ("bolt", "bolt")),
     (("bl_fender", "wheel"), ("wheel", "bolt")),
-    (("bl_fender", "wheel1"), ("wheel", "bolt")),
-    (("bl_fender", "wheel1"), ("bolt", "bolt")),
-    (("bl_fender", "wheel2"), ("wheel", "bolt")),
-    (("bl_fender", "wheel2"), ("bolt", "bolt")),
+    (("bl_fender", "wheel"), ("bolt", "bolt")),
     (("br_fender", "wheel"), ("wheel", "bolt")),
-    (("br_fender", "wheel1"), ("wheel", "bolt")),
-    (("br_fender", "wheel1"), ("bolt", "bolt")),
-    (("br_fender", "wheel2"), ("wheel", "bolt")),
-    (("br_fender", "wheel2"), ("bolt", "bolt")),
+    (("br_fender", "wheel"), ("bolt", "bolt")),
     (("chassis_front", "cabin1"), ("cabin", "front1")),
     (("chassis_front", "cabin1"), ("bolt", "bolt")),
     (("chassis_front", "cabin2"), ("bolt", "bolt")),
@@ -41,10 +34,8 @@ VALID_JOINS = {
     (("chassis_front", "rfw"), ("fr_fender", "wheel")),
     (("chassis_back", "load"), ("load", "back")),
     (("chassis_back", "load"), ("bolt", "bolt")),
-    (("chassis_back", "lfw0"), ("bl_fender", "wheel")),
-    (("chassis_back", "lfw1"), ("bl_fender", "wheel1")),
-    (("chassis_back", "rfw0"), ("bl_fender", "wheel")),
-    (("chassis_back", "rfw1"), ("br_fender", "wheel1")),
+    (("chassis_back", "lfw"), ("bl_fender", "wheel")),
+    (("chassis_back", "rfw"), ("br_fender", "wheel")),
     (("chassis_front", "center"), ("chassis_center", "front")),
     (("chassis_front", "center"), ("bolt", "bolt")),
     (("chassis_center", "back"), ("chassis_back", "center")),
@@ -134,6 +125,9 @@ class SimulatedTeacher:
             # Sampling with minimal constraints, just so enough that a valid truck
             # structure can be built; no distractors added
             num_distractors = 0
+            constraints += [
+                ("forall", "truck", (["normal_wheel", "large_wheel"], None), False),
+            ]   # For the easier difficulty, keep the sizes of the wheels identical
 
         else:
             assert target_task == "build_truck_subtype"
@@ -263,12 +257,10 @@ class SimulatedTeacher:
                         if target not in subassems:
                             subassems[target].add(target)
 
-                        atomic_parts = {
-                            f"t_{inst[0]}_{inst[1]}": part_type
-                            for inst, part_type in sampled_parts.items()
-                        }
-                        if target in atomic_parts:
-                            target_label = f"a {atomic_parts[target]}"
+                        inst = re.findall(r"^t_(.*)_(\d+)$", target)
+                        inst = (inst[0][0], int(inst[0][1])) if len(inst) == 1 else None
+                        if inst in sampled_parts:
+                            target_label = f"a {inst[0]}"
                         else:
                             target_label = "the subassembly"
                         act_dscr = {
@@ -278,28 +270,14 @@ class SimulatedTeacher:
 
                     elif act_type.startswith("assemble"):
                         # For assemble~ actions, provide contact point info, specified by
-                        # (atomic part supertype, point identifier string) pair. Parameters
-                        # after the third represent requests for ground truth masks of
-                        # subassembly component parts.
+                        # (atomic part supertype, point identifier string) pair
                         subassembly, target_l, target_r = act_params
                         # Building action spec description string
                         num_components = \
                             len(subassems[assem_st["left"]] | subassems[assem_st["right"]])
                         act_str = act_str_prefix
-                        act_str += f"({subassembly},{target_l},{target_r},{num_components},"
-                        offset = len(act_str)
-                        mask_requests = []; pointings = []
-                        for topmost_held in [assem_st["left"], assem_st["right"]]:
-                            for part in subassems[topmost_held]:
-                                mask_requests.append(part)
-                                part_type = re.findall(r"^t_(.*)_\d+$", part)[0]
-                                pointings.append((
-                                    (offset, offset+len(part)),
-                                    f"/Teacher Agent/*/{topmost_held}/{part_type}"
-                                ))
-                                offset += len(part) + 1
-                        act_str += ",".join(mask_requests) + ")"
-                        act_anno = { "utterance": act_str, "pointing": dict(pointings) }
+                        act_str += f"({subassembly},{target_l},{target_r},{num_components})"
+                        act_anno = { "utterance": act_str, "pointing": {} }
                         subassems[subassembly] = \
                             subassems.pop(assem_st["left"]) | subassems.pop(assem_st["right"])
                         assem_st["left"] = subassembly if act_type.endswith("left") else None
@@ -348,8 +326,8 @@ class SimulatedTeacher:
                     # Obtain intent of joining the target subassembly pairs at which
                     # component parts
                     _, params = re.findall(r"# Action: assemble_(.*)\((.*)\)$", utt)[0]
-                    _, _, part_left, part_right = params.split(",")
-                    assem_st["join_intent"] = (part_left, part_right)
+                    _, _, part_left, part_right, product_name = params.split(",")
+                    assem_st["join_intent"] = (part_left, part_right, product_name)
 
                 response.append((None, None))
 
@@ -357,16 +335,13 @@ class SimulatedTeacher:
                 # Action effect feedback from Unity environment, determine whether the
                 # latest action was incorrect and agent needs to be interrupted
                 assem_st = self.current_episode_record["assembly_state"]
+                subassems = assem_st["subassemblies"]
 
                 interrupted = False
                 if utt.startswith("# Effect: pick_up"):
                     # Effect of pick up action
                     side, effects = re.findall(r"# Effect: pick_up_(.*)\((.*)\)$", utt)[0]
-                    obj_picked_up = effects.split(",")[2]
-
-                    agent_side_alias = assem_st.pop(side)
-                    assem_st["aliases"][agent_side_alias] = obj_picked_up
-                    assem_st[side] = obj_picked_up
+                    obj_picked_up = effects.split(",")[0]
 
                     if False:
                         # Interrupt if agent has picked up an object not needed in the
@@ -374,13 +349,20 @@ class SimulatedTeacher:
                         # that should not be assembled
                         interrupted = True
 
+                    # Update ongoing execution state
+                    agent_side_alias = assem_st.pop(side)
+                    assem_st["aliases"][agent_side_alias] = obj_picked_up
+                    assem_st[side] = obj_picked_up
+                    if obj_picked_up not in subassems:
+                        subassems[obj_picked_up] = {obj_picked_up}
+
                 if utt.startswith("# Effect: assemble"):
                     # Effect of assemble action; interested in closest contact points
                     direction, effects = re.findall(r"# Effect: assemble_(.*)\((.*)\)$", utt)[0]
                     if direction.endswith("left"):
-                        part_tgt, part_src = assem_st.pop("join_intent")
+                        part_tgt, part_src, product_name = assem_st.pop("join_intent")
                     else:
-                        part_src, part_tgt = assem_st.pop("join_intent")
+                        part_src, part_tgt, product_name = assem_st.pop("join_intent")
                     part_src = assem_st["aliases"][part_src]
                     part_tgt = assem_st["aliases"][part_tgt]
                     part_src, _ = re.findall(r"t_(.*)_(\d+)$", part_src)[0]
@@ -392,24 +374,34 @@ class SimulatedTeacher:
                     ]
 
                     effects = effects.split(",")
-                    num_cp_pairs = int(effects[0])
-                    cp_pairs = effects[1:1+4*num_cp_pairs]
+                    num_cp_pairs = int(effects[2])
+                    cp_pairs = effects[3:3+4*num_cp_pairs]
                     cp_pairs = [cp_pairs[4*i:4*(i+1)] for i in range(num_cp_pairs)]
                     cp_pairs = [
                         (tuple(cp_src.split("/")), tuple(cp_tgt.split("/")))
-                        for cp_src, cp_tgt, _, _ in cp_pairs
+                        for cp_src, cp_tgt, diff_pos, diff_rot in cp_pairs
+                        if float(diff_pos) + float(diff_rot) > 1.8
+                            # Threshold for whether pair counts as match by sum of diffs
+                    ]
+                    cp_pairs = [
+                        ((part1, cp1), (part2, cp2))
+                        for (part1, cp1), (part2, cp2) in cp_pairs
+                        if part1 == part_src and part2 == part_tgt
                     ]
 
-                    if False:
-                        # Interrupt if agent has assembled a pair of objects at incorrect
-                        # contact point, which is determined by checking whether top 3
-                        # contact point pairs contain a valid join for this episode's
-                        # goal structure.
-                        # (Do we also need to threshold the difference value? Do we want
-                        # to be more strict?)
+                    # Interrupt if agent has assembled a pair of objects at incorrect
+                    # contact point, which is determined by checking whether top 3
+                    # contact point pairs contain a valid join for this episode's
+                    # goal structure
+                    join_invalid = len(cp_pairs) == 0 or cp_pairs[0] not in valid_joins
+                    if join_invalid:
                         interrupted = True
 
-                    print(0)
+                    # Update ongoing execution state
+                    subassems[product_name] = \
+                        subassems.pop(assem_st["left"]) | subassems.pop(assem_st["right"])
+                    assem_st["right" if direction.endswith("left") else "left"] = None
+                    assem_st["left" if direction.endswith("left") else "right"] = product_name
 
                 if not interrupted:
                     # No interruption needs to be made, keep observing...
@@ -457,11 +449,16 @@ def _sample_ASP(
         if hyper == "color": continue
 
         for _, hypo in per_hypernym:
+            if hyper in all_subtypes and hypo not in all_subtypes[hyper]:
+                continue
             base_prg_str += f"{hyper}(O) :- {hypo}(O).\n"
         if hyper not in occurring_subassemblies: continue
 
         base_prg_str += "1{ "
-        base_prg_str += "; ".join(f"{hypo}(O)" for _, hypo in per_hypernym)
+        base_prg_str += "; ".join(
+            f"{hypo}(O)" for _, hypo in per_hypernym
+            if not (hyper in all_subtypes and hypo not in all_subtypes[hyper])
+        )       # All possible subtype options that are valid (i.e., non-None)
         base_prg_str += " }1 :- "
         base_prg_str += f"{hyper}(O).\n"
 
@@ -473,6 +470,7 @@ def _sample_ASP(
     for supertype, subtypes in all_subtypes.items():
         if supertype == "color": continue
         for subtype in subtypes:
+            if subtype is None: continue
             base_prg_str += f"atomic(O, {subtype}) :- {subtype}(O).\n"
 
     # Add integrity constraints for filtering invalid combinations
@@ -555,7 +553,9 @@ def _sample_ASP(
     sampled_model = random.sample(models, 1)[0]
 
     # Inverse map from subtype to supertype
-    all_subtypes_inv_map = {x: k for k, v in all_subtypes.items() for x in v}
+    all_subtypes_inv_map = {
+        x: k for k, v in all_subtypes.items() for x in v if x is not None
+    }
 
     # Filter out unnecessary atoms, to extract atomic parts and colors sampled
     tgt_parts_by_fname = {}; tgt_colors_by_fname = {}
@@ -625,6 +625,11 @@ def _sample_ASP(
             # Ban current specs of the resampling target group
             for group in part_groups_by_obj[gi]:
                 for obj in group:
+                    if tgt_parts_by_fname[obj][1] == "wheel":
+                        # ... yet allow resampling of wheels, many of which could
+                        # be needed
+                        continue
+
                     part_type_str = f"{part_specs[obj][0]}(O)"
                     part_color_str = "" if part_specs[obj][1] is None \
                         else f", hasColor(O, {part_specs[obj][1]})"
@@ -754,10 +759,10 @@ def _sample_demo_plan(sampled_parts):
         # Front-left fender-wheel-bolt unit
         (
             [
-                ("pick_up_left", ("fl_fender",)),
-                ("pick_up_right", ("wheel",)),
+                ("pick_up_left", ("fl_fender", "GT")),
+                ("pick_up_right", ("wheel", "GT")),
                 ("assemble_right_to_left", ("fl_fw", "fl_fender/wheel", "wheel/bolt")),
-                ("pick_up_right", ("bolt",)),
+                ("pick_up_right", ("bolt", "GT")),
                 ("assemble_right_to_left", ("fl_fw_unit", "fl_fender/wheel", "bolt/bolt")),
                 ("drop_left", ())
             ],
@@ -768,10 +773,10 @@ def _sample_demo_plan(sampled_parts):
         # Front-right fender-wheel-bolt unit
         (
             [
-                ("pick_up_left", ("fr_fender",)),
-                ("pick_up_right", ("wheel",)),
+                ("pick_up_left", ("fr_fender", "GT")),
+                ("pick_up_right", ("wheel", "GT")),
                 ("assemble_right_to_left", ("fr_fw", "fr_fender/wheel", "wheel/bolt")),
-                ("pick_up_right", ("bolt",)),
+                ("pick_up_right", ("bolt", "GT")),
                 ("assemble_right_to_left", ("fr_fw_unit", "fr_fender/wheel", "bolt/bolt")),
                 ("drop_left", ())
             ],
@@ -782,22 +787,11 @@ def _sample_demo_plan(sampled_parts):
         # Back-left fender-wheel-bolt unit
         (
             [
-                ("pick_up_left", ("bl_fender",)),
-            ] + ([
-                ("pick_up_right", ("wheel",)),
+                ("pick_up_left", ("bl_fender", "GT")),
+                ("pick_up_right", ("wheel", "GT")),
                 ("assemble_right_to_left", ("bl_fw", "bl_fender/wheel", "wheel/bolt")),
-                ("pick_up_right", ("bolt",)),
-                ("assemble_right_to_left", ("bl_fw_unit", "wheel/bolt", "bolt/bolt")),
-            ] if not sampled_parts[("bl_fender", 0)].startswith("double") else [
-                ("pick_up_right", ("wheel",)),
-                ("assemble_right_to_left", ("bl_fw1", "bl_fender/wheel1", "wheel/bolt")),
-                ("pick_up_right", ("bolt",)),
-                ("assemble_right_to_left", ("bl_fw2", "bl_fender/wheel1", "bolt/bolt")),
-                ("pick_up_right", ("wheel",)),
-                ("assemble_right_to_left", ("bl_fw3", "bl_fender/wheel2", "wheel/bolt")),
-                ("pick_up_right", ("bolt",)),
-                ("assemble_right_to_left", ("bl_fw_unit", "bl_fender/wheel2", "bolt/bolt")),
-            ]) + [
+                ("pick_up_right", ("bolt", "GT")),
+                ("assemble_right_to_left", ("bl_fw_unit", "bl_fender/wheel", "bolt/bolt")),
                 ("drop_left", ())
             ],
             [],
@@ -807,22 +801,11 @@ def _sample_demo_plan(sampled_parts):
         # Back-right fender-wheel-bolt unit
         (
             [
-                ("pick_up_left", ("br_fender",)),
-            ] + ([
-                ("pick_up_right", ("wheel",)),
+                ("pick_up_left", ("br_fender", "GT")),
+                ("pick_up_right", ("wheel", "GT")),
                 ("assemble_right_to_left", ("br_fw", "br_fender/wheel", "wheel/bolt")),
-                ("pick_up_right", ("bolt",)),
-                ("assemble_right_to_left", ("br_fw_unit", "wheel/bolt", "bolt/bolt")),
-            ] if not sampled_parts[("br_fender", 0)].startswith("double") else [
-                ("pick_up_right", ("wheel",)),
-                ("assemble_right_to_left", ("br_fw1", "br_fender/wheel1", "wheel/bolt", )),
-                ("pick_up_right", ("bolt",)),
-                ("assemble_right_to_left", ("br_fw2", "br_fender/wheel1", "bolt/bolt")),
-                ("pick_up_right", ("wheel",)),
-                ("assemble_right_to_left", ("br_fw3", "br_fender/wheel2", "wheel/bolt")),
-                ("pick_up_right", ("bolt",)),
-                ("assemble_right_to_left", ("br_fw_unit", "br_fender/wheel2", "bolt/bolt")),
-            ]) + [
+                ("pick_up_right", ("bolt", "GT")),
+                ("assemble_right_to_left", ("br_fw_unit", "br_fender/wheel", "bolt/bolt")),
                 ("drop_left", ())
             ],
             [],
@@ -832,16 +815,16 @@ def _sample_demo_plan(sampled_parts):
         # Truck front
         (
             [
-                ("pick_up_left", ("chassis_front",)),
-                ("pick_up_right", ("cabin",)),
+                ("pick_up_left", ("chassis_front", "GT")),
+                ("pick_up_right", ("cabin", "GT")),
                 ("assemble_right_to_left", ("cf0", "chassis_front/cabin1", "cabin/front1")),
-                ("pick_up_right", ("bolt",)),
+                ("pick_up_right", ("bolt", "GT")),
                 ("assemble_right_to_left", ("cf1", "chassis_front/cabin1", "bolt/bolt")),
-                ("pick_up_right", ("bolt",)),
+                ("pick_up_right", ("bolt", "GT")),
                 ("assemble_right_to_left", ("cf2", "chassis_front/cabin2", "bolt/bolt")),
-                ("pick_up_right", ("fl_fw_unit",)),
+                ("pick_up_right", ("fl_fw_unit", "SA")),
                 ("assemble_right_to_left", ("cfl", "chassis_front/lfw", "fl_fender/wheel")),
-                ("pick_up_right", ("fr_fw_unit",)),
+                ("pick_up_right", ("fr_fw_unit", "SA")),
                 ("assemble_right_to_left", ("truck_front", "chassis_front/rfw", "fr_fender/wheel")),
                 ("drop_left", ())
             ],
@@ -852,24 +835,15 @@ def _sample_demo_plan(sampled_parts):
         # Truck back
         (
             [
-                ("pick_up_left", ("chassis_back",)),
-                ("pick_up_right", ("load",)),
+                ("pick_up_left", ("chassis_back", "GT")),
+                ("pick_up_right", ("load", "GT")),
                 ("assemble_right_to_left", ("lb0", "chassis_back/load", "load/back")),
-                ("pick_up_right", ("bolt",)),
-                ("assemble_right_to_left", ("lb1", "chassis_back/load", "bolt/bolt"))
-            ] + ([
-                ("pick_up_right", ("bl_fw_unit",)),
-                ("assemble_right_to_left", ("lb2", "chassis_back/lfw0", "bl_fender/wheel"))
-            ] if not sampled_parts[("bl_fender", 0)].startswith("double") else [
-                ("pick_up_right", ("bl_fw_unit",)),
-                ("assemble_right_to_left", ("lb2", "chassis_back/lfw1", "bl_fender/wheel1"))
-            ]) + ([
-                ("pick_up_right", ("br_fw_unit",)),
-                ("assemble_right_to_left", ("truck_back", "chassis_back/rfw0", "bl_fender/wheel"))
-            ] if not sampled_parts[("br_fender", 0)].startswith("double") else [
-                ("pick_up_right", ("br_fw_unit",)),
-                ("assemble_right_to_left", ("truck_back", "chassis_back/rfw1", "br_fender/wheel1"))
-            ]) + [
+                ("pick_up_right", ("bolt", "GT")),
+                ("assemble_right_to_left", ("lb1", "chassis_back/load", "bolt/bolt")),
+                ("pick_up_right", ("bl_fw_unit", "SA")),
+                ("assemble_right_to_left", ("lb2", "chassis_back/lfw", "bl_fender/wheel")),
+                ("pick_up_right", ("br_fw_unit", "SA")),
+                ("assemble_right_to_left", ("truck_back", "chassis_back/rfw", "br_fender/wheel")),
                 ("drop_left", ())
             ],
             ["bl_fw_unit", "br_fw_unit"],
@@ -879,14 +853,14 @@ def _sample_demo_plan(sampled_parts):
         # Whole truck
         (
             [
-                ("pick_up_left", ("truck_front",)),
-                ("pick_up_right", ("chassis_center",)),
+                ("pick_up_left", ("truck_front", "SA")),
+                ("pick_up_right", ("chassis_center", "GT")),
                 ("assemble_right_to_left", ("tfc0", "chassis_front/center", "chassis_center/front")),
-                ("pick_up_right", ("bolt",)),
+                ("pick_up_right", ("bolt", "GT")),
                 ("assemble_right_to_left", ("tfc1", "chassis_front/center", "bolt/bolt")),
-                ("pick_up_right", ("truck_back",)),
+                ("pick_up_right", ("truck_back", "SA")),
                 ("assemble_right_to_left", ("tfcb", "chassis_center/back", "chassis_back/center")),
-                ("pick_up_right", ("bolt",)),
+                ("pick_up_right", ("bolt", "GT")),
                 ("assemble_right_to_left", ("truck", "chassis_center/back", "bolt/bolt")),
                 ("drop_left", ())
             ],
@@ -929,7 +903,7 @@ def _sample_demo_plan(sampled_parts):
                     compatible_parts.append(instance)
 
                 instance = random.sample(compatible_parts, 1)[0]
-                grounded_action = (action[0], (f"t_{instance[0]}_{instance[1]}",))
+                grounded_action = (action[0], (f"t_{instance[0]}_{instance[1]}", action[1][1]))
                 subtype = sampled_parts.pop(instance)
 
                 plan.append(grounded_action)

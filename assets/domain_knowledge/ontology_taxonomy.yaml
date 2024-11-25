@@ -53,7 +53,6 @@ fender:
     subtypes:
         - normal_fender
         - large_fender
-        - double_fender
         - fl_fender
         - fr_fender
         - bl_fender
@@ -75,12 +74,6 @@ large_fender:
         - large_bl_fender
         - large_br_fender
 
-double_fender:
-    relation_type: proper
-    subtypes:
-        - double_bl_fender
-        - double_br_fender
-
 fl_fender:
     relation_type: proper
     subtypes:
@@ -98,14 +91,12 @@ bl_fender:
     subtypes:
         - normal_bl_fender
         - large_bl_fender
-        - double_bl_fender
 
 br_fender:
     relation_type: proper
     subtypes:
         - normal_br_fender
         - large_br_fender
-        - double_br_fender
 
 wheel:
     relation_type: proper
@@ -138,14 +129,12 @@ back_left_fw_unit:
     subtypes:
         - normal_back_left_fw_unit
         - large_back_left_fw_unit
-        - double_back_left_fw_unit
 
 back_right_fw_unit:
     relation_type: proper
     subtypes:
         - normal_back_right_fw_unit
         - large_back_right_fw_unit
-        - double_back_right_fw_unit
 
 color:
     relation_type: quasi
