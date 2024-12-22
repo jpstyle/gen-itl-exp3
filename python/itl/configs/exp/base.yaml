@@ -1,4 +1,0 @@
-task: "build_truck_supertype"
-num_episodes: 3000
-checkpoint_interval: 25       # Save model checkpoint every * episodes
-strat_feedback: "minHelp"     # Options: "minHelp", "medHelp", "maxHelp"

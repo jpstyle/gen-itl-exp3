@@ -53,9 +53,8 @@ def main(cfg):
 
     # Experiment tag
     exp_tag = "_".join([
-        cfg.exp.strat_feedback,
-        cfg.agent.strat_generic,
-        cfg.agent.strat_assent,
+        cfg.exp.task.split("_")[-1],
+        cfg.exp.feedback_type,
         str(cfg.seed)
     ])
 
@@ -64,9 +63,8 @@ def main(cfg):
     os.makedirs(results_path, exist_ok=True)
 
     # Path to save agent models during & after training
-    if not cfg.agent.test_mode:
-        ckpt_path = os.path.join(cfg.paths.outputs_dir, "agent_model")
-        os.makedirs(ckpt_path, exist_ok=True)
+    ckpt_path = os.path.join(cfg.paths.outputs_dir, "agent_model")
+    os.makedirs(ckpt_path, exist_ok=True)
 
     # Tensorboard writer to log learning progress
     writer = SummaryWriter(f"{cfg.paths.outputs_dir}/tensorboard_logs")
@@ -266,11 +264,15 @@ def main(cfg):
                                         if v.sum() > 100        # Remove small/null masks
                                     }
                                 )
+                                visual_evidence = student.lt_mem.kb.visual_evidence_from_scene(
+                                    student.vision.scene
+                                )
+                                student.symbolic.sensemake_vis(None, visual_evidence)
                                 # Record instance names used in the environment side associated
                                 # with each object
                                 for i, crange in enumerate(dem_refs):
-                                    env_name = utterance[crange[0]:crange[1]]
-                                    student.vision.scene[f"o{i}"]["env_name"] = env_name
+                                    env_handle = utterance[crange[0]:crange[1]]
+                                    student.vision.scene[f"o{i}"]["env_handle"] = env_handle
                             else:
                                 # General case where message from Teacher or Student-side
                                 # action effect feedback from Unity environment has arrived
@@ -386,32 +388,32 @@ def main(cfg):
                 new_env = False
                 env.step()
 
-        for gt_conc, ep_log in teacher.current_episode_record.items():
-            ans_conc = ep_log["answer"]
+        # for gt_conc, ep_log in teacher.current_episode_record.items():
+        #     ans_conc = ep_log["answer"]
 
-            # Update metrics
-            regrets_conc, total_conc = mistakes[gt_conc][-1]
-            regrets_all, total_all = mistakes["__all__"][-1]
+        #     # Update metrics
+        #     regrets_conc, total_conc = mistakes[gt_conc][-1]
+        #     regrets_all, total_all = mistakes["__all__"][-1]
 
-            new_regrets_conc = regrets_conc+1 if gt_conc != ans_conc else regrets_conc
-            new_total_conc = total_conc+1
-            new_regrets_all = regrets_all+1 if gt_conc != ans_conc else regrets_all
-            new_total_all = total_all+1
+        #     new_regrets_conc = regrets_conc+1 if gt_conc != ans_conc else regrets_conc
+        #     new_total_conc = total_conc+1
+        #     new_regrets_all = regrets_all+1 if gt_conc != ans_conc else regrets_all
+        #     new_total_all = total_all+1
 
-            # Log progress to tensorboard
-            writer.add_scalar(
-                f"Cumul. regret: {gt_conc}", new_regrets_conc, global_step=new_total_conc
-            )
-            writer.add_scalar(
-                f"Cumul. regret: *All concepts*", new_regrets_all, global_step=new_total_all
-            )
-            mistakes[gt_conc].append((new_regrets_conc, new_total_conc))
-            mistakes["__all__"].append((new_regrets_all, new_total_all))
+        #     # Log progress to tensorboard
+        #     writer.add_scalar(
+        #         f"Cumul. regret: {gt_conc}", new_regrets_conc, global_step=new_total_conc
+        #     )
+        #     writer.add_scalar(
+        #         f"Cumul. regret: *All concepts*", new_regrets_all, global_step=new_total_all
+        #     )
+        #     mistakes[gt_conc].append((new_regrets_conc, new_total_conc))
+        #     mistakes["__all__"].append((new_regrets_all, new_total_all))
 
-        # If not test mode (i.e., training mode), save current agent model checkpoint
-        # to output dir every 25 episodes
-        if not cfg.agent.test_mode and (i+1) % cfg.exp.checkpoint_interval == 0:
-            student.save_model(f"{ckpt_path}/{exp_tag}_{i+1}.ckpt")
+        # # If not test mode (i.e., training mode), save current agent model checkpoint
+        # # to output dir every 25 episodes
+        # if not cfg.agent.test_mode and (i+1) % cfg.exp.checkpoint_interval == 0:
+        #     student.save_model(f"{ckpt_path}/{exp_tag}_{i+1}.ckpt")
 
     # Close Unity environment & tensorboard writer
     env.close()
@@ -419,7 +421,7 @@ def main(cfg):
 
     if cfg.agent.test_mode:
         # If test mode, save exam records to output dir for later summary
-        out_csv_fname = cfg.agent.model_path.split("/")[-1].replace(".ckpt",".csv")
+        out_csv_fname = cfg.exp.agent_model_path.split("/")[-1].replace(".ckpt",".csv")
         out_csv_fname = f"outputs_{out_csv_fname}"
 
         with open(os.path.join(results_path, out_csv_fname), "w") as out_csv:

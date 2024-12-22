@@ -12,10 +12,6 @@ from .dialogue import DialogueManager
 class LanguageModule:
 
     def __init__(self):
-        """
-        Args:
-            opts: argparse.Namespace, from parse_argument()
-        """
         self.semantic = SemanticParser()
         self.dialogue = DialogueManager()
 
@@ -43,7 +39,7 @@ class LanguageModule:
         # Register these indices as names, for starters
         self.dialogue.referent_names.update({ i: i for i in self.dialogue.referents["env"][-1] })
 
-    def understand(self, l_input, pointing=None):
+    def understand(self, l_input):
         """
         Update dialogue state by interpreting the parsed NL input in the context
         of the ongoing dialogue.
@@ -52,22 +48,22 @@ class LanguageModule:
         the utterance, indicating the reference (represented as mask) made by the
         n'th occurrence of linguistic token. Mostly for programmed experiments.
         """
-        speakers, parses = l_input
+        parses, pointing, speakers = l_input
         ti = len(self.dialogue.record)      # Starting dialogue turn index
 
         # First segment language inputs into consecutive sequences of utterances
         # given by same speakers (Doesn't do much in dialogues with only two
         # participants, but for completeness' sake)
         segments = []; consecutive_parses = []; last_speaker = None
-        for spk, parse in zip(speakers, parses):
+        for parse, dem_refs, spk in zip(*l_input):
             if spk == last_speaker:
-                consecutive_parses.append(parse)
+                consecutive_parses.append((parse, dem_refs))
             else:
                 # Speaker different from the last one, new speaker taking turn
                 # (except None speaker, which doesn't stand for any real one)
                 if last_speaker is not None:
                     segments.append((last_speaker, consecutive_parses))
-                consecutive_parses = [parse]
+                consecutive_parses = [(parse, dem_refs)]
                 last_speaker = spk
         # Don't forget last consecutive segment
         segments.append((last_speaker, consecutive_parses))
@@ -79,7 +75,7 @@ class LanguageModule:
             # For indexing clauses in dialogue turn
             se2ci = defaultdict(lambda: len(se2ci))
 
-            for si, parse in enumerate(parse_seq):
+            for si, (parse, dem_refs) in enumerate(parse_seq):
                 clauses = parse["clauses"]
                 referents = parse["referents"]
                 source = parse["source"]
@@ -116,7 +112,7 @@ class LanguageModule:
                         # Demonstrately referenced entities
                         assert pointing is not None and len(pointing) > si
 
-                        dem_mask = pointing[si][rf_info["dem_ref"]].astype(bool)
+                        dem_mask = dem_refs[rf_info["dem_ref"]].astype(bool)
                         pointed = self.dialogue.dem_point(dem_mask)
                         self.dialogue.assignment_hard[r2i[rf]] = pointed
                 for _, _, ante, cons in clauses.values():
@@ -178,9 +174,13 @@ class LanguageModule:
             self.dialogue.record.append((spk, new_record))    # Add new record
             ti += 1         # New turn commences (if any further segments exist)
 
-    def acknowledge(self):
-        """ Push an acknowledging utterance to generation buffer """
-        self.dialogue.to_generate.append((None, "OK.", {}))
+    def utter_simple(self, utterance):
+        """
+        Push a simple utterance (that doesn't need a specific logical form
+        associated) to generation buffer
+        """
+        surface_form, mood = utterance
+        self.dialogue.to_generate.append((None, surface_form, mood, {}, {}, {}))
 
     def generate(self):
         """ Flush the buffer of utterances prepared """
@@ -193,15 +193,42 @@ class LanguageModule:
             for ci_new, data in enumerate(self.dialogue.to_generate):
                 ri_evt = f"t{ti_new}c{ci_new}"
 
-                logical_forms, surface_form, mood, referents, dem_refs = data
-                if logical_forms is None:
+                logical_forms, surface_form, mood = data[:3]
+                referents, predicates, dem_refs = data[3:]
+
+                # Dialogue record update
+                if logical_forms is not None:
+                    gq, bvars, ante, cons = logical_forms
+                    rename_referents = lambda refs: [
+                        f"{ri_evt}{rf}" if rf in referents else rf for rf in refs
+                    ]       # Rename referents as needed by adding prefix
+                    bvars = set(rename_referents(bvars))
+                    ante = [
+                        (pos, name, rename_referents(args))
+                        for pos, name, args in ante
+                    ]
+                    cons = [
+                        (pos, name, rename_referents(args))
+                        for pos, name, args in cons
+                    ]
+                    logical_forms = (gq, bvars, ante, cons)
+                else:
                     logical_forms = (None,) * 4
-
                 new_record.append((logical_forms, surface_form, mood))
-
-                # Dialogue state update
                 self.dialogue.clause_info[ri_evt] = { "mood": mood }
-                self.dialogue.referents["dis"].update(referents)
+
+                # Dialogue state update; attach appropriate index prefix to
+                # referent & predicate identifiers
+                for rf, data in referents.items():
+                    rf = f"{ri_evt}{rf}"
+                    if data["entity"] is not None:
+                        self.dialogue.value_assignment[rf] = data["entity"]
+                    self.dialogue.referents["dis"][rf] = {
+                        "source_evt": ri_evt, **data["rf_info"]
+                    }
+                for tok_ind, sense in predicates.items():
+                    tok_ind = (f"t{ti_new}", f"c{ci_new}", tok_ind)
+                    self.dialogue.word_senses[tok_ind] = sense
 
                 # NL utterance to log/print (as long as not prefixed by a special
                 # symbol '#')

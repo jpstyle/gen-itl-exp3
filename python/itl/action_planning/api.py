@@ -6,13 +6,20 @@ grounded, physical, low-level) or to recover any of the agent's internal
 maintenance goals violated by environmental changes (generally more cognitive,
 social, high-level)
 """
+from collections import deque
 from .plans.library import library
 
 
 class ActionPlannerModule:
     
     def __init__(self):
-        self.agenda = []
+        # collection of to-dos implemented as double-ended queue, each entry
+        # of which is a tuple of (type, parameters)
+        self.agenda = deque()
+
+        # For storing whichever state values that need to be tracked along execution
+        # of some plan consisting of multiple to-dos
+        self.execution_state = {}
 
     def obtain_plan(self, todo):
         """

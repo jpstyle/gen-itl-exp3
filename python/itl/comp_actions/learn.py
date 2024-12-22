@@ -5,12 +5,9 @@ referring to belief updates that modify long-term memory
 import re
 import math
 import torch
-from math import sin, cos, radians
-from itertools import product, permutations
+from itertools import permutations
 from collections import defaultdict
 
-import inflect
-import cv2 as cv
 import open3d as o3d
 import numpy as np
 import networkx as nx
@@ -23,7 +20,7 @@ from ..vision.utils import (
     flip_position_y, flip_quaternion_y, transformation_matrix
 )
 from ..lpmln import Literal
-from ..lpmln.utils import flatten_cons_ante, wrap_args
+from ..lpmln.utils import flatten_ante_cons, wrap_args
 
 
 EPS = 1e-10                 # Value used for numerical stabilization
@@ -60,104 +57,86 @@ is_grounded = lambda cnjt: all(not is_var for _, is_var in cnjt.args) \
     if isinstance(cnjt, Literal) else all(is_grounded(nc) for nc in cnjt)
 is_lifted = lambda cnjt: all(is_var for _, is_var in cnjt.args) \
     if isinstance(cnjt, Literal) else all(is_lifted(nc) for nc in cnjt)
-has_pred_referent = \
-    lambda cnjt: any(isinstance(a,str) and a[0].lower()=="p" for a, _ in cnjt.args) \
-        if isinstance(cnjt, Literal) else any(has_pred_referent(nc) for nc in cnjt)
 has_reserved_pred = \
     lambda cnjt: cnjt.name.startswith("sp_") \
         if isinstance(cnjt, Literal) else any(has_reserved_pred(nc) for nc in cnjt)
 
 
-def identify_mismatch(agent, rule):
+def identify_mismatch(agent, statement):
     """
     Test against vision-only sensemaking result to identify any mismatch btw.
-    agent's & user's perception of world state
+    agent's & user's perception of world state. If any significant mismatch
+    (as determined by surprisal) is identified, handle it by updating agent's
+    exemplar base. Return bool indicating whether mismatch is identified and
+    exemplar base is accordingly updated.
     """
-    cons, ante = rule
-    rule_is_grounded = (cons is None or is_grounded(cons)) and \
+    xb_updated = False          # Return value
+
+    ante, cons = statement
+    stm_is_grounded = (cons is None or is_grounded(cons)) and \
         (ante is None or is_grounded(ante))
-    rule_has_pred_referent = (cons is None or has_pred_referent(cons)) and \
-        (ante is None or has_pred_referent(ante))
 
-    # Skip handling duplicate cases in the context
-    if rule in [r for r, _, _ in agent.symbolic.mismatches]: return
+    # Proceed only when we have a grounded event & vision-only sensemaking
+    # result has been obtained
+    if not stm_is_grounded or agent.symbolic.concl_vis is None:
+        return False
 
-    if (rule_is_grounded and not rule_has_pred_referent and 
-        agent.symbolic.concl_vis is not None):
-        # Grounded event without constant predicate referents, only if vision-only
-        # sensemaking result has been obtained
+    # Make a yes/no query to obtain the likelihood of content
+    reg_gr_v, _ = agent.symbolic.concl_vis
+    q_response, _ = agent.symbolic.query(reg_gr_v, None, statement)
+    ev_prob = q_response[()]
 
-        # Make a yes/no query to obtain the likelihood of content
-        reg_gr_v, _ = agent.symbolic.concl_vis
-        q_response, _ = agent.symbolic.query(reg_gr_v, None, rule)
-        ev_prob = q_response[()]
+    # Proceed only if surprisal is above threshold
+    surprisal = -math.log(ev_prob + EPS)
+    if surprisal < -math.log(SR_THRES):
+        return False
 
-        surprisal = -math.log(ev_prob + EPS)
-        if surprisal >= -math.log(SR_THRES):
-            agent.symbolic.mismatches.append([rule, surprisal, False])
+    for ante, cons in flatten_ante_cons(*statement):
+        if len(ante+cons) != 1:
+            # Not going to happen in our scope, but setting up a flag...
+            continue
 
+        if len(cons) == 1 and len(ante) == 0:
+            # Positive grounded fact
+            atom = cons[0]
+            pol = "pos"
+        else:
+            # Negative grounded fact
+            atom = ante[0]
+            pol = "neg"
 
-def identify_confusion(agent, rule, prev_statements, novel_concepts):
-    """
-    Test against vision module output to identify any 'concept overlap' -- i.e.
-    whenever the agent confuses two concepts difficult to distinguish visually
-    and mistakes one for another.
-    """
-    cons, ante = rule
-    rule_is_grounded = (cons is None or is_grounded(cons)) and \
-        (ante is None or is_grounded(ante))
-    rule_has_pred_referent = (cons is None or has_pred_referent(cons)) and \
-        (ante is None or has_pred_referent(ante))
+        conc_type, conc_ind = atom.name.split("_")
+        conc_ind = int(conc_ind)
+        ex_obj = atom.args[0][0]
 
-    if (
-        agent.cfg.exp.strat_feedback.startswith("maxHelp") and
-        rule_is_grounded and ante is None and not rule_has_pred_referent
-    ):
-        # Positive grounded fact with non-reserved predicates that don't have constant
-        # predicate referent args; only if the user adopts maxHelp* strategy and provides
-        # generic NL feedback
+        match conc_type:
+            case "pcls":
+                if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
+                    # New exemplar, mask & vector of the object should be added
+                    pointer = ((conc_type, conc_ind, pol), (True, 0))
+                else:
+                    # Exemplar present in storage, only add pointer
+                    ex_ind = agent.vision.scene[ex_obj]["exemplar_ind"]
+                    pointer = ((conc_type, conc_ind, pol), (False, ex_ind))
 
-        # Fetch agent's last answer; this assumes the last factual statement
-        # by agent is provided as answer to the last question from user. This
-        # might change in the future when we adopt a more sophisticated formalism
-        # for representing discourse to relax the assumption.
-        prev_statements_A = [
-            stm for _, (spk, stm) in prev_statements
-            if spk=="Student" and not any(has_reserved_pred(cnjt) for cnjt in stm[0])
-        ]
-        if len(prev_statements_A) == 0:
-            # Hasn't given an answer (i.e., "I am not sure.")
-            return
+                added_xi = _add_scene_and_exemplar_2d(
+                    pointer,
+                    agent.vision.scene[ex_obj]["scene_img"],
+                    agent.vision.scene[ex_obj]["pred_mask"],
+                    agent.vision.scene[ex_obj]["vis_emb"],
+                    agent.lt_mem.exemplars
+                )
+                if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
+                    agent.vision.scene[ex_obj]["exemplar_ind"] = added_xi
+                xb_updated = True
 
-        agent_last_ans = prev_statements_A[-1][0][0]
-        ans_conc_type, ans_conc_ind = agent_last_ans.name.split("_")
-        ans_conc_ind = int(ans_conc_ind)
+            case "prel":
+                raise NotImplementedError   # Step back for relation prediction...
 
-        for lit in cons:
-            # Disregard negated conjunctions
-            if not isinstance(lit, Literal): continue
+            case _:
+                raise ValueError("Invalid concept type")
 
-            # (Temporary) Only consider 1-place predicates, so retrieve the single
-            # and first entity from the arg list
-            assert len(lit.args) == 1
-
-            conc_type, conc_ind = lit.name.split("_")
-            conc_ind = int(conc_ind)
-
-            if (conc_ind, conc_type) not in novel_concepts:
-                # Disregard if the correct answer concept is novel to the agent and
-                # has to be newly registered in the visual concept inventory
-                continue
-
-            if (lit.args == agent_last_ans.args and conc_type == ans_conc_type
-                and conc_ind != ans_conc_ind):
-                # Potential confusion case, as unordered label pair
-                confusion_pair = frozenset([conc_ind, ans_conc_ind])
-
-                if (conc_type, confusion_pair) not in agent.confused_no_more:
-                    # Agent's best guess disagrees with the user-provided
-                    # information
-                    agent.vision.confusions.add((conc_type, confusion_pair))
+    return xb_updated
 
 
 def identify_acknowledgement(agent, rule, prev_statements, prev_context):
@@ -205,19 +184,24 @@ def identify_acknowledgement(agent, rule, prev_statements, prev_context):
                 # ongoing dialogue record
 
 
-def identify_generics(agent, rule, provenance, prev_Qs, generics):
+def identify_generics(agent, statement, prev_Qs, provenance):
     """
     For symbolic knowledge base expansion. Integrate the rule into KB by adding
-    (for now we won't worry about intra-KB consistency, belief revision, etc.).
-    Identified generics will be added to the provided `generics` list.
+    as new entry if it is not already included. For now we won't worry about
+    intra-KB consistency, belief revision, etc. Return bool indicating whether
+    the statement is identified as a novel generic rule, and KB is accordingly
+    updated.
     """
-    cons, ante = rule
+    kb_updated = False          # Return value
+
+    ante, cons = statement
     rule_is_lifted = (cons is None or is_lifted(cons)) and \
         (ante is None or is_lifted(ante))
     rule_is_grounded = (cons is None or is_grounded(cons)) and \
         (ante is None or is_grounded(ante))
-    rule_has_pred_referent = (cons is None or has_pred_referent(cons)) and \
-        (ante is None or has_pred_referent(ante))
+
+    # List of generic rules that can be extracted from the statement
+    generics = []
 
     if rule_is_lifted:
         # Lifted generic rule statement, without any grounded term arguments
@@ -228,188 +212,79 @@ def identify_generics(agent, rule, provenance, prev_Qs, generics):
         # First add the face-value semantics of the explicitly stated rule
         generics.append((rule, U_IN_PR, provenance, knowledge_type))
 
-    if (rule_is_grounded and ante is None and not rule_has_pred_referent):
-        # Grounded fact without constant predicate referents
+    # if rule_is_grounded and ante is None:
+    #     # Grounded fact without constant predicate referents
 
-        # For corrective feedback "This is Y" following the agent's incorrect answer
-        # to the probing question "What kind of X is this?", extract 'Y entails X'
-        # (e.g., What kind of truck is this? This is a fire truck => All fire trucks
-        # are trucks). More of a universal statement rather than a generic one.
+    #     # For corrective feedback "This is Y" following the agent's incorrect answer
+    #     # to the probing question "What kind of X is this?", extract 'Y entails X'
+    #     # (e.g., What kind of truck is this? This is a fire truck => All fire trucks
+    #     # are trucks). More of a universal statement rather than a generic one.
 
-        # Collect concept entailment & constraints in questions made
-        # by the user during this dialogue
-        entail_consts = defaultdict(list)       # Map from pred var to set of pred consts
-        instance_consts = {}                    # Map from ent const to pred var
-        context_Qs = {}                         # Pointers to user's original question
+    #     # Collect concept entailment & constraints in questions made by the user
+    #     # during this dialogue
+    #     entail_consts = defaultdict(list)       # Map from pred var to set of pred consts
+    #     instance_consts = {}                    # Map from ent const to pred var
+    #     context_Qs = {}                         # Pointers to user's original question
 
-        # Disregard all questions except the last one from user
-        relevant_Qs = [
-            (q_vars, q_cons, presup, raw)
-            for _, (spk, (q_vars, (q_cons, _)), presup, raw) in prev_Qs
-            if spk=="Teacher"
-        ][-1:]
+    #     # Disregard all questions except the last one from user
+    #     relevant_Qs = [
+    #         (q_vars, q_cons, presup, raw)
+    #         for _, (spk, (q_vars, (q_cons, _)), presup, raw) in prev_Qs
+    #         if spk=="Teacher"
+    #     ][-1:]
 
-        for q_vars, q_cons, presup, raw in relevant_Qs:
+    #     for q_vars, q_cons, presup, raw in relevant_Qs:
 
-            if presup is None:
-                p_cons = []
-            else:
-                p_cons, _ = presup
+    #         if presup is None:
+    #             p_cons = []
+    #         else:
+    #             p_cons, _ = presup
 
-            for qv, is_pred in q_vars:
-                # Consider only predicate variables
-                if not is_pred: continue
+    #         for qv, is_pred in q_vars:
+    #             # Consider only predicate variables
+    #             if not is_pred: continue
 
-                for ql in q_cons:
-                    # Constraint: P should entail conjunction {p1 and p2 and ...}
-                    if ql.name=="sp_subtype" and ql.args[0][0]==qv:
-                        entail_consts[qv] += [pl.name for pl in p_cons]
+    #             for ql in q_cons:
+    #                 # Constraint: P should entail conjunction {p1 and p2 and ...}
+    #                 if ql.name=="sp_subtype" and ql.args[0][0]==qv:
+    #                     entail_consts[qv] += [pl.name for pl in p_cons]
 
-                    # Constraint: x should be an instance of P
-                    if ql.name=="sp_isinstance" and ql.args[0][0]==qv:
-                        instance_consts[ql.args[1][0]] = qv
+    #                 # Constraint: x should be an instance of P
+    #                 if ql.name=="sp_isinstance" and ql.args[0][0]==qv:
+    #                     instance_consts[ql.args[1][0]] = qv
             
-                context_Qs[qv] = raw
+    #             context_Qs[qv] = raw
 
-        # Synthesize into a rule encoding the appropriate entailment
-        for ent, pred_var in instance_consts.items():
-            if pred_var not in entail_consts: continue
-            entailed_preds = entail_consts[pred_var]
+    #     # Synthesize into a rule encoding the appropriate entailment
+    #     for ent, pred_var in instance_consts.items():
+    #         if pred_var not in entail_consts: continue
+    #         entailed_preds = entail_consts[pred_var]
 
-            # (Temporary) Only consider 1-place predicates, so match the first and
-            # only entity from the arg list. Disregard negated conjunctions.
-            entailing_preds = tuple(
-                lit.name for lit in cons
-                if isinstance(lit, Literal) and len(lit.args)==1 and lit.args[0][0]==ent
-            )
-            if len(entailing_preds) == 0: continue
+    #         # (Temporary) Only consider 1-place predicates, so match the first and
+    #         # only entity from the arg list. Disregard negated conjunctions.
+    #         entailing_preds = tuple(
+    #             lit.name for lit in cons
+    #             if isinstance(lit, Literal) and len(lit.args)==1 and lit.args[0][0]==ent
+    #         )
+    #         if len(entailing_preds) == 0: continue
 
-            entailment_rule = (
-                tuple(Literal(pred, [("X", True)]) for pred in entailed_preds),
-                tuple(Literal(pred, [("X", True)]) for pred in entailing_preds)
-            )
-            knowledge_source = f"{context_Qs[pred_var]} => {provenance}"
-            knowledge_type = "taxonomy"
-            generics.append(
-                (entailment_rule, U_IN_PR, knowledge_source, knowledge_type)
-            )
+    #         entailment_rule = (
+    #             tuple(Literal(pred, [("X", True)]) for pred in entailed_preds),
+    #             tuple(Literal(pred, [("X", True)]) for pred in entailing_preds)
+    #         )
+    #         knowledge_source = f"{context_Qs[pred_var]} => {provenance}"
+    #         knowledge_type = "taxonomy"
+    #         generics.append(
+    #             (entailment_rule, U_IN_PR, knowledge_source, knowledge_type)
+    #         )
 
+    # Update knowledge base with obtained generic statements
+    for rule, w_pr, knowledge_source, knowledge_type in generics:
+        kb_updated |= agent.lt_mem.kb.add(
+            rule, w_pr, knowledge_source, knowledge_type
+        )
 
-def handle_mismatch(agent, mismatch):
-    """
-    Handle cognition gap following some specified strategy. Note that we now
-    assume the user (teacher) is an infallible oracle, and the agent doesn't
-    question info provided from user.
-    """
-    rule, _, handled = mismatch
-
-    if handled: return 
-
-    objs_to_add = set(); pointers = defaultdict(set)
-    for cons, ante in flatten_cons_ante(*rule):
-        is_grounded = all(not is_var for l in cons+ante for _, is_var in l.args)
-
-        if is_grounded and len(cons+ante)==1:
-            if len(cons) == 1 and len(ante) == 0:
-                # Positive grounded fact
-                atom = cons[0]
-                pol = "pos"
-            else:
-                # Negative grounded fact
-                atom = ante[0]
-                pol = "neg"
-
-            conc_type, conc_ind = atom.name.split("_")
-            conc_ind = int(conc_ind)
-            args = [a for a, _ in atom.args]
-
-            match conc_type:
-                case "pcls":
-                    if agent.vision.scene[args[0]]["exemplar_ind"] is None:
-                        # New exemplar, mask & vector of the object should be added
-                        objs_to_add.add(args[0])
-                        pointers[(conc_type, conc_ind, pol)].add(args[0])
-                    else:
-                        # Exemplar present in storage, only add pointer
-                        ex_ind = agent.vision.scene[args[0]]["exemplar_ind"]
-                        pointers[(conc_type, conc_ind, pol)].add(ex_ind)
-                case "prel":
-                    raise NotImplementedError   # Step back for relation prediction...
-                case _:
-                    raise ValueError("Invalid concept type")
-
-    objs_to_add = list(objs_to_add)         # Assign arbitrary ordering
-    _add_scene_and_exemplars_2d(
-        objs_to_add, pointers,
-        agent.vision.scene, agent.vision.latest_inputs[-1], agent.lt_mem.exemplars
-    )
-
-    # Mark as handled
-    mismatch[2] = True
-
-
-def handle_confusion(agent, confusion):
-    """
-    Handle 'concept overlap' between two similar visual concepts. Two (fine-grained)
-    concepts can be disambiguated by some symbolically represented generic rules,
-    request such differences by generating an appropriate question. 
-    """
-    # This confusion is about to be handled
-    agent.vision.confusions.remove(confusion)
-
-    if agent.cfg.exp.strat_feedback.startswith("maxHelpExpl"):
-        # When interacting with teachers with this strategy, generic KB rules are
-        # elicited not by the difference questions
-        return
-
-    # New dialogue turn & clause index for the question to be asked
-    ti_new = len(agent.lang.dialogue.record)
-    ci_new = 0
-
-    conc_type, conc_inds = confusion
-    conc_inds = list(conc_inds)
-
-    # For now we are only interested in disambiguating class (noun) concepts
-    assert conc_type == "pcls"
-
-    # Prepare logical form of the concept-diff question to ask
-    q_vars = ((f"X2t{ti_new}c{ci_new}", False),)
-    q_rules = (
-        (("diff", "sp", tuple(f"{ri}t{ti_new}c{ci_new}" for ri in ["x0", "x1", "X2"]), False),),
-        ()
-    )
-    ques_logical_form = (q_vars, q_rules)
-
-    # Prepare surface form of the concept-diff question to ask
-    pluralize = inflect.engine().plural
-    conc_names = [
-        agent.lt_mem.lexicon.d2s[(ci, conc_type)][0][0]
-        for ci in conc_inds
-    ]       # Fetch string name for concepts from the lexicon
-    conc_names = [
-        re.findall(r"(?:^|[A-Z])(?:[a-z]+|[A-Z]*(?=[A-Z]|$))", cn)
-        for cn in conc_names
-    ]       # Unpack camelCased names
-    conc_names = [
-        pluralize(" ".join(tok.lower() for tok in cn))
-        for cn in conc_names
-    ]       # Lowercase tokens and pluralize
-
-    # Update cognitive state w.r.t. value assignment and word sense
-    agent.symbolic.value_assignment.update({
-        f"x0t{ti_new}c{ci_new}": f"{conc_type}_{conc_inds[0]}",
-        f"x1t{ti_new}c{ci_new}": f"{conc_type}_{conc_inds[1]}"
-    })
-
-    ques_translated = f"How are {conc_names[0]} and {conc_names[1]} different?"
-
-    agent.lang.dialogue.to_generate.append(
-        ((None, ques_logical_form), ques_translated, {})
-    )
-
-    # No need to request concept differences again for this particular case
-    # for the rest of the interaction episode sequence
-    agent.confused_no_more.add(confusion)
+    return kb_updated
 
 
 def handle_acknowledgement(agent, acknowledgement_info):
@@ -546,7 +421,7 @@ def handle_neologism(agent, novel_concepts, dialogue_state):
     xb_updated = False
 
     neologisms = {
-        tok: sym for tok, (sym, den) in agent.symbolic.word_senses.items()
+        tok: sym for tok, (sym, den) in agent.lang.dialogue.word_senses.items()
         if den is None
     }
 
@@ -615,6 +490,15 @@ def handle_neologism(agent, novel_concepts, dialogue_state):
 
                 # Set flag that XB is updated
                 xb_updated |= True
+
+            elif len(ante) == 0 and mood == "!":
+                # Neologism is an argument of a command; agent will report whichever
+                # inability associated with the concept, and teacher will provide
+                # some demonstration that involves an instance of the concept.
+                # Lexicon will be appropriately expanded while analyzing the demo,
+                # and the neologism will be duly considered as 'resolved' then.
+                agent.lang.unresolved_neologisms.add(sym)
+
             else:
                 # Otherwise not immediately resolvable
                 agent.lang.unresolved_neologisms.add(sym)
@@ -640,37 +524,26 @@ def report_neologism(agent, neologism):
     information that characterize the concept denoted by the neologism (e.g., definition,
     exemplar)
     """
-    # New dialogue turn & clause index for the answer to be provided
-    ti_new = len(agent.lang.dialogue.record)
-    ci_new = len(agent.lang.dialogue.to_generate)
-    ri_ignorance = f"t{ti_new}c{ci_new}"            # Denotes the ignorance state event
-    ri_self = f"t{ti_new}c{ci_new}x0"               # Denotes self (i.e., agent)
-    ri_neologism = f"t{ti_new}c{ci_new}x1"          # Denotes the neologism
-    tok_ind = (f"t{ti_new}", f"c{ci_new}", "pc0")   # Denotes 'unknown' predicate
-
     # Update cognitive state w.r.t. value assignment and word sense
-    agent.symbolic.value_assignment[ri_self] = "_self"
-    agent.symbolic.word_senses[tok_ind] = (("sp", "unable"), "sp_unable")
-
-    # Corresponding logical form
-    gq = None; bvars = None; ante = []
+    
+    # NL surface form and corresponding logical form
+    surface_form = f"I don't know what '{neologism[1]}' means."
+    gq = None; bvars = set(); ante = []
     cons = [
-        ("sp", "unknown", [ri_self, ri_neologism]),
-        ("sp", "pronoun1", [ri_self]),
-        neologism + ([ri_neologism],)
+        ("sp", "unknown", ["x0", "x1"]),
+        ("sp", "pronoun1", ["x0"]),
+        neologism + (["x1"],)
     ]
+    logical_form = (gq, bvars, ante, cons)
+
+    mood = "."      # Indicative
+
+    # Referents & predicates info
+    referents = {"x0": { "entity": "_self", "rf_info": {} } }
+    predicates = { "pc0": (("sp", "unable"), "sp_unable") }
 
     agent.lang.dialogue.to_generate.append(
-        (
-            (gq, bvars, ante, cons),
-            f"I don't know what '{neologism[1]}' means.",
-            ".",
-            {
-                ri_self: { "source_evt": ri_ignorance },
-                ri_neologism: { "source_evt": ri_ignorance, "is_pred": True }
-            },
-            {}
-        )
+        (logical_form, surface_form, mood, referents, predicates, {})
     )
 
 
@@ -685,7 +558,7 @@ def analyze_demonstration(agent, demo_data):
     """
     # Shortcuts
     referents = agent.lang.dialogue.referents
-    value_assignment = agent.symbolic.value_assignment
+    value_assignment = agent.lang.dialogue.value_assignment
 
     prev_img = None         # Stores previous steps' visual observations
     inspect_data = { "img": {}, "msk": {}, "pose": {} }
@@ -913,6 +786,10 @@ def analyze_demonstration(agent, demo_data):
             new_conc_ind = agent.vision.add_concept("pcls")
             agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
             inst2conc_map[part_inst] = new_conc_ind
+
+        # In whichever case, the symbol shouldn't be a 'unresolved neologism'
+        if sym in agent.lang.unresolved_neologisms:
+            agent.lang.unresolved_neologisms.remove(sym)
 
     # Process 3D vision data, storing reconstructed structure data in XB    
     for part_inst, reconstruction in vision_3d_data.items():
@@ -1146,47 +1023,32 @@ def analyze_demonstration(agent, demo_data):
         agent.lt_mem.kb.add_structure(sa_conc, neutral_tree)
 
 
-def _add_scene_and_exemplars_2d(
-        objs_to_add, pointers, current_scene, current_raw_img, ex_mem
-    ):
+def _add_scene_and_exemplar_2d(pointer, scene_img, mask, f_vec, ex_mem):
     """
-    Helper method factored out for adding a scene, objects and/or concept exemplar
-    pointers
+    Helper method factored out for adding a scene, object and/or concept exemplar
+    pointer
     """
-    # Check if this scene is already stored in memory and if so fetch the ID
-    scene_ids = [
-        obj_info["exemplar_ind"][0] for obj_info in current_scene.values()
-        if obj_info["exemplar_ind"] is not None
-    ]
-    assert len(set(scene_ids)) <= 1         # All same or none
-    scene_id = scene_ids[0] if len(scene_ids) > 0 else None
+    exemplar_spec, (is_new_obj, exemplar_id) = pointer
 
-    # Add concept exemplars to memory
-    objs_to_add = list(objs_to_add)         # Assign arbitrary ordering
-    scene_img = current_raw_img if scene_id is None else None
+    if is_new_obj:
+        # New scene img, new ID should be assigend (flagged as None). Second
+        # entry of the tuple `exemplar_id` is an integer index pointing to
+        # an item in the `exemplars` list defined below.
+        assert isinstance(exemplar_id, int)
+        scene_id = None
+        obj_id = exemplar_id
+    else:
+        # Scene is already stored in memory, fetch the scene ID
+        assert isinstance(exemplar_id, tuple) and len(exemplar_id) == 2
+        scene_id, obj_id = exemplar_id
+
+    # Add concept exemplar to memory
+    scene_img = scene_img if scene_id is None else None
         # Need to pass the scene image if not already stored in memory
-    exemplars = [
-        {
-            "scene_id": scene_id,
-            "mask": current_scene[oi]["pred_mask"],
-            "f_vec": current_scene[oi]["vis_emb"]
-        }
-        for oi in objs_to_add
-    ]
-    pointers = {
-        conc_spec: {
-            # Pair (whether object is newly added, index within objs_to_add if True,
-            # (scene_id, obj_id) otherwise)
-            (True, objs_to_add.index(oi)) if isinstance(oi, str) else (False, oi)
-            for oi in objs
-        }
-        for conc_spec, objs in pointers.items()
-    }
+    exemplars = [{ "scene_id": scene_id, "mask": mask, "f_vec": f_vec }]
+    pointers = { exemplar_spec: [(is_new_obj, obj_id)] }
     added_inds = ex_mem.add_exs_2d(
         scene_img=scene_img, exemplars=exemplars, pointers=pointers
     )
 
-    for oi, xi in zip(objs_to_add, added_inds):
-        # Record exemplar storage index for corresponding object in visual scene,
-        # so that any potential redundant additions can be avoided
-        current_scene[oi]["exemplar_ind"] = xi
+    return added_inds[0]

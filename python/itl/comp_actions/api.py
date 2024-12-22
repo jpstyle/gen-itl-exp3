@@ -28,14 +28,8 @@ class CompositeActions:
     # Cognitive actions
     def identify_mismatch(self, rule):
         return identify_mismatch(self.agent, rule)
-    def handle_mismatch(self, mismatch):
-        return handle_mismatch(self.agent, mismatch)
-    def identify_confusion(self, rule, prev_statements, novel_concepts):
-        return identify_confusion(self.agent, rule, prev_statements, novel_concepts)
-    def handle_confusion(self, confusion):
-        return handle_confusion(self.agent, confusion)
-    def identify_generics(self, rule, provenance, prev_Qs, generics):
-        return identify_generics(self.agent, rule, provenance, prev_Qs, generics)
+    def identify_generics(self, rule, prev_Qs, provenance):
+        return identify_generics(self.agent, rule, prev_Qs, provenance)
     def identify_acknowledgement(self, rule, prev_statements, prev_context):
         return identify_acknowledgement(self.agent, rule, prev_statements, prev_context)
     def handle_acknowledgement(self, acknowledgement_info):

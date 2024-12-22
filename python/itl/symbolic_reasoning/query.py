@@ -2,11 +2,11 @@
 from itertools import product
 
 from ..lpmln import Rule, Polynomial
-from ..lpmln.utils import flatten_cons_ante
+from ..lpmln.utils import flatten_ante_cons
 from ..lpmln.program.compile import rg_query
 
 
-def query(reg_gr, q_vars, event, restrictors):
+def query(reg_gr, q_vars, event, restrictors=None):
     """
     Query a region graph compiled from LP^MLN program to estimate the likelihood of
     each possible answer to the provided question, represented as tuple of entities
@@ -27,12 +27,14 @@ def query(reg_gr, q_vars, event, restrictors):
         # Treat as list
         event = list(event)
 
+    restrictors = restrictors or {}
+
     event = sum([
-        flatten_cons_ante(ev_cons, ev_ante) for ev_cons, ev_ante in event
+        flatten_ante_cons(ev_ante, ev_cons) for ev_ante, ev_cons in event
     ], [])
     event = set(sum([
         [Rule(head=l) for l in ev_cons] if len(ev_cons) > 0 else [Rule(body=ev_ante)]
-        for ev_cons, ev_ante in event
+        for ev_ante, ev_cons in event
     ], []))
     assert all(
         ev_rule.is_fact() or ev_rule.is_single_body_constraint()

@@ -6,6 +6,7 @@ import re
 import copy
 import pickle
 import logging
+from collections import deque
 
 import torch
 
@@ -35,12 +36,8 @@ class ITLAgent:
         self.comp_actions = CompositeActions(self)
 
         # Load agent model from specified path
-        if "model_path" in cfg.agent:
-            self.load_model(cfg.agent.model_path)
-
-        # Agent learning strategy params
-        self.strat_generic = cfg.agent.strat_generic
-        self.strat_assent = cfg.agent.strat_assent
+        if "agent_model_path" in cfg.exp:
+            self.load_model(cfg.exp.agent_model_path)
 
         # (Fields below would categorize as 'working memory' in conventional
         # cognitive architectures...)
@@ -81,8 +78,7 @@ class ITLAgent:
         in the current scope of the research, by 'long-term knowledge' we are referring
         to the following information:
 
-        - Vision model; feature extractor backbone most importantly, and concept-specific
-            vectors
+        - Vision model; feature extractor backbone
         - Knowledge stored in long-term memory module:
             - Symbolic knowledge base, including generalized symbolic knowledge represented
                 as logic programming rules
@@ -143,38 +139,39 @@ class ITLAgent:
         self.vision.latest_inputs.append(usr_in)
 
     def _lang_inp(self, usr_in, pointing, speaker):
-        """ Handle provided language input (from user) """
+        """ Handle provided language input (could be from user or self) """
         if usr_in is None:
             usr_in = []
         elif not isinstance(usr_in, list):
             assert isinstance(usr_in, str)
             usr_in = [usr_in]
 
-        if pointing is None: pointing = {}
-        if speaker is None: speaker = []
+        pointing = pointing or {}
+        speaker = speaker or []
 
         assert len(usr_in) == len(pointing) == len(speaker)
 
-        if len(usr_in) > 0:
-            usr_in_flt = []; pointing_flt = []; speaker_flt = []
-            for utt, dem_refs, spk in zip(usr_in, pointing, speaker):
-                if spk == "Teacher" and utt == "# Observing":
-                    # Special case of user's acknowledgement signalled by silent
-                    # observation. Clear the null item on the top of the agenda
-                    # stack (if any) so that agent can proceed with the pending
-                    # action plan, without recording this entry as NL input.
-                    if self.planner.agenda[0] == ('execute_command', (None, None)):
-                        self.planner.agenda.pop(0)
-                    self.lang.latest_input = None
-                else:
-                    # General case NL input
-                    usr_in_flt.append(utt)
-                    pointing_flt.append(dem_refs)
-                    speaker_flt.append(spk)
+        usr_in_flt = []; pointing_flt = []; speaker_flt = []
+        for utt, dem_refs, spk in zip(usr_in, pointing, speaker):
+            if spk == "Teacher":
+                # Teacher somehow reacted by providing corrective feedback
+                # or signaling silent observation. Clear any null item on
+                # the top of the agenda so that agent can proceed with the
+                # pending action plan.
+                if len(self.planner.agenda) == 0:
+                    pass
+                elif self.planner.agenda[0] == ('execute_command', (None, None)):
+                    self.planner.agenda.popleft()
 
+            if utt != "# Observing":
+                # Process any general case NL input
+                usr_in_flt.append(utt)
+                pointing_flt.append(dem_refs)
+                speaker_flt.append(spk)
+
+        if len(usr_in_flt) > 0:
             parsed_input = self.lang.semantic.nl_parse(usr_in_flt, pointing_flt)
-            self.lang.latest_input = (speaker_flt, parsed_input)
-
+            self.lang.latest_input = (parsed_input, pointing_flt, speaker_flt)
         else:
             self.lang.latest_input = None
 
@@ -185,7 +182,7 @@ class ITLAgent:
 
         # Translated dialogue record and visual context from currently stored values
         # (scene may or may not change)
-        prev_translated = self.symbolic.translate_dialogue_content(self.lang.dialogue)
+        prev_record = self.lang.dialogue.export_resolved_record()
         prev_vis_scene = self.vision.scene
         prev_pr_prog = self.symbolic.concl_vis[1][1] if self.symbolic.concl_vis else None
         prev_kb = self.kb_snap
@@ -250,7 +247,7 @@ class ITLAgent:
                 if self.observed_demo is None: self.lang.situate(self.vision.scene)
 
                 # Understand the user input in the context of the dialogue
-                self.lang.understand(self.lang.latest_input, pointing=pointing)
+                self.lang.understand(self.lang.latest_input)
 
             ents_updated = False
             if self.vision.scene is not None and self.observed_demo is None:
@@ -282,25 +279,24 @@ class ITLAgent:
 
             if self.lang.latest_input is not None:
                 # Reference & word sense resolution to connect vision & discourse
-                self.symbolic.resolve_symbol_semantics(
-                    self.lang.dialogue, self.lt_mem.lexicon
-                )
+                self.lang.dialogue.resolve_symbol_semantics(self.lt_mem.lexicon)
 
             # Translate dialogue record into processable format based on the result
-            # of symbolic.resolve_symbol_semantics
-            translated = self.symbolic.translate_dialogue_content(self.lang.dialogue)
+            # of lang.resolve_symbol_semantics
+            resolved_record = self.lang.dialogue.export_resolved_record()
 
             # Check here whether a user demonstration is pending and agent should
             # switch to 'observation mode', where agent hands over the control to
             # user and begins to record subsequent events. Postpone any type of
             # learning until the observation mode is switched off.
             demonstrated_event = None
-            if len(translated) > 0:
+            if len(resolved_record) > 0:
                 # First recognize any future indicative 'demonstrate how' by user
-                speaker, turn_clauses = translated[-1]; ti = len(translated)-1
+                speaker, turn_clauses = resolved_record[-1]; ti = len(resolved_record)-1
                 for ci, ((_, _, _, cons), _, mood) in enumerate(turn_clauses):
-                    demo_lit = [lit for lit in cons if lit.name=="sp_demonstrate"]
+                    if cons is None: break
 
+                    demo_lit = [lit for lit in cons if lit.name=="sp_demonstrate"]
                     if len(demo_lit) == 0: break
 
                     (demo_evt, _), (demonstrator, _), (demo_target, _) = demo_lit[0].args
@@ -324,7 +320,7 @@ class ITLAgent:
                 demonstrated_event = re.findall(r"t(\d+)c(\d+)", demonstrated_event)[0]
                 demo_ti = int(demonstrated_event[0])
                 demo_ci = int(demonstrated_event[1])
-                demonstrated_event = translated[demo_ti][1][demo_ci][0][-1]
+                demonstrated_event = resolved_record[demo_ti][1][demo_ci][0][-1]
                 self.observed_demo = (demonstrated_event, (demo_ti, demo_ci))
                 break           # Break here without proceeding
 
@@ -334,7 +330,8 @@ class ITLAgent:
                 ###################################################################
 
                 # Set of statements made by user at this time step
-                user_statements = set.union(*[set(lf[-1]) for lf, _, _ in translated[-1][1]])
+                _, user_statements = resolved_record[-1]
+                (_, _, _, user_last_statement), _, _ = user_statements[-1]
 
                 # If a statement provides labeled instance of the 'target concept'
                 # of a "Build X" task, consider demonstration is finished
@@ -342,10 +339,10 @@ class ITLAgent:
                 build_pred = f"{build_pred[0]}_{build_pred[1]}"
                 task_preds = {lit.name for lit in self.observed_demo[0]}
 
-                if ({lit.name for lit in user_statements} | {build_pred}) <= task_preds:
+                if ({lit.name for lit in user_last_statement} | {build_pred}) <= task_preds:
                     # End of demonstration recognized; collect & learn from demo data
                     user_annotations = [
-                        (ti, contents) for ti, (spk, contents) in enumerate(translated)
+                        (ti, contents) for ti, (spk, contents) in enumerate(resolved_record)
                         if spk=="Teacher"
                     ]
                     demo_vis = [img for img in self.vision.latest_inputs if img is not None]
@@ -377,8 +374,9 @@ class ITLAgent:
                 # that agent can determine how to carry on with the remainder of the
                 # ongoing action plan. Process only the last one, if any.
                 last_action_effect = None
-                for ti, (speaker, turn_clauses) in enumerate(translated):
-                    if speaker != "Student": continue
+                for ti, (speaker, turn_clauses) in enumerate(resolved_record):
+                    if speaker != "Student": continue   # Only process self's action effect
+                    if ti < ti_last: continue           # Already examined
 
                     for ci, ((_, _, _, cons), raw, _) in enumerate(turn_clauses):
                         if not raw.startswith("# Effect: "): continue
@@ -391,21 +389,17 @@ class ITLAgent:
                 ##           Identify & exploit learning opportunities           ##
                 ###################################################################
 
-                # Disable learning when agent is in test mode
-                if self.cfg.agent.test_mode: break
-
                 # Resetting flags
                 xb_updated = False
                 kb_updated = False
 
-                # Generic statements to be added to KB
-                generics = []
-
                 # Collect previous factual statements and questions made during this
                 # dialogue
                 prev_statements = []; prev_Qs = []
-                for ti, (speaker, turn_clauses) in enumerate(prev_translated):
-                    for ci, ((gq, bvars, ante, cons), _, mood) in enumerate(turn_clauses):
+                for ti, (speaker, turn_clauses) in enumerate(prev_record):
+                    for ci, ((gq, bvars, ante, cons), raw, mood) in enumerate(turn_clauses):
+                        if cons is None: continue
+
                         # Factual statement
                         if mood == "." and ante is None and len(cons) == 1:
                             prev_statements.append(((ti, ci), (speaker, cons)))
@@ -417,39 +411,34 @@ class ITLAgent:
 
                 # Process translated dialogue record to do the following:
                 #   - Identify recognition mismatch btw. user provided vs. agent
-                #   - Identify visual concept confusion
                 #   - Identify new generic rules to be integrated into KB
-                for ti, (speaker, turn_clauses) in enumerate(translated):
-                    if speaker != "Teacher": continue
+                for ti, (speaker, turn_clauses) in enumerate(resolved_record):
+                    if speaker != "Teacher": continue   # Only process user input
+                    if ti < ti_last: continue           # Already examined
 
                     for ci, ((gq, bvars, ante, cons), raw, mood) in enumerate(turn_clauses):
+                        if cons is None: continue
+
                         # Skip any non-indicative statements (or presuppositions)
                         if mood != ".": continue
-
-                        # Disregard clause if it does not discuss the task domain
-                        clause_info = self.lang.dialogue.clause_info[f"t{ti}c{ci}"]
-                        if not clause_info.get("domain_describing"):
-                            continue
 
                         # Identify learning opportunities; i.e., any deviations from the
                         # agent's estimated states of affairs, generic rules delivered
                         # via NL generic statements, or acknowledgements (positive or lack
                         # of negative)
-                        self.comp_actions.identify_mismatch(rule)
-                        self.comp_actions.identify_confusion(
-                            rule, prev_statements, novel_concepts
-                        )
-                        self.comp_actions.identify_acknowledgement(
-                            rule, prev_statements, prev_context
-                        )
-                        self.comp_actions.identify_generics(
-                            rule, raw, prev_Qs, generics
+                        statement = (ante, cons)
+                        xb_updated |= self.comp_actions.identify_mismatch(statement)
+                        # self.comp_actions.identify_acknowledgement(
+                        #     statement, prev_statements, prev_context
+                        # )
+                        kb_updated |= self.comp_actions.identify_generics(
+                            statement, prev_Qs, raw
                         )
 
                 # By default, treat lack of any negative acknowledgements to an agent's statement
                 # as positive acknowledgement
                 prev_or_curr = "prev" if new_env else "curr"
-                for (ti, ci), (speaker, (statement, _)) in prev_statements:
+                for (ti, ci), (speaker, statement) in prev_statements:
                     if speaker != "Student": continue         # Not interested
 
                     stm_ind = (prev_or_curr, ti, ci)
@@ -457,19 +446,19 @@ class ITLAgent:
                         acknowledgement_data = (statement, True, prev_context)
                         self.lang.dialogue.acknowledged_stms[stm_ind] = acknowledgement_data
 
-                # Update knowledge base with obtained generic statements
-                for rule, w_pr, knowledge_source, knowledge_type in generics:
-                    kb_updated |= self.lt_mem.kb.add(
-                        rule, w_pr, knowledge_source, knowledge_type
-                    )
-
                 # Handle neologisms
                 xb_updated |= self.comp_actions.handle_neologism(
                     novel_concepts, self.lang.dialogue
                 )
 
-                # Terminate the loop when 'equilibrium' is reached
-                if not (xb_updated or kb_updated):
+                if xb_updated or kb_updated:
+                    # Flag that agent's knowledge state is somehow updated,
+                    # so that agent can take whichever measure needed later
+                    self.planner.execution_state["knowledge_updated"] = (
+                        xb_updated, kb_updated
+                    )
+                else:
+                    # Terminate the loop when 'equilibrium' is reached
                     break
 
     def _act(self):
@@ -499,34 +488,26 @@ class ITLAgent:
             return [("generate", ("# Observing", {}))]
 
         # If didn't return above, Agent is in full control, identify and resolve any
-        # pending items in agenda stack
-
-        # This ordering ensures any knowledge updates (that doesn't require interaction)
-        # happen first, addressing & answering questions happen next, finally asking
-        # any questions afterwards
-        for m in self.symbolic.mismatches:
-            self.planner.agenda.append(("address_mismatch", m))
+        # pending items in agenda
         for a in self.lang.dialogue.acknowledged_stms.items():
-            self.planner.agenda.append(("address_acknowledgement", a))
+            self.planner.agenda.appendleft(("address_acknowledgement", a))
         for ti, ci in self.lang.dialogue.unanswered_Qs:
-            self.planner.agenda.append(("address_unanswered_Q", (ti, ci)))
+            self.planner.agenda.appendleft(("address_unanswered_Q", (ti, ci)))
         for ti, ci in self.lang.dialogue.unexecuted_commands:
-            self.planner.agenda.append(("address_unexecuted_commands", (ti, ci)))
+            self.planner.agenda.appendleft(("address_unexecuted_commands", (ti, ci)))
         for n in self.lang.unresolved_neologisms:
-            self.planner.agenda.append(("address_neologism", n))
-        for c in self.vision.confusions:
-            self.planner.agenda.append(("address_confusion", c))
+            self.planner.agenda.appendleft(("address_neologism", n))
 
         return_val = []
         act_on_env = False
 
         num_resolved_items = 0; unresolved_items = []
         while True:
-            # Loop through agenda stack items from the top; new agenda items may
-            # be pushed to the top by certain plans
+            # Loop through agenda items from the top; new agenda items may be
+            # appended on the fly to the left or right of the deque
             while len(self.planner.agenda) > 0:
-                # Pop the top agenda item from the stack
-                todo_state, todo_args = self.planner.agenda.pop(0)
+                # Pop the top agenda item from the top
+                todo_state, todo_args = self.planner.agenda.popleft()
 
                 # Check if this item can be resolved at this stage and if so, obtain
                 # appropriate plan (sequence of actions) for resolving the item
@@ -554,23 +535,23 @@ class ITLAgent:
                     # If the processed agenda item is to execute some command,
                     # and the agent has decided to act upon the environment
                     # to fulfill the command, need to break here before proceeding
-                    # to the remainining items in the agenda stack
+                    # to the remainining items in the agenda
                     act_on_env = True
                     unresolved_items += self.planner.agenda
                     break
 
-            # Any unresolved items back to agenda stack
-            self.planner.agenda = copy.deepcopy(unresolved_items)
+            # Any unresolved items back to agenda
+            self.planner.agenda = deque(unresolved_items)
 
             if act_on_env:
                 # Must break here act upon the environment
                 break
 
             if num_resolved_items == 0 or len(self.planner.agenda) == 0:
-                # No resolvable agenda item any more, or stack clear
+                # No resolvable agenda item any more, or agenda clear
                 if len(return_val) == 0 and self.lang.latest_input is not None:
                     # No specific reaction to utter, acknowledge any user input
-                    self.planner.agenda.append(("acknowledge", None))
+                    self.planner.agenda.append(("utter_simple", ("OK.", ".")))
                 else:
                     # Break loop with return vals
                     break

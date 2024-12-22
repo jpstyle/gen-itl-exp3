@@ -4,7 +4,7 @@ from collections import defaultdict
 import numpy as np
 
 from ..lpmln import Literal, Rule, Program
-from ..lpmln.utils import wrap_args, flatten_cons_ante
+from ..lpmln.utils import wrap_args, flatten_ante_cons
 
 
 P_C = 0.01              # Default catchall hypothesis probability
@@ -44,15 +44,15 @@ class KnowledgeBase:
 
     def __contains__(self, item):
         """ Test if an entry isomorphic to item exists """
-        cons, ante = item
+        ante, cons = item
 
-        for (ent_cons, ent_ante), _, _, _ in self.entries:
+        for (ent_ante, ent_cons), _, _, _ in self.entries:
             # Don't even bother with different set sizes
-            if len(cons) != len(ent_cons): continue
             if len(ante) != len(ent_ante): continue
-
-            cons_ent_dir, _ = Literal.entailing_mapping_btw(cons, ent_cons)
+            if len(cons) != len(ent_cons): continue
+            
             ante_ent_dir, _ = Literal.entailing_mapping_btw(ante, ent_ante)
+            cons_ent_dir, _ = Literal.entailing_mapping_btw(cons, ent_cons)
 
             if cons_ent_dir==0 and ante_ent_dir==0:
                 return True
@@ -61,12 +61,12 @@ class KnowledgeBase:
 
     def add(self, rule, weight, source, knowledge_type):
         """ Returns whether KB is expanded or not """
-        cons, ante = rule
+        ante, cons = rule
 
         # Neutralizing variable & function names by stripping off turn/clause
         # indices, etc.
         rename_var = {
-            a for a, _ in _flatten(_extract_terms(cons+ante))
+            a for a, _ in _flatten(_extract_terms(ante+cons))
             if isinstance(a, str)
         }
         rename_var = {
@@ -74,7 +74,7 @@ class KnowledgeBase:
             for vn in rename_var
         }
         rename_fn = {
-            a[0] for a, _ in _flatten(_extract_terms(cons+ante))
+            a[0] for a, _ in _flatten(_extract_terms(ante+cons))
             if isinstance(a, tuple)
         }
         rename_fn = {
@@ -102,7 +102,7 @@ class KnowledgeBase:
         entries_entailed = set()       # KB entries entailed by input
         entries_entailing = set()      # KB entries that entail input
         for ent_id in entries_with_overlap:
-            (ent_cons, ent_ante), ent_weight, _, _ = self.entries[ent_id]
+            (ent_ante, ent_cons), ent_weight, _, _ = self.entries[ent_id]
 
             # Find (partial) term mapping between the KB entry and input with
             # which they can unify
@@ -124,7 +124,7 @@ class KnowledgeBase:
             # Add the input as a whole new entry along with the weight & source
             # and index it by occurring predicates
             self.entries.append(
-                ((cons, ante), weight, {(source, weight)}, knowledge_type)
+                ((ante, cons), weight, {(source, weight)}, knowledge_type)
             )
             for pred in preds_cons | preds_ante:
                 self.entries_by_pred[pred].add(len(self.entries)-1)
@@ -153,7 +153,7 @@ class KnowledgeBase:
 
                     # Add the stronger input as new entry
                     self.entries.append(
-                        ((cons, ante), weight, {(source, weight)}, knowledge_type)
+                        ((ante, cons), weight, {(source, weight)}, knowledge_type)
                     )
                     for pred in preds_cons | preds_ante:
                         self.entries_by_pred[pred].add(len(self.entries)-1)
@@ -213,7 +213,7 @@ class KnowledgeBase:
             candidate_preds = defaultdict(set)
 
             for rule, _, _, _ in self.entries:
-                for cons, ante in flatten_cons_ante(*rule):
+                for ante, cons in flatten_ante_cons(*rule):
                     # Disregard the cons-ante pair if cons doesn't contain any literals
                     # with concepts of interest
                     if not any(lit.name in concepts for lit in cons): continue
@@ -276,17 +276,17 @@ class KnowledgeBase:
             # and subtype reasoning
             if knowledge_type=="taxonomy": continue
 
-            for j, (cons, ante) in enumerate(flatten_cons_ante(*rule)):
+            for j, (ante, cons) in enumerate(flatten_ante_cons(*rule)):
                 # Keep track of variable names used to avoid accidentally using
                 # overlapping names for 'lifting' variables (see below)
                 all_var_names = {
-                    v for v, _ in _flatten(_extract_terms(cons+ante))
+                    v for v, _ in _flatten(_extract_terms(ante+cons))
                     if isinstance(v, str)
                 }
 
                 # All function term args used in this rule
                 all_fn_args = {
-                    fa for fa in _flatten(_extract_terms(cons+ante))
+                    fa for fa in _flatten(_extract_terms(ante+cons))
                     if isinstance(fa[0], tuple)
                 }
 
