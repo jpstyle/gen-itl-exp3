@@ -6,16 +6,12 @@ import re
 import copy
 import random
 from collections import defaultdict
-from itertools import combinations, groupby
+from itertools import product, combinations, groupby
 
 import yaml
-import inflect
 import networkx as nx
 from clingo import Control, Function
 
-
-singularize = inflect.engine().singular_noun
-pluralize = inflect.engine().plural
 
 MATCH_THRES = 0.9
 VALID_JOINS = {
@@ -41,7 +37,7 @@ VALID_JOINS = {
     (("chassis_center", "back"), ("chassis_back", "center")),
     (("chassis_center", "back"), ("bolt", "bolt")),
 }
-VALID_JOINS |= {(p2, p1) for p1, p2 in VALID_JOINS}     # Symmetric
+    # Account for join symmetry
 
 class SimulatedTeacher:
     
@@ -57,10 +53,7 @@ class SimulatedTeacher:
         # Teacher's strategy on how to give feedback upon student's wrong answer
         # (provided the student has taken initiative for extended ITL interactions
         # by asking further questions after correct answer feedback)
-        self.strat_feedback = cfg.exp.strat_feedback
-
-        # Whether the agent is running in test mode
-        self.agent_test_mode = cfg.agent.test_mode
+        self.feedback_type = cfg.exp.feedback_type
 
         # Queue of actions to execute, if any demonstration is ongoing
         self.ongoing_demonstration = []
@@ -104,6 +97,13 @@ class SimulatedTeacher:
             "assembly_state": {
                 "left": None, "right": None,
                 "subassemblies": defaultdict(set),
+                "remaining_joins": {
+                    frozenset(k): len(list(v))
+                    for k, v in groupby(
+                        sorted(VALID_JOINS, key=lambda x: (x[0][0], x[1][0])),
+                        key=lambda x: (x[0][0], x[1][0])
+                    )
+                },
                 "aliases": {}
             }
         }
@@ -189,7 +189,12 @@ class SimulatedTeacher:
         """ Rule-based pattern matching for handling agent responses """
         response = []
         step_demonstrated = False
+
+        # Shortcuts
+        assem_st = self.current_episode_record["assembly_state"]
+        subassems = assem_st["subassemblies"]
         sampled_parts = self.current_episode_record["sampled_parts"]
+
         for utt, dem_refs in agent_reactions:
             if re.match(r"I don't know what '(.*)' means\.$", utt):
                 # Agent reported it does not know what the target concept is
@@ -221,22 +226,9 @@ class SimulatedTeacher:
                 if step_demonstrated: break
                 step_demonstrated = True
 
-                if len(self.ongoing_demonstration) == 0:
-                    # Last action executed, demonstration finished
-                    response.append((
-                        "generate",
-                        {
-                            "utterance": f"This is a {self.target_concept}.",
-                            "pointing": { (0, 4): "/truck" }
-                        }
-                    ))
-
-                else:
+                if len(self.ongoing_demonstration) > 0:
                     # Keep popping and executing plan actions until plan is empty
                     act_type, act_params = self.ongoing_demonstration.pop(0)
-                    # Shortcuts
-                    assem_st = self.current_episode_record["assembly_state"]
-                    subassems = assem_st["subassemblies"]
 
                     # Annotate physical action to be executed for this step, communicated
                     # to agent along with the action
@@ -267,6 +259,9 @@ class SimulatedTeacher:
                             "utterance": f"Pick up {target_label}.",
                             "pointing": {}
                         }
+
+                    # elif act_type.startswith("drop"):
+                    #     pass
 
                     elif act_type.startswith("assemble"):
                         # For assemble~ actions, provide contact point info, specified by
@@ -312,10 +307,19 @@ class SimulatedTeacher:
                     response.append(("generate", act_anno))
                     if act_dscr is not None: response.append(("generate", act_dscr))
 
+                    if len(self.ongoing_demonstration) == 0:
+                        # Last action executed, demonstration finished
+                        response.append((
+                            "generate",
+                            {
+                                "utterance": f"This is a {self.target_concept}.",
+                                "pointing": { (0, 4): "/truck" }
+                            }
+                        ))
+
             elif utt.startswith("# Action:"):
                 # Agent action intent; somewhat like reading into the agent's 'mind'
                 # for convenience's sake
-                assem_st = self.current_episode_record["assembly_state"]
 
                 if utt.startswith("# Action: pick_up"):
                     # Obtain agent-side naming of the targetted object
@@ -334,8 +338,6 @@ class SimulatedTeacher:
             elif utt.startswith("# Effect:"):
                 # Action effect feedback from Unity environment, determine whether the
                 # latest action was incorrect and agent needs to be interrupted
-                assem_st = self.current_episode_record["assembly_state"]
-                subassems = assem_st["subassemblies"]
 
                 interrupted = False
                 if utt.startswith("# Effect: pick_up"):
@@ -343,18 +345,45 @@ class SimulatedTeacher:
                     side, effects = re.findall(r"# Effect: pick_up_(.*)\((.*)\)$", utt)[0]
                     obj_picked_up = effects.split(",")[0]
 
-                    if False:
-                        # Interrupt if agent has picked up an object not needed in the
-                        # desired goal structure, or if agent is holding a pair of objects
-                        # that should not be assembled
-                        interrupted = True
-
                     # Update ongoing execution state
                     agent_side_alias = assem_st.pop(side)
                     assem_st["aliases"][agent_side_alias] = obj_picked_up
                     assem_st[side] = obj_picked_up
                     if obj_picked_up not in subassems:
                         subassems[obj_picked_up] = {obj_picked_up}
+
+                    pair_invalid = False
+                    if assem_st["left"] is not None and assem_st["right"] is not None:
+                        # Test if a valid join can be achieved with the two subassembly
+                        # objects held in each hand
+                        compatible_part_pairs = {
+                            frozenset([part1, part2])
+                            for (part1, _), (part2, _) in VALID_JOINS
+                        }
+                        sa_left = subassems[assem_st["left"]]
+                        sa_right = subassems[assem_st["right"]]
+                        for part_left, part_right in product(sa_left, sa_right):
+                            part_left = re.findall(r"t_(.*)_\d+$", part_left)[0]
+                            part_right = re.findall(r"t_(.*)_\d+$", part_right)[0]
+                            part_pair = frozenset([part_left, part_right])
+                            # Pass if part pair not compatible after all
+                            compatible = part_pair in compatible_part_pairs
+                            if not compatible: continue
+                            # Pass if trying to make a redundant join
+                            redundant = assem_st["remaining_joins"][part_pair] == 0
+                            if redundant: continue
+                            # Pair valid if reached here
+                            break
+                        else:
+                            # If reached here, no compatible bipartite pairing of
+                            # parts exists with held subassemblies
+                            pair_invalid = True
+
+                    # Interrupt if agent has picked up an object not needed in the
+                    # desired goal structure, or if agent is holding a pair of objects
+                    # that should not be assembled
+                    if pair_invalid:
+                        interrupted = True
 
                 if utt.startswith("# Effect: assemble"):
                     # Effect of assemble action; interested in closest contact points
@@ -365,12 +394,13 @@ class SimulatedTeacher:
                         part_src, part_tgt, product_name = assem_st.pop("join_intent")
                     part_src = assem_st["aliases"][part_src]
                     part_tgt = assem_st["aliases"][part_tgt]
-                    part_src, _ = re.findall(r"t_(.*)_(\d+)$", part_src)[0]
-                    part_tgt, _ = re.findall(r"t_(.*)_(\d+)$", part_tgt)[0]
+                    part_src = re.findall(r"t_(.*)_\d+$", part_src)[0]
+                    part_tgt = re.findall(r"t_(.*)_\d+$", part_tgt)[0]
                     valid_joins = [
-                        ((part1, cp1), (part2, cp2))
+                        frozenset(((part1, cp1), (part2, cp2)))
                         for (part1, cp1), (part2, cp2) in VALID_JOINS
-                        if part1 == part_src and part2 == part_tgt
+                        if (part1 == part_src and part2 == part_tgt) or
+                            (part2 == part_src and part1 == part_tgt)
                     ]
 
                     effects = effects.split(",")
@@ -384,18 +414,11 @@ class SimulatedTeacher:
                             # Threshold for whether pair counts as match by sum of diffs
                     ]
                     cp_pairs = [
-                        ((part1, cp1), (part2, cp2))
+                        frozenset(((part1, cp1), (part2, cp2)))
                         for (part1, cp1), (part2, cp2) in cp_pairs
                         if part1 == part_src and part2 == part_tgt
                     ]
-
-                    # Interrupt if agent has assembled a pair of objects at incorrect
-                    # contact point, which is determined by checking whether top 3
-                    # contact point pairs contain a valid join for this episode's
-                    # goal structure
-                    join_invalid = len(cp_pairs) == 0 or cp_pairs[0] not in valid_joins
-                    if join_invalid:
-                        interrupted = True
+                    valid_pairs_achieved = set(cp_pairs) & set(valid_joins)
 
                     # Update ongoing execution state
                     subassems[product_name] = \
@@ -403,11 +426,54 @@ class SimulatedTeacher:
                     assem_st["right" if direction.endswith("left") else "left"] = None
                     assem_st["left" if direction.endswith("left") else "right"] = product_name
 
+                    # Interrupt if agent has assembled a pair of objects at incorrect
+                    # contact point, which is determined by checking whether top 3
+                    # contact point pairs contain a valid join for this episode's
+                    # goal structure
+                    join_invalid = len(valid_pairs_achieved) == 0
+                    if join_invalid:
+                        interrupted = True
+
+                        # Interrupt agent and undo the last join
+                        response.append(("generate", { "utterance": "Stop.", "pointing": {} }))
+                    else:
+                        # If join not invalid, check the join off the list by decrementing
+                        # count
+                        for (part1, _), (part2, _) in valid_pairs_achieved:
+                            pair = frozenset([part1, part2])
+                            assem_st["remaining_joins"][pair] -= 1
+
                 if not interrupted:
                     # No interruption needs to be made, keep observing...
                     response.append(("generate", { "utterance": "# Observing", "pointing": {} }))
 
-            elif utt == "OK.":
+            elif utt.startswith("Is there a "):
+                # Agent has failed to ground an instance of some part type, which
+                # is guaranteed to exist on tabletop by design
+                queried_type = re.findall(r"Is there a (.*)\?$", utt)[0]
+
+                # Fetch list of matching instances and select one that hasn't
+                # been used yet (i.e., still on the tabletop)
+                matching_insts = [
+                    f"t_{supertype}_{inst}"
+                    for (supertype, inst), subtype in sampled_parts.items()
+                    if queried_type == supertype or queried_type == subtype
+                ]
+                available_insts = [
+                    inst for inst in matching_insts
+                    if inst not in assem_st["aliases"].values()
+                ]
+                selected_inst = random.sample(available_insts, 1)[0]
+
+                response.append((
+                    "generate",
+                    {
+                        "utterance": f"This is a {queried_type}.",
+                        "pointing": { (0, 4): f"/{selected_inst}" }
+                    }
+                ))
+
+            elif utt == "OK." or utt == "Done.":
                 # No further interaction needed; effectively terminates current episode
                 pass
 

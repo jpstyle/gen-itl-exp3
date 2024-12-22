@@ -88,31 +88,6 @@ library = {
         }
     ],
 
-    # Resolve mismatch between agent's vs. user's perception by asking question,
-    # in accordance with the agent's learning interaction stategy
-    "address_mismatch": [
-        # Prepare answering utterance to generate
-        {
-            "action_method": Val(referrable=["comp_actions", "handle_mismatch"]),
-            "action_args_getter": lambda x: (Val(data=x),)
-        }
-    ],
-
-    # Resolve agent's confusion between two visual concepts revealed during & via
-    # learning dialogue with user
-    "address_confusion": [
-        # Prepare answering utterance to generate
-        {
-            "action_method": Val(referrable=["comp_actions", "handle_confusion"]),
-            "action_args_getter": lambda x: (Val(data=x),)
-        },
-        # Generate whatever response queued
-        {
-            "action_method": Val(referrable=["lang", "generate"]),
-            "action_args_getter": lambda x: ()
-        }
-    ],
-
     # Resolve user's positive acknowledgement (assent) to agent's statement that reports
     # agent's estimation
     "address_acknowledgement": [
@@ -123,14 +98,15 @@ library = {
         }
     ],
 
-    # Nothing special has to be addressed, just acknowledge user input
-    "acknowledge": [
-        # Acknowledge in a cool way, saying "OK."
+    # Push a simple utterance (that doesn't need a specific logical form associated)
+    # to generation buffer along with sentence mood
+    "utter_simple": [
+        # Push the speficied utterance with specified mood to buffer
         {
-            "action_method": Val(referrable=["lang", "acknowledge"]),
-            "action_args_getter": lambda x: ()
+            "action_method": Val(referrable=["lang", "utter_simple"]),
+            "action_args_getter": lambda x: (Val(data=x),)
         },
-        # Generate the cool acknowledgement
+        # Generate the simple utterance
         {
             "action_method": Val(referrable=["lang", "generate"]),
             "action_args_getter": lambda x: ()

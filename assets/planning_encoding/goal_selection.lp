@@ -38,7 +38,7 @@ part_demand(P,DM) :- atomic(P), DM = #count { N : commit_choice(N,P) }.
 part_usage(P,PU) :- atomic(P), PU = #count { O : use_as(O,P) }.
 :- part_demand(P,DM), part_usage(P, PU), PU > DM.
 
-% Do not allow any idle objects when they can be employed
+% Do not allow any idle objects when they can be mployed
 unmet_demand(P,DM-PU) :- part_demand(P,DM), part_usage(P, PU).
 ununsed_supply(P,US) :- atomic(P),
     US = #count { O : is_likely(O,P,_), not use_as(O,_) }.
@@ -52,6 +52,15 @@ to_connect(D1,D2,CP1,CP2) :-
 fits_signature(n(N,NS),N,NS,P) :- commit_choice(n(N,NS),P), atomic(P).
 fits_signature(D,N,NS,c((S,I),SG)) :-
     fits_signature(D,n(N,NS),_,SG), commit_template(n(N,NS),S,I).
+
+% Handling additional constraints due to already assembled parts
+1{ unify_node(X,N) : commit_choice(N,C) }1 :- ext_node(X,C).
+to_connect(N1,N2) :- to_connect(N1,N2,_,_).     % Project 4->2
+:- ext_edge(X1,X2), unify_node(X1,N1), unify_node(X2,N2), not to_connect(N1,N2).
+
+% Edge symmetricity
+to_connect(N2,N1) :- to_connect(N1,N2).
+ext_edge(X2,X1) :- ext_edge(X1,X2).
 
 % Compute final compatibility score by taking average across all atomic nodes
 total_score(TS) :- TS = #sum { X,O : is_likely(O,P,X), use_as(O,P) }.

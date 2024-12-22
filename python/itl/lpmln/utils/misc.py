@@ -48,7 +48,7 @@ def sigmoid(l):
     else:
         return float(1 / (1 + np.exp(-l)))
 
-def flatten_cons_ante(cons, ante):
+def flatten_ante_cons(ante, cons):
     """
     Rearrange into (possibly multiple) flattened rules until any all of the nested
     conjunctions are all properly fished up, such that the rule can be translated
@@ -60,17 +60,17 @@ def flatten_cons_ante(cons, ante):
     """
     from .. import Literal
 
-    cons = list(cons) if cons is not None else []
     ante = list(ante) if ante is not None else []
+    cons = list(cons) if cons is not None else []
 
-    flattened = [(cons, ante)]
+    flattened = [(ante, cons)]
     while any(
         not isinstance(conjunct, Literal)
-        for cons, ante in flattened for conjunct in cons+ante
+        for ante, cons in flattened for conjunct in ante+cons
     ):
         flattened_new = []
 
-        for cons, ante in flattened:
+        for ante, cons in flattened:
             # Positive & negative conjuncts in consequent
             # (Reminder for self: a list of conjuncts stands for negation of
             # the conjunction in current implementation)
@@ -85,12 +85,12 @@ def flatten_cons_ante(cons, ante):
 
             if len(cons_cnjts_p) > 0:
                 # Positive conjuncts in consequent <= antecedent
-                flattened_new.append((cons_cnjts_p, ante))
+                flattened_new.append((ante, cons_cnjts_p))
 
             for neg_cnjt in cons_cnjts_n:
-                # Migrate each negated conjunction to ante, creating a new (cons, ante)
+                # Migrate each negated conjunction to ante, creating a new (ante, cons)
                 # pair to be processed and included
-                flattened_new.append(([], ante+neg_cnjt))
+                flattened_new.append((ante+neg_cnjt, []))
 
         flattened = flattened_new
     

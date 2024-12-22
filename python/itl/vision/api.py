@@ -48,8 +48,6 @@ class VisionModule:
 
         self.camera_intrinsics = None
 
-        self.confusions = set()
-
     def predict(self, image, exemplars, reclassify=False, masks=None, specs=None):
         """
         Model inference in either one of four modes:
@@ -77,6 +75,9 @@ class VisionModule:
         masks_provided = masks is not None
         specs_provided = specs is not None
         ensemble = not (reclassify or masks_provided or specs_provided)
+
+        # If empty mask set is provided, can return early to save time
+        if masks_provided and len(masks) == 0: return
 
         # Image must be provided for ensemble prediction
         if ensemble: assert image is not None
@@ -163,6 +164,7 @@ class VisionModule:
                 # leave top-k detections
                 self.scene = {
                     f"o{i}": {
+                        "scene_img": image,
                         "vis_emb": filtered_masks[i][0],
                         "pred_mask": filtered_masks[i][1],
                         "pred_cls": self.fs_conc_pred(exemplars, vis_embs[i], "pcls"),
@@ -194,6 +196,7 @@ class VisionModule:
             elif reclassify:
                 # Concept reclassification with the same set of objects
                 for obj_i in self.scene.values():
+                    if "vis_emb" not in obj_i: continue
                     vis_emb = obj_i["vis_emb"]
                     obj_i["pred_cls"] = self.fs_conc_pred(exemplars, vis_emb, "pcls")
 
@@ -226,7 +229,7 @@ class VisionModule:
                             ind_offset += 1
 
                 # Update visual scene
-                self._incremental_scene_update(incr_preds, new_objs, exemplars)
+                self._incremental_scene_update(incr_preds, new_objs, exemplars, image)
 
     def fs_conc_pred(self, exemplars, emb, conc_type):
         """
@@ -431,7 +434,7 @@ class VisionModule:
 
         return incr_vis_embs, incr_masks_out, incr_scores
 
-    def _incremental_scene_update(self, incr_preds, new_objs, exemplars):
+    def _incremental_scene_update(self, incr_preds, new_objs, exemplars, image):
         """
         Helper method factored out updating current scene with new incrementally
         predicted instances (by masks or search specs)
@@ -459,6 +462,7 @@ class VisionModule:
 
             # Register new objects into the existing scene
             self.scene[oi] = {
+                "scene_img": image,
                 "vis_emb": vis_emb,
                 "pred_mask": msk,
                 "pred_cls": self.fs_conc_pred(exemplars, vis_emb, "pcls"),
