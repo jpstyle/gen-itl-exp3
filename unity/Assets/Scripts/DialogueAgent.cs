@@ -637,7 +637,7 @@ public class DialogueAgent : Agent
         }
         else
         {
-            xPos = _mainPartitionPosition.x + Random.Range(-0.21f, 0.21f);
+            xPos = _mainPartitionPosition.x + Random.Range(-0.15f, 0.15f);
             zPos = _mainPartitionPosition.z + Random.Range(-0.06f, 0.12f);
         }
         var volume = GetBoundingVolume(heldObj);
