@@ -33,15 +33,9 @@ class DialogueManager:
         # discourse to denoted concepts
         self.word_senses = {}
 
-        # Each record is a 3-tuple of:
-        #   1) speaker: user ("Teacher") or agent ("Student")
-        #   2) logical form of utterance content
-        #   3) original user input string
+        # Dialogue record, each entry consisting of the speaker of the turn
+        # and clauses in the turn
         self.record = []
-
-        # Sensemaking results after processing each dialogue input, indexed by dialogue
-        # turns
-        self.sensemaking_v_snaps = {}
 
         self.unanswered_Qs = set()
         self.unexecuted_commands = set()
@@ -151,7 +145,7 @@ class DialogueManager:
         # Understood dialogue record contents
         occurring_preds = set()
         for ti, (speaker, turn_clauses) in enumerate(self.record):
-            for ci, ((_, _, ante, cons), raw, _) in enumerate(turn_clauses):
+            for ci, ((_, _, ante, cons), raw) in enumerate(turn_clauses):
                 if speaker == "Student" and not raw.startswith("# Effect:"):
                     # Nothing particular to do with agent's own utterances generated
                     # by comp_actions; action effects (starting with "# Effect:")
@@ -292,8 +286,7 @@ class DialogueManager:
     def export_resolved_record(self):
         """
         Translate and export logical content of dialogue record based on current
-        estimate of value assignment and word sense selection. Dismiss (replace
-        with None) any utterances containing unresolved neologisms.
+        estimate of value assignment and word sense selection
         """
         a_map = lambda args: [
             self.value_assignment.get(arg, arg) or arg
@@ -314,7 +307,7 @@ class DialogueManager:
         record_translated = []
         for ti, (speaker, turn_clauses) in enumerate(self.record):
             turn_translated = []
-            for ci, ((gq, bvars, ante, cons), raw, mood) in enumerate(turn_clauses):
+            for ci, ((gq, bvars, ante, cons), raw) in enumerate(turn_clauses):
                 # Translate consequent and antecedent by converting NL predicates to
                 # denoted concepts
                 if cons is not None and len(cons) > 0:
@@ -333,7 +326,8 @@ class DialogueManager:
                 else:
                     tr_ante = None
 
-                turn_translated.append(((gq, bvars, tr_ante, tr_cons), raw, mood))
+                clause_info = self.clause_info[f"t{ti}c{ci}"]
+                turn_translated.append(((gq, bvars, tr_ante, tr_cons), raw, clause_info))
 
             record_translated.append((speaker, turn_translated))
 

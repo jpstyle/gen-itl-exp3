@@ -219,7 +219,7 @@ class SimulatedTeacher:
                 ))
 
             elif utt == "# Observing":
-                # Agent has signaled it is paying attention to user's demonstration
+                # Agent has signaled it is paying attention to user's action
 
                 # Demonstrate at most one step per turn; discard any additional
                 # observation signals
@@ -243,7 +243,7 @@ class SimulatedTeacher:
                         crange = (offset+1, offset+1+len(target))
                         act_anno = {
                             "utterance": f"{act_str_prefix}({target})",
-                            "pointing": { crange: "/" + act_params[0] }
+                            "pointing": { crange: ("/" + act_params[0], True) }
                         }
                         assem_st["left" if act_type.endswith("left") else "right"] = target
                         if target not in subassems:
@@ -267,6 +267,20 @@ class SimulatedTeacher:
                         # For assemble~ actions, provide contact point info, specified by
                         # (atomic part supertype, point identifier string) pair
                         subassembly, target_l, target_r = act_params
+                        # Selecting a specific instance matching the target condition. One
+                        # (ugly) assumption made here is that the contact point of interest
+                        # can be uniquely specified by the part type alone.
+                        type_l, cp_l = target_l.split("/")
+                        type_r, cp_r = target_r.split("/")
+                        inst_l = next(
+                            inst for inst in subassems[assem_st["left"]] if type_l in inst
+                        )
+                        inst_r = next(
+                            inst for inst in subassems[assem_st["right"]] if type_r in inst
+                        )
+                        target_l = f"{inst_l}/{cp_l}"
+                        target_r = f"{inst_r}/{cp_r}"
+                        act_params = (subassembly, target_l, target_r)    # Rewrite params
                         # Building action spec description string
                         num_components = \
                             len(subassems[assem_st["left"]] | subassems[assem_st["right"]])
@@ -281,14 +295,12 @@ class SimulatedTeacher:
                     elif act_type.startswith("inspect"):
                         # For inspect~ actions, provide integer index of (relative) viewpoint
                         hand = "Left" if act_type.endswith("left") else "Right"
-                        path_prefix = f"/Teacher Agent/{hand} Hand"
+                        ent_path = f"/Student Agent/{hand} Hand/{assem_st[hand.lower()]}"
                         target, view_ind = act_params
                         crange = (offset+1, offset+1+len(target))
                         act_anno = {
                             "utterance": f"{act_str_prefix}({target},{view_ind})",
-                            "pointing": {
-                                crange: "/".join([path_prefix, "*"])
-                            }
+                            "pointing": { crange: (ent_path, True) }
                         }
 
                     else:
@@ -307,15 +319,15 @@ class SimulatedTeacher:
                     response.append(("generate", act_anno))
                     if act_dscr is not None: response.append(("generate", act_dscr))
 
-                    if len(self.ongoing_demonstration) == 0:
-                        # Last action executed, demonstration finished
-                        response.append((
-                            "generate",
-                            {
-                                "utterance": f"This is a {self.target_concept}.",
-                                "pointing": { (0, 4): "/truck" }
-                            }
-                        ))
+                else:
+                    # Last action executed, demonstration finished
+                    response.append((
+                        "generate",
+                        {
+                            "utterance": f"This is a {self.target_concept}.",
+                            "pointing": { (0, 4): ("/truck", True) }
+                        }
+                    ))
 
             elif utt.startswith("# Action:"):
                 # Agent action intent; somewhat like reading into the agent's 'mind'
@@ -383,6 +395,17 @@ class SimulatedTeacher:
                     # desired goal structure, or if agent is holding a pair of objects
                     # that should not be assembled
                     if pair_invalid:
+                        # Interrupt agent and undo the last pick up (by dropping the
+                        # object just picked up)
+                        response += [
+                            ("generate", { "utterance": "Stop.", "pointing": {} }),
+                            ("generate", {
+                                "utterance": "What were you trying to join?",
+                                "pointing": {}
+                            }),
+                            (f"drop_{side}", { "parameters": () })
+                        ]
+                        assem_st[side] = None       # Pick-up undone
                         interrupted = True
 
                 if utt.startswith("# Effect: assemble"):
@@ -414,6 +437,13 @@ class SimulatedTeacher:
                             # Threshold for whether pair counts as match by sum of diffs
                     ]
                     cp_pairs = [
+                        (
+                            (re.findall(r"t_(.*)_\d+$", part1)[0], cp1),
+                            (re.findall(r"t_(.*)_\d+$", part2)[0], cp2),
+                        )
+                        for (part1, cp1), (part2, cp2) in cp_pairs
+                    ]
+                    cp_pairs = [
                         frozenset(((part1, cp1), (part2, cp2)))
                         for (part1, cp1), (part2, cp2) in cp_pairs
                         if part1 == part_src and part2 == part_tgt
@@ -432,10 +462,10 @@ class SimulatedTeacher:
                     # goal structure
                     join_invalid = len(valid_pairs_achieved) == 0
                     if join_invalid:
-                        interrupted = True
-
-                        # Interrupt agent and undo the last join
+                        # Interrupt agent and undo the last join (by disassembling
+                        # the product just assembled, at the exact same part pair)
                         response.append(("generate", { "utterance": "Stop.", "pointing": {} }))
+                        interrupted = True
                     else:
                         # If join not invalid, check the join off the list by decrementing
                         # count
@@ -469,9 +499,51 @@ class SimulatedTeacher:
                     "generate",
                     {
                         "utterance": f"This is a {queried_type}.",
-                        "pointing": { (0, 4): f"/{selected_inst}" }
+                        "pointing": { (0, 4): (f"/{selected_inst}", True) }
                     }
                 ))
+
+            elif utt.startswith("I was trying to "):
+                # Agent reported its originally intended join of two part instances
+                # which is based on incorrect grounding
+                for crange, inst_name in dem_refs.items():
+                    inst = re.findall(r"t_(.*)_(\d+)$", inst_name)[0]
+                    inst = (inst[0], int(inst[1]))
+                    reported_grounding = utt[slice(*crange)]
+
+                    # Determine correctness according to the expected knowledge level
+                    # (i.e., specificity between supertype vs. subtype), as determined
+                    # by the current task
+                    if self.target_task == "build_truck_supertype":
+                        gt_type = inst[0]
+                    else:
+                        gt_type = sampled_parts[inst]
+                    if reported_grounding == gt_type: continue
+
+                    # For incorrect groundings results, provide appropriate corrective
+                    # feedback
+                    if inst_name in subassems.get(assem_st["left"], set()):
+                        ent_path = f"/Student Agent/Left Hand/*/{inst_name}"
+                    elif inst_name in subassems.get(assem_st["right"], set()):
+                        ent_path = f"/Student Agent/Right Hand/*/{inst_name}"
+                    else:
+                        ent_path = f"/*/{inst_name}"        # On tabletop
+                    response += [
+                        ("generate", {
+                            "utterance": f"This is not a {reported_grounding}.",
+                            "pointing": { (0, 4): (ent_path, False) }
+                        }),
+                        ("generate", {
+                            "utterance": f"This is a {gt_type}.",
+                            "pointing": { (0, 4): (ent_path, False) }
+                        })
+                    ]
+
+                # Finally tell the agent to resume its task execution (based on
+                # the modified knowledge)
+                response.append(
+                    ("generate", { "utterance": "Continue.", "pointing": {} })
+                )
 
             elif utt == "OK." or utt == "Done.":
                 # No further interaction needed; effectively terminates current episode

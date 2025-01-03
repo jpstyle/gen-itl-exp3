@@ -54,6 +54,7 @@ class ITLAgent:
         self.kb_snap = copy.deepcopy(self.lt_mem.kb)
 
         self.observed_demo = None
+        self.execution_paused = False
 
     def loop(
             self, v_usr_in=None, l_usr_in=None,
@@ -153,6 +154,13 @@ class ITLAgent:
 
         usr_in_flt = []; pointing_flt = []; speaker_flt = []
         for utt, dem_refs, spk in zip(usr_in, pointing, speaker):
+            # Process any non-mask references
+            dem_refs = {
+                crange: self.planner.execution_state["part_identifiers"][ref]
+                    if isinstance(ref, str) else ref
+                for crange, ref in dem_refs.items()
+            }
+
             if spk == "Teacher":
                 # Teacher somehow reacted by providing corrective feedback
                 # or signaling silent observation. Clear any null item on
@@ -162,6 +170,14 @@ class ITLAgent:
                     pass
                 elif self.planner.agenda[0] == ('execute_command', (None, None)):
                     self.planner.agenda.popleft()
+
+                if utt == "Stop." and not self.execution_paused:
+                    # Enter pause mode; ignore any `execute_command` items
+                    # in agenda
+                    self.execution_paused = True
+                if utt == "Continue." and self.execution_paused:
+                    # Exit pause mode
+                    self.execution_paused = False
 
             if utt != "# Observing":
                 # Process any general case NL input
@@ -275,7 +291,6 @@ class ITLAgent:
                 exported_kb = self.lt_mem.kb.export_reasoning_program()
                 visual_evidence = self.lt_mem.kb.visual_evidence_from_scene(self.vision.scene)
                 self.symbolic.sensemake_vis(exported_kb, visual_evidence)
-                self.lang.dialogue.sensemaking_v_snaps[ti_last] = self.symbolic.concl_vis
 
             if self.lang.latest_input is not None:
                 # Reference & word sense resolution to connect vision & discourse
@@ -293,14 +308,13 @@ class ITLAgent:
             if len(resolved_record) > 0:
                 # First recognize any future indicative 'demonstrate how' by user
                 speaker, turn_clauses = resolved_record[-1]; ti = len(resolved_record)-1
-                for ci, ((_, _, _, cons), _, mood) in enumerate(turn_clauses):
+                for ci, ((_, _, _, cons), _, clause_info) in enumerate(turn_clauses):
                     if cons is None: break
 
                     demo_lit = [lit for lit in cons if lit.name=="sp_demonstrate"]
                     if len(demo_lit) == 0: break
 
-                    (demo_evt, _), (demonstrator, _), (demo_target, _) = demo_lit[0].args
-                    clause_info = self.lang.dialogue.clause_info[demo_evt]
+                    _, (demonstrator, _), (demo_target, _) = demo_lit[0].args
 
                     if not (clause_info["mood"] == "." and clause_info["tense"] == "future"):
                         break
@@ -372,10 +386,9 @@ class ITLAgent:
                 # Process feedback from Unity environment generated due to executing
                 # a primitive action (in particular, 'pick_up' and 'assemble') so
                 # that agent can determine how to carry on with the remainder of the
-                # ongoing action plan. Process only the last one, if any.
+                # ongoing action plan. Process only the last one(s), if any.
                 last_action_effect = None
                 for ti, (speaker, turn_clauses) in enumerate(resolved_record):
-                    if speaker != "Student": continue   # Only process self's action effect
                     if ti < ti_last: continue           # Already examined
 
                     for ci, ((_, _, _, cons), raw, _) in enumerate(turn_clauses):
@@ -397,13 +410,14 @@ class ITLAgent:
                 # dialogue
                 prev_statements = []; prev_Qs = []
                 for ti, (speaker, turn_clauses) in enumerate(prev_record):
-                    for ci, ((gq, bvars, ante, cons), raw, mood) in enumerate(turn_clauses):
+                    for ci, clause in enumerate(turn_clauses):
+                        (gq, bvars, ante, cons), raw, clause_info = clause
                         if cons is None: continue
 
+                        mood = clause_info["mood"]
                         # Factual statement
                         if mood == "." and ante is None and len(cons) == 1:
                             prev_statements.append(((ti, ci), (speaker, cons)))
-
                         # Question
                         if mood == "?":
                             # Here, `rule` represents presuppositions included in `ques`
@@ -416,11 +430,11 @@ class ITLAgent:
                     if speaker != "Teacher": continue   # Only process user input
                     if ti < ti_last: continue           # Already examined
 
-                    for ci, ((gq, bvars, ante, cons), raw, mood) in enumerate(turn_clauses):
-                        if cons is None: continue
+                    for ci, clause in enumerate(turn_clauses):
+                        (gq, bvars, ante, cons), raw, clause_info = clause
 
                         # Skip any non-indicative statements (or presuppositions)
-                        if mood != ".": continue
+                        if clause_info["mood"] != ".": continue
 
                         # Identify learning opportunities; i.e., any deviations from the
                         # agent's estimated states of affairs, generic rules delivered
@@ -489,29 +503,39 @@ class ITLAgent:
 
         # If didn't return above, Agent is in full control, identify and resolve any
         # pending items in agenda
+        for n in self.lang.unresolved_neologisms:
+            self.planner.agenda.appendleft(("address_neologism", n))
         for a in self.lang.dialogue.acknowledged_stms.items():
             self.planner.agenda.appendleft(("address_acknowledgement", a))
         for ti, ci in self.lang.dialogue.unanswered_Qs:
             self.planner.agenda.appendleft(("address_unanswered_Q", (ti, ci)))
         for ti, ci in self.lang.dialogue.unexecuted_commands:
             self.planner.agenda.appendleft(("address_unexecuted_commands", (ti, ci)))
-        for n in self.lang.unresolved_neologisms:
-            self.planner.agenda.appendleft(("address_neologism", n))
 
         return_val = []
         act_on_env = False
 
-        num_resolved_items = 0; unresolved_items = []
         while True:
             # Loop through agenda items from the top; new agenda items may be
             # appended on the fly to the left or right of the deque
+            num_resolved_items = 0; unresolved_items = []
             while len(self.planner.agenda) > 0:
                 # Pop the top agenda item from the top
-                todo_state, todo_args = self.planner.agenda.popleft()
+                todo_type, todo_args = self.planner.agenda.popleft()
+
+                # In pause mode, ignore any `execute_command` items, as well as
+                # any simple report "Done" (since it won't ever be)
+                if self.execution_paused:
+                    if todo_type == "execute_command":
+                        unresolved_items.append((todo_type, todo_args))
+                        continue
+                    if todo_type == "utter_simple" and todo_args[0] == "Done.":
+                        unresolved_items.append((todo_type, todo_args))
+                        continue
 
                 # Check if this item can be resolved at this stage and if so, obtain
                 # appropriate plan (sequence of actions) for resolving the item
-                plan = self.planner.obtain_plan(todo_state)
+                plan = self.planner.obtain_plan(todo_type)
 
                 if plan is not None:
                     # Perform plan actions
@@ -529,9 +553,9 @@ class ITLAgent:
                         num_resolved_items += 1
                 else:
                     # Plan not found, agenda item unresolved
-                    unresolved_items.append((todo_state, todo_args))
+                    unresolved_items.append((todo_type, todo_args))
 
-                if todo_state == "execute_command" and len(return_val) > 0:
+                if todo_type == "execute_command" and len(return_val) > 0:
                     # If the processed agenda item is to execute some command,
                     # and the agent has decided to act upon the environment
                     # to fulfill the command, need to break here before proceeding
@@ -544,14 +568,28 @@ class ITLAgent:
             self.planner.agenda = deque(unresolved_items)
 
             if act_on_env:
-                # Must break here act upon the environment
+                # Must break here to act upon the environment
                 break
 
-            if num_resolved_items == 0 or len(self.planner.agenda) == 0:
-                # No resolvable agenda item any more, or agenda clear
-                if len(return_val) == 0 and self.lang.latest_input is not None:
-                    # No specific reaction to utter, acknowledge any user input
-                    self.planner.agenda.append(("utter_simple", ("OK.", ".")))
+            if num_resolved_items == 0:
+                # No resolvable agenda item any more
+                if self.lang.latest_input is not None:
+                    user_linguistic_inputs = [
+                        utt for usr_in in self.lang.latest_input[0]
+                        for utt in usr_in["source"].values()
+                        if not utt.startswith("#")
+                    ]
+
+                    if len(return_val) == 0 and len(user_linguistic_inputs) > 0:
+                        # No specific reaction to utter, acknowledge any user input
+                        self.planner.agenda.append(
+                            ("utter_simple", ("OK.", { "mood": "." }))
+                        )
+                    else:
+                        # Break loop with no-op reaction (do nothing but don't
+                        # terminate the episode)
+                        return_val.append((None, None))
+                        break
                 else:
                     # Break loop with return vals
                     break

@@ -458,8 +458,9 @@ def handle_neologism(agent, novel_concepts, dialogue_state):
 
             ti = int(tok[0].strip("t"))
             ci = int(tok[1].strip("c"))
-            (_, _, ante, cons), _, mood = dialogue_state.record[ti][1][ci]
+            (_, _, ante, cons), _ = dialogue_state.record[ti][1][ci]
 
+            mood = dialogue_state.clause_info[f"t{ti}c{ci}"]["mood"]
             if len(ante) == 0 and mood == ".":
                 # Labelled exemplar provided; add new concept exemplars to
                 # memory, as feature vectors obtained from vision module backbone
@@ -536,14 +537,15 @@ def report_neologism(agent, neologism):
     ]
     logical_form = (gq, bvars, ante, cons)
 
-    mood = "."      # Indicative
-
     # Referents & predicates info
-    referents = {"x0": { "entity": "_self", "rf_info": {} } }
-    predicates = { "pc0": (("sp", "unable"), "sp_unable") }
+    referents = {
+        "e": { "mood": "." },       # Indicative
+        "x0": { "entity": "_self", "rf_info": {} }
+    }
+    predicates = { "pc0": (("sp", "unknown"), "sp_unknown") }
 
     agent.lang.dialogue.to_generate.append(
-        (logical_form, surface_form, mood, referents, predicates, {})
+        (logical_form, surface_form, referents, predicates, {})
     )
 
 
@@ -571,9 +573,9 @@ def analyze_demonstration(agent, demo_data):
     vision_2d_data = defaultdict(list); vision_3d_data = {}; assembly_sequence = []
     for img, annotations, env_refs in demo_data:
         # Appropriately handle each annotation
-        for (_, _, ante, cons), raw, mood in annotations:
+        for (_, _, ante, cons), raw, clause_info in annotations:
             # Nothing to do with non-indicative annotations
-            if mood != ".": continue
+            if clause_info["mood"] != ".": continue
             # Nothing to do with initial declaration of demonstration
             if raw.startswith("I will demonstrate"): continue
 
@@ -858,18 +860,12 @@ def analyze_demonstration(agent, demo_data):
 
         # Find in each subassembly the parts that are directly joined by the
         # assemble action
-        # (One ugly assumption made here is that contact points can be uniquely
-        # specified by string name handle used in Unity)
-        part_supertype_l = contact_l.split("/")[0]
-        part_supertype_r = contact_r.split("/")[0]
-        part_conc_ind_l, part_pose_l = [
-            (inst2conc_map[inst], pose) for inst, pose in part_poses_l.items()
-            if part_supertype_l in inst
-        ][0]
-        part_conc_ind_r, part_pose_r = [
-            (inst2conc_map[inst], pose) for inst, pose in part_poses_r.items()
-            if part_supertype_r in inst
-        ][0]
+        part_inst_l = contact_l.split("/")[0]
+        part_inst_r = contact_r.split("/")[0]
+        part_conc_ind_l = inst2conc_map[part_inst_l]
+        part_conc_ind_r = inst2conc_map[part_inst_r]
+        part_pose_l = part_poses_l[part_inst_l]
+        part_pose_r = part_poses_r[part_inst_r]
         tmat_l = transformation_matrix(*part_pose_l)
         tmat_r = transformation_matrix(*part_pose_r)
 
@@ -940,8 +936,18 @@ def analyze_demonstration(agent, demo_data):
         cp_r_conc_ind = agent.vision.add_concept("pcls")
         cp_tgt_conc_ind = cp_l_conc_ind if direction == "RToL" else cp_r_conc_ind
         cp_src_conc_ind = cp_r_conc_ind if direction == "RToL" else cp_l_conc_ind
-        oracle_tag_cp_tgt = contact_l if direction == "RToL" else contact_r
-        oracle_tag_cp_src = contact_r if direction == "RToL" else contact_l
+
+        # For storing oracle cp identifier strings
+        part_supertype_l = re.findall(r"t_(.*)_\d+$", part_inst_l)[0]
+        part_supertype_r = re.findall(r"t_(.*)_\d+$", part_inst_r)[0]
+        oracle_cp_name_l = contact_l.split("/")[1]
+        oracle_cp_name_r = contact_r.split("/")[1]
+        if direction == "RToL":
+            oracle_tag_cp_tgt = f"{part_supertype_l}/{oracle_cp_name_l}"
+            oracle_tag_cp_src = f"{part_supertype_r}/{oracle_cp_name_r}"
+        else:
+            oracle_tag_cp_tgt = f"{part_supertype_r}/{oracle_cp_name_r}"
+            oracle_tag_cp_src = f"{part_supertype_l}/{oracle_cp_name_l}"
 
         # Register contact point type and pose info
         agent.lt_mem.exemplars.add_exs_3d(
@@ -960,25 +966,25 @@ def analyze_demonstration(agent, demo_data):
         else:
             subassembly_l = nx.Graph()
             subassembly_l.add_node(
-                obj_l, part_conc=part_conc_ind_l, part_handle=part_supertype_l
+                obj_l, part_conc=part_conc_ind_l, part_handle=part_inst_l
             )
         if obj_r in assembly_trees:
             subassembly_r = assembly_trees.pop(obj_r)
         else:
             subassembly_r = nx.Graph()
             subassembly_r.add_node(
-                obj_r, part_conc=part_conc_ind_r, part_handle=part_supertype_r
+                obj_r, part_conc=part_conc_ind_r, part_handle=part_inst_r
             )
 
         assembly_trees[resulting_subassembly] = nx.union(subassembly_l, subassembly_r)
-        part_node_l = [
+        part_node_l = next(
             n for n in subassembly_l.nodes
             if subassembly_l.nodes[n]["part_handle"] in contact_l
-        ][0]
-        part_node_r = [
+        )
+        part_node_r = next(
             n for n in subassembly_r.nodes
             if subassembly_r.nodes[n]["part_handle"] in contact_r
-        ][0]
+        )
         assembly_trees[resulting_subassembly].add_edge(
             part_node_l, part_node_r,
             contact={
@@ -1036,17 +1042,16 @@ def _add_scene_and_exemplar_2d(pointer, scene_img, mask, f_vec, ex_mem):
         # an item in the `exemplars` list defined below.
         assert isinstance(exemplar_id, int)
         scene_id = None
-        obj_id = exemplar_id
     else:
         # Scene is already stored in memory, fetch the scene ID
         assert isinstance(exemplar_id, tuple) and len(exemplar_id) == 2
-        scene_id, obj_id = exemplar_id
+        scene_id = exemplar_id[0]
 
     # Add concept exemplar to memory
     scene_img = scene_img if scene_id is None else None
         # Need to pass the scene image if not already stored in memory
     exemplars = [{ "scene_id": scene_id, "mask": mask, "f_vec": f_vec }]
-    pointers = { exemplar_spec: [(is_new_obj, obj_id)] }
+    pointers = { exemplar_spec: [(is_new_obj, exemplar_id)] }
     added_inds = ex_mem.add_exs_2d(
         scene_img=scene_img, exemplars=exemplars, pointers=pointers
     )

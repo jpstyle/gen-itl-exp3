@@ -20,6 +20,16 @@ class SemanticParser:
         # parsing is not our core focus in this part of the project
         assert isinstance(usr_in, list)
 
+        # Parsing outputs should be of the following format:
+        #   `clauses`: dict with event variables as keys and logical forms of
+        #       clause contents as values. Each value is a 4-tuple of (gq, bvars,
+        #       ante, cons), respectively representing appropriate general quantifier
+        #       (if any), set of bounding variables, antecedent literals, consequent
+        #       literals.
+        #    `referents`: dict with discourse referent and event variables as keys
+        #       and their associated information as values.
+        #   `events`: dict with event variables as keys and natural-language
+        #       provenances as values.
         parses = []       # Return value
         for utt, dem_refs in zip(usr_in, pointing):
             # Possible patterns expected from the simulated user, in the scope of
@@ -27,10 +37,11 @@ class SemanticParser:
             #   1) "Build a {truck_type}."
             #   2) "I will demonstrate how to build a {truck_type}."
             #   3) "# Action/Effect: {action_type}({parameters})"
-            #   4) "This is a {concept_type}."
+            #   4) "This is (not) a {concept_type}."
             #   5) "Pick up a {part_type}." or "Pick up the subassembly."
             #   6) "# Observing"
-            #   7) ...
+            #   7) "What were you trying to do?"
+            #   8) "Stop." & "Continue."
             if re.match(r"Build a (.*)\.$", utt):
                 # 1) Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -129,20 +140,25 @@ class SemanticParser:
 
                 source = { "e0": utt }
 
-            elif re.match(r"This is a (.*)\.$", utt):
-                # 4) Providing a concept label of the demonstratively referenced
-                # object instance; may signal end of demonstration if the 'target
-                # concept' (as previously signaled by 2) above) instance is provided
-                labeled_target = re.findall(r"This is a (.*)\.$", utt)[0]
+            elif re.match(r"This is (not )?a (.*)\.$", utt):
+                # 4) Providing a concept labeling of the demonstratively referenced
+                # object instance; if positive, may signal end of demonstration if
+                # the 'target concept' (as previously signaled by 2) above) instance
+                # is provided
+                pol, labeled_target = re.findall(r"This is (not )?a (.*)\.$", utt)[0]
 
-                clauses = {
-                    "e0": (
-                        None, set(), [],
-                        [
-                            ("n", labeled_target, ["x0"])
-                        ]
-                    )
-                }
+                if pol != "not ":
+                    # Positive polarity; factual statement represented as a simple
+                    # antecedent-less clause
+                    ante = []
+                    cons = [("n", labeled_target, ["x0"])]
+                else:
+                    # Negative polarity; factual statement represented as a simple
+                    # consequent-less clause (similar to headless integrity constraint
+                    # in logic programming)
+                    ante = [("n", labeled_target, ["x0"])]
+                    cons = []
+                clauses = { "e0": (None, set(), ante, cons) }
                 referents = {
                     "e0": { "mood": "." },
                     "x0": { "source_evt": "e0", "dem_ref": (0, 4) }
@@ -181,10 +197,43 @@ class SemanticParser:
 
                     source = { "e0": utt }
                 else:
-                    # "~ the subassembly" case, do nothing here
+                    # "~ the subassembly" case, null logical form
                     clauses = {}
                     referents = {}
                     source = { "e0": utt }
+
+            elif utt == "What were you trying to join?":
+                # Asking the agent's intention (which led to a questionable
+                # action from the user's viewpoint)
+                clauses = {
+                    "e0": (
+                        None, set(), [],
+                        [
+                            ("sp", "intend", ["e0", "x0", "e1"]),
+                            ("sp", "pronoun2", ["x0"])
+                        ]
+                    ),
+                    "e1": (
+                        None, set(), [], [
+                            ("va", "join", ["e1", "x1", "x2"])
+                        ]
+                    )
+                }
+                referents = {
+                    "e0": { "mood": "?", "tense": "past" },
+                    "x0": { "source_evt": "e0" },
+                    "e1": { "mood": "~" },        # Infinitive mood
+                    "x1": { "source_evt": "e1" },
+                    "x2": { "source_evt": "e1" }
+                }
+
+                source = { "e0": utt, "e1": "# to-infinitive phrase" }
+
+            elif utt == "Stop." or utt == "Continue.":
+                # Raw form has all necessary info, null logical form
+                clauses = {}
+                referents = {}
+                source = { "e0": utt }
 
             else:
                 # Don't know how to process other patterns

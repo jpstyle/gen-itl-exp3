@@ -17,6 +17,8 @@ class Lexicon:
         ("sp", "unknown"),
         # Represents agent inability
         ("sp", "unable"),
+        # Represents agent intention
+        ("sp", "intend"),
         # Represents 1st, 2nd person pronouns
         ("sp", "pronoun1"), ("sp", "pronoun2"),
         # Signals demonstration of how to achieve a task
@@ -33,15 +35,18 @@ class Lexicon:
         # Specify the initial inventory of lexical entries that each agent starts with
         self.add(("vs", "have"), ("prel", 0))
         self.add(("va", "build"), ("arel", 0))
-        self.add(("va", "pick_up"), ("arel", 1))
-        self.add(("va", "pick_up_left"), ("arel", 2))
-        self.add(("va", "pick_up_right"), ("arel", 3))
-        self.add(("va", "drop_left"), ("arel", 4))
-        self.add(("va", "drop_right"), ("arel", 5))
-        self.add(("va", "assemble_right_to_left"), ("arel", 6))
-        self.add(("va", "assemble_left_to_right"), ("arel", 7))
-        self.add(("va", "inspect_left"), ("arel", 8))
-        self.add(("va", "inspect_right"), ("arel", 9))
+        self.add(("va", "join"), ("arel", 1))
+        self.add(("va", "pick_up"), ("arel", 2))
+        self.add(("va", "pick_up_left"), ("arel", 3))
+        self.add(("va", "pick_up_right"), ("arel", 4))
+        self.add(("va", "drop_left"), ("arel", 5))
+        self.add(("va", "drop_right"), ("arel", 6))
+        self.add(("va", "assemble_right_to_left"), ("arel", 7))
+        self.add(("va", "assemble_left_to_right"), ("arel", 8))
+        self.add(("va", "inspect_left"), ("arel", 9))
+        self.add(("va", "inspect_right"), ("arel", 10))
+        self.add(("va", "disassemble_left"), ("arel", 11))
+        self.add(("va", "disassemble_right"), ("arel", 12))
 
     def __repr__(self):
         return f"Lexicon(len={len(self.s2d)})"
