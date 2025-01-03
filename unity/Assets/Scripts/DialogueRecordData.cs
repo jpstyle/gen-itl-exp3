@@ -5,5 +5,5 @@ public class RecordData : ScriptableObject
 {
     public string speaker;
     public string utterance;
-    public ReadOnlyDictionary<(int, int), float[]> demonstrativeReferences;
+    public ReadOnlyDictionary<(int, int), (float[], string)> demonstrativeReferences;
 }

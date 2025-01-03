@@ -330,7 +330,7 @@ public class TeacherAgent : DialogueAgent
 
     private static void InstantiateAtomicPrefab(
         GameObject prefab, Material colorMaterial, GameObject partition,
-        string wrapperName, string instanceName,
+        string wrapperName, string supertypeName,
         Vector3 wrapperPos, Vector3 wrapperRot, Vector3 prtRot,
         bool licenseSupertypeLabel
     )
@@ -349,17 +349,17 @@ public class TeacherAgent : DialogueAgent
         var wrapperLabeling = wrapper.GetComponent<Labeling>();
         wrapperLabeling.labels.Add("subassembly");
 
-        // Instantiate provided cabin type with generalized name
+        // Instantiate provided cabin type with the name same as wrapperName
         var prefabInstance = Instantiate(prefab, wrapper.transform);
-        prefabInstance.name = instanceName;
+        prefabInstance.name = wrapperName;
 
-        // Add part supertype name (passed as instanceName parameter) to the list
-        // of licensed NL string names, if not already included
+        // Add part supertype name to the list of licensed NL string names, if not
+        // already included
         if (licenseSupertypeLabel)
         {
             var labelList = prefabInstance.GetComponent<EnvEntity>().licensedLabels;
-            if (!labelList.Contains(instanceName))
-                labelList.Add(instanceName);
+            if (!labelList.Contains(supertypeName))
+                labelList.Add(supertypeName);
         }
 
         // Apply color to colorable meshes 

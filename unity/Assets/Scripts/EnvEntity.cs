@@ -37,12 +37,12 @@ public class EnvEntity : MonoBehaviour
     // detected by some vision module
     public bool isBogus;
 
-    // Storage endpoint registered as static field so that it can be accessed anywhere
-    public static StorageEndpoint annotationStorage;
-
     // Storage of closest EnvEntity children; may be empty
     [HideInInspector]
     public List<EnvEntity> closestChildren;
+
+    // Storage endpoint registered as static field so that it can be accessed anywhere
+    public static StorageEndpoint annotationStorage;
 
     // Boolean flag whether this entity has its up-to-date segmentation masks (per camera)
     // computed and ready
@@ -254,20 +254,11 @@ public class EnvEntity : MonoBehaviour
                     break;
                 }
             }
+            
+            // If path segment still remaining, not an exact match
+            if (traverser is not null) continue;
 
             if (match) return ent;
-        }
-
-        return null;
-    }
-    
-    public static EnvEntity FindByUid(string uid)
-    {
-        // Fetch EnvEntity with matching uid (if exists)
-        var allEntities = FindObjectsByType<EnvEntity>(FindObjectsSortMode.None);
-        foreach (var ent in allEntities)
-        {
-            if (ent.uid == uid) return ent;
         }
 
         return null;
@@ -338,7 +329,7 @@ public class EnvEntity : MonoBehaviour
         {
             // Utilizing the max IoU as unique ID...
             var newUid = (int)(maxIoU * 1e6);
-            
+
             // Create a new GameObject and EnvEntity component 
             var bogusObj = new GameObject("bogus", typeof(EnvEntity));
             // ReSharper disable once Unity.PerformanceCriticalCodeInvocation (will be invoked

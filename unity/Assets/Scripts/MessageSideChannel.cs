@@ -23,7 +23,7 @@ public class MessageSideChannel : SideChannel
         // Retrieve any demonstrative references (map from substring indices to
         // segmentation mask image, having same dimension as scene image perceived
         // by sensor) until end of the current message is reached (signalled by -1)
-        var demRefs = new Dictionary<(int, int), EntityRef>();
+        var demRefs = new Dictionary<(int, int), (EntityRef, bool)>();
         while (true)
         {
             var intMessage = msg.ReadInt32();
@@ -32,14 +32,19 @@ public class MessageSideChannel : SideChannel
             
             var start = intMessage;
             var end = msg.ReadInt32();
-            var refByMask = msg.ReadBoolean();
-            if (refByMask)
+            var resolveByMask = msg.ReadBoolean();
+
+            EntityRef entRef;
+            if (resolveByMask)
             {
                 var rleMask = msg.ReadFloatList().ToArray();
-                demRefs[(start, end)] = new EntityRef(RleDecode(rleMask));
+                entRef = new EntityRef(RleDecode(rleMask));
             }
             else
-                demRefs[(start, end)] = new EntityRef(msg.ReadString());
+                entRef = new EntityRef(msg.ReadString());
+
+            var outputAsMask = msg.ReadBoolean();
+            demRefs[(start, end)] = (entRef, outputAsMask);
         }
 
         // Handle system requests or action parameter specifications from backend
@@ -75,7 +80,7 @@ public class MessageSideChannel : SideChannel
                     foreach (var prmString in parameters.Split(", "))
                     {
                         var prmRef = prmString == "str|@DemRef" ?
-                            demRefs[(offset+4, offset+11)] : null;
+                            demRefs[(offset+4, offset+11)].Item1 : null;
                         _listeningAgent.actionParameterBuffer.Enqueue((prmString, prmRef));
                         offset += prmString.Length + 2;
                     }
@@ -121,7 +126,7 @@ public class MessageSideChannel : SideChannel
                         msgOut.WriteString(demRef.stringRef);
                         break;
                     default:
-                        // Shouldn't reach here but anyways
+                        // Shouldn't reach here but anyway
                         throw new Exception("Invalid reference data type?");
                 }
             }

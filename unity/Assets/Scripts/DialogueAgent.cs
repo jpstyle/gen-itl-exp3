@@ -21,7 +21,7 @@ public class DialogueAgent : Agent
 
     // Message communication buffer queues
     public readonly Queue<RecordData> incomingMsgBuffer = new();
-    public readonly Queue<(string, string, Dictionary<(int, int), EntityRef>)> outgoingMsgBuffer = new();
+    public readonly Queue<(string, string, Dictionary<(int, int), (EntityRef, bool)>)> outgoingMsgBuffer = new();
 
     // Stores queue of ground-truth mask info requests received from the backend
     public readonly Queue<string> gtMaskRequests = new();
@@ -165,8 +165,14 @@ public class DialogueAgent : Agent
                 // (If any) Translate EnvEntity reference by UID to segmentation mask w.r.t.
                 // this agent's camera sensor
                 var demRefs = new Dictionary<(int, int), EntityRef>();
-                foreach (var (range, entMask) in incomingMessage.demonstrativeReferences)
-                    demRefs[range] = new EntityRef(entMask);
+                foreach (var (range, (entMask, entName)) in incomingMessage.demonstrativeReferences)
+                    if (entMask is not null)
+                        demRefs[range] = new EntityRef(entMask);
+                    else
+                    {
+                        Assert.IsNotNull(entName);
+                        demRefs[range] = new EntityRef(entName);
+                    }
 
                 // Send message via side channel
                 backendMsgChannel.SendMessageToBackend(
@@ -306,7 +312,7 @@ public class DialogueAgent : Agent
         _uttering = true;
 
         // Dequeue all messages to utter
-        var messagesToUtter = new List<(string, string, Dictionary<(int, int), EntityRef>)>();
+        var messagesToUtter = new List<(string, string, Dictionary<(int, int), (EntityRef, bool)>)>();
         while (outgoingMsgBuffer.Count > 0)
             messagesToUtter.Add(outgoingMsgBuffer.Dequeue());
         
@@ -374,10 +380,10 @@ public class DialogueAgent : Agent
             if (demRefs is not null && demRefs.Count > 0)
             {
                 // Need to resolve demonstrative reference masks to corresponding EnvEntity (uid)
-                var demRefsResolved = new Dictionary<(int, int), float[]>();
+                var demRefsResolved = new Dictionary<(int, int), (float[], string)>();
                 var targetDisplay = _cameraSensor.Camera.targetDisplay;
 
-                foreach (var (range, demRef) in demRefs)
+                foreach (var (range, (demRef, asMask)) in demRefs)
                 {
                     EnvEntity ent;
                     switch (demRef.refType)
@@ -397,7 +403,10 @@ public class DialogueAgent : Agent
 
                     // Obtain mask at the point of utterance; by the time listeners process
                     // incoming messages, EnvEntity's GameObject may be already destroyed
-                    demRefsResolved[range] = GetSensorMask(ent);
+                    demRefsResolved[range] = (
+                        asMask ? GetSensorMask(ent) : null,
+                        asMask ? null : ent.gameObject.name
+                    );
                 }
 
                 dialogueChannel.CommitUtterance(dialogueParticipantID, utterance, demRefsResolved);
@@ -424,11 +433,11 @@ public class DialogueAgent : Agent
         // Coroutine that executes specified physical action
         switch (actionType)
         {
-            case 2:
             case 3:
+            case 4:
                 // PickUpLeft/Right action, parameter: {target object}, where target
                 // may be designated by GameObject path or segmentation mask
-                var withLeft = actionType % 2 == 0;
+                var withLeft = actionType % 2 == 1;
                 var pickUpParam1 = actionParameterBuffer.Dequeue();
                 var targetName = pickUpParam1.Item1.Replace("str|", "");
                 var targetEnt = EnvEntity.FindByObjectPath($"/{targetName}");
@@ -436,18 +445,18 @@ public class DialogueAgent : Agent
                 var labelKey = pickUpParam2.Item1.Replace("str|", "");
                 actionEffect = PickUp(targetEnt, labelKey, withLeft);
                 break;
-            case 4:
             case 5:
+            case 6:
                 // DropLeft/Right action, parameter: ()
-                var fromLeft = actionType % 2 == 0;
+                var fromLeft = actionType % 2 == 1;
                 actionEffect = Drop(fromLeft);
                 break;
-            case 6:
             case 7:
+            case 8:
                 // AssembleRtoL/LtoR action, two possible parameter signatures:
                 //  1) {resultant subassembly name, object/contact L, object/contact R}
                 //  2) {resultant subassembly name, manipulator transform}
-                var rightToLeft = actionType % 2 == 0;
+                var rightToLeft = actionType % 2 == 1;
                 var assembleParam1 = actionParameterBuffer.Dequeue();
                 var productName = assembleParam1.Item1.Replace("str|", "");
                 
@@ -478,10 +487,10 @@ public class DialogueAgent : Agent
                     );
                 }
                 break;
-            case 8:
             case 9:
+            case 10:
                 // InspectLeft/Right action, parameter: {view angle index}
-                var onLeft = actionType % 2 == 0;
+                var onLeft = actionType % 2 == 1;
                 var inspectParam1 = actionParameterBuffer.Dequeue();
                 var inspectParam2 = actionParameterBuffer.Dequeue();
                 var inspectedObjName = inspectParam1.Item1.Replace("str|", "");
@@ -581,7 +590,7 @@ public class DialogueAgent : Agent
             atomicPartCount++;
 
             // Unique identifier for tracking the part
-            partPosesString += $",{ent.uid}";
+            partPosesString += $",{ent.name}";
 
             // 3D pose of the part
             var partTr = ent.gameObject.transform;
@@ -787,7 +796,7 @@ public class DialogueAgent : Agent
             atomicPartCount++;
 
             // Unique identifier for tracking the part
-            partPosesString += $",{ent.uid}";
+            partPosesString += $",{ent.name}";
 
             // 3D pose of the part
             var partTr = ent.gameObject.transform;
@@ -936,7 +945,7 @@ public class DialogueAgent : Agent
             atomicPartCount++;
 
             // Unique identifier for tracking the part
-            partPosesString += $",{ent.uid}";
+            partPosesString += $",{ent.name}";
 
             // 3D pose of the part
             var partTr = ent.gameObject.transform;
