@@ -247,8 +247,9 @@ def main(cfg):
                             spk, utterance, dem_refs = incoming_msgs.pop(0)
                             # 1D to 2D according to visual scene dimension
                             dem_refs = {
-                                crange: np.array(mask).reshape(i_h, i_w)
-                                for crange, mask in dem_refs.items()
+                                crange: ref if isinstance(ref, str) else 
+                                    np.array(ref).reshape(i_h, i_w)
+                                for crange, ref in dem_refs.items()
                             }
                             if spk == "System" and utterance.startswith("# GT mask response: "):
                                 # As it stands, code enters here only at the beginning of each
@@ -295,8 +296,11 @@ def main(cfg):
                                     action.discrete[0][0] = 1       # 'Utter' action
                                     utterance = act_params[0]
                                     dem_refs = {
-                                        crange: mask.reshape(-1).tolist()
-                                        for crange, mask in act_params[1].items()
+                                        crange: (
+                                            ref.reshape(-1).tolist() if as_mask else ref,
+                                            as_mask
+                                        )
+                                        for crange, (ref, as_mask) in act_params[1].items()
                                     }
                                     student_channel.send_string(
                                         "Student", utterance, dem_refs
@@ -332,10 +336,11 @@ def main(cfg):
 
                         while len(incoming_msgs) > 0:
                             spk, utterance, dem_refs = incoming_msgs.pop(0)
-                            # 1D to 2D according to visual scene dimension
+                            # 1D to 2D according to visual scene dimension as needed
                             dem_refs = {
-                                crange: np.array(mask).reshape(i_h, i_w)
-                                for crange, mask in dem_refs.items()
+                                crange: ref if isinstance(ref, str) else 
+                                    np.array(ref).reshape(i_h, i_w)
+                                for crange, ref in dem_refs.items()
                             }
                             if spk == "System" and utterance.startswith("# GT mask response: "):
                                 # Retrieve and store requested GT mask info in teacher

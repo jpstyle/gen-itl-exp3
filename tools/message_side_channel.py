@@ -56,7 +56,7 @@ class StringMsgChannel(SideChannel):
         msg.write_string(utterance)
 
         # Write any demonstrative references
-        for (start, end), ref in dem_refs.items():
+        for (start, end), (ref, as_mask) in dem_refs.items():
             msg.write_int32(start); msg.write_int32(end)
             if isinstance(ref, list):
                 # Reference by segmentation mask (list of floats in 0~1)
@@ -68,6 +68,10 @@ class StringMsgChannel(SideChannel):
                 assert isinstance(ref, str)
                 msg.write_bool(False)
                 msg.write_string(ref)
+
+            # Whether recipients of the outgoing message will obtain reference
+            # as mask or string name
+            msg.write_bool(as_mask)
 
         # Mark end of message segment
         msg.write_int32(-1)

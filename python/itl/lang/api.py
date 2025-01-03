@@ -48,7 +48,6 @@ class LanguageModule:
         the utterance, indicating the reference (represented as mask) made by the
         n'th occurrence of linguistic token. Mostly for programmed experiments.
         """
-        parses, pointing, speakers = l_input
         ti = len(self.dialogue.record)      # Starting dialogue turn index
 
         # First segment language inputs into consecutive sequences of utterances
@@ -110,10 +109,12 @@ class LanguageModule:
                 for rf, rf_info in referents.items():
                     if rf_info.get("dem_ref"):
                         # Demonstrately referenced entities
-                        assert pointing is not None and len(pointing) > si
-
-                        dem_mask = dem_refs[rf_info["dem_ref"]].astype(bool)
-                        pointed = self.dialogue.dem_point(dem_mask)
+                        dem_ref = dem_refs[rf_info["dem_ref"]]
+                        if isinstance(dem_ref, str):
+                            pointed = dem_ref
+                        else:
+                            dem_mask = dem_refs[rf_info["dem_ref"]].astype(bool)
+                            pointed = self.dialogue.dem_point(dem_mask)
                         self.dialogue.assignment_hard[r2i[rf]] = pointed
                 for _, _, ante, cons in clauses.values():
                     literals = ante + cons
@@ -144,8 +145,8 @@ class LanguageModule:
 
                     formatted_data = _map_and_format((bvars, ante, cons), referents, r2i)
 
-                    mood = referents[ev_id]["mood"]
-                    match mood:
+                    clause_info = referents[ev_id]
+                    match clause_info["mood"]:
                         case "." | "~":
                             # Propositions, infinitives
                             pass        # Nothing special to do here
@@ -166,7 +167,8 @@ class LanguageModule:
                             # ???
                             raise ValueError("Invalid sentence mood")
 
-                    new_record.append(((gq,)+formatted_data, source[ev_id], mood))
+                    new_record.append(((gq,)+formatted_data, source[ev_id]))
+                    self.dialogue.clause_info[r2i[ev_id]] = clause_info
 
                     if len(presup) > 0:
                         raise NotImplementedError
@@ -179,70 +181,83 @@ class LanguageModule:
         Push a simple utterance (that doesn't need a specific logical form
         associated) to generation buffer
         """
-        surface_form, mood = utterance
-        self.dialogue.to_generate.append((None, surface_form, mood, {}, {}, {}))
+        surface_form, clause_info = utterance
+        self.dialogue.to_generate.append(
+            (None, surface_form, { "e": clause_info }, {}, {})
+        )
 
     def generate(self):
         """ Flush the buffer of utterances prepared """
-        if len(self.dialogue.to_generate) > 0:
-            return_val = []
+        if len(self.dialogue.to_generate) == 0: return
 
-            ti_new = len(self.dialogue.record)
+        return_val = []
 
-            new_record = []
-            for ci_new, data in enumerate(self.dialogue.to_generate):
-                ri_evt = f"t{ti_new}c{ci_new}"
+        ti_new = len(self.dialogue.record)
 
-                logical_forms, surface_form, mood = data[:3]
-                referents, predicates, dem_refs = data[3:]
+        new_record = []
+        for ci_new, data in enumerate(self.dialogue.to_generate):
+            ri_evt = f"t{ti_new}c{ci_new}"
 
-                # Dialogue record update
-                if logical_forms is not None:
-                    gq, bvars, ante, cons = logical_forms
-                    rename_referents = lambda refs: [
-                        f"{ri_evt}{rf}" if rf in referents else rf for rf in refs
-                    ]       # Rename referents as needed by adding prefix
-                    bvars = set(rename_referents(bvars))
-                    ante = [
-                        (pos, name, rename_referents(args))
-                        for pos, name, args in ante
-                    ]
-                    cons = [
-                        (pos, name, rename_referents(args))
-                        for pos, name, args in cons
-                    ]
-                    logical_forms = (gq, bvars, ante, cons)
+            logical_forms, surface_form = data[:2]
+            referents, predicates, dem_refs = data[2:]
+
+            # Dialogue record update
+            if logical_forms is not None:
+                gq, bvars, ante, cons = logical_forms
+                def rename_referents(refs):
+                    """ Rename referents as appropriate """
+                    renamed = []
+                    for rf in refs:
+                        if rf in referents: renamed.append(f"{ri_evt}{rf}")
+                        else:
+                            if isinstance(rf, tuple) and rf[0] == "e":
+                                ci_offset = rf[1]
+                                renamed.append(f"t{ti_new}c{ci_new+ci_offset}")
+                            else: renamed.append(rf)
+                    return renamed
+                bvars = set(rename_referents(bvars))
+                ante = [
+                    (pos, name, rename_referents(args))
+                    for pos, name, args in ante
+                ]
+                cons = [
+                    (pos, name, rename_referents(args))
+                    for pos, name, args in cons
+                ]
+                logical_forms = (gq, bvars, ante, cons)
+            else:
+                logical_forms = (None,) * 4
+            new_record.append((logical_forms, surface_form))
+
+            # Dialogue state update; attach appropriate index prefix to
+            # referent & predicate identifiers
+            for rf, data in referents.items():
+                if rf == "e":
+                    # Event referent
+                    self.dialogue.clause_info[ri_evt] = data
                 else:
-                    logical_forms = (None,) * 4
-                new_record.append((logical_forms, surface_form, mood))
-                self.dialogue.clause_info[ri_evt] = { "mood": mood }
-
-                # Dialogue state update; attach appropriate index prefix to
-                # referent & predicate identifiers
-                for rf, data in referents.items():
+                    # Instance referent
                     rf = f"{ri_evt}{rf}"
                     if data["entity"] is not None:
                         self.dialogue.value_assignment[rf] = data["entity"]
                     self.dialogue.referents["dis"][rf] = {
                         "source_evt": ri_evt, **data["rf_info"]
                     }
-                for tok_ind, sense in predicates.items():
-                    tok_ind = (f"t{ti_new}", f"c{ci_new}", tok_ind)
-                    self.dialogue.word_senses[tok_ind] = sense
+            for tok_ind, sense in predicates.items():
+                tok_ind = (f"t{ti_new}", f"c{ci_new}", tok_ind)
+                self.dialogue.word_senses[tok_ind] = sense
 
-                # NL utterance to log/print (as long as not prefixed by a special
-                # symbol '#')
-                if not surface_form.startswith("#"):
-                    return_val.append(("generate", (surface_form, dem_refs)))
+            # NL utterance to log/print (as long as not prefixed by a special
+            # symbol '#')
+            if not surface_form.startswith("#"):
+                return_val.append(("generate", (surface_form, dem_refs)))
 
-            # Dialogue record update
-            self.dialogue.record.append(("Student", new_record))
+        # Dialogue record update
+        self.dialogue.record.append(("Student", new_record))
 
-            self.dialogue.to_generate = []
+        self.dialogue.to_generate = []
 
-            return return_val
-        else:
-            return
+        return return_val
 
 
 def _map_and_format(data, referents, r2i):
