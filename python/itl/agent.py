@@ -156,8 +156,10 @@ class ITLAgent:
         for utt, dem_refs, spk in zip(usr_in, pointing, speaker):
             # Process any non-mask references
             dem_refs = {
-                crange: self.planner.execution_state["part_identifiers"][ref]
-                    if isinstance(ref, str) else ref
+                crange: next(
+                    oi for oi, obj in self.vision.scene.items()
+                    if ref == obj["env_handle"]
+                ) if isinstance(ref, str) else ref
                 for crange, ref in dem_refs.items()
             }
 

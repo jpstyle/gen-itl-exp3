@@ -408,6 +408,11 @@ class SimulatedTeacher:
                         assem_st[side] = None       # Pick-up undone
                         interrupted = True
 
+                if utt.startswith("# Effect: drop"):
+                    # Effect of drop action; no args, just update hand states
+                    side = re.findall(r"# Effect: drop_(.*)\(\)$", utt)[0]
+                    assem_st[side] = None
+
                 if utt.startswith("# Effect: assemble"):
                     # Effect of assemble action; interested in closest contact points
                     direction, effects = re.findall(r"# Effect: assemble_(.*)\((.*)\)$", utt)[0]
@@ -490,16 +495,27 @@ class SimulatedTeacher:
                     if queried_type == supertype or queried_type == subtype
                 ]
                 available_insts = [
-                    inst for inst in matching_insts
-                    if inst not in assem_st["aliases"].values()
+                    inst
+                    for inst in matching_insts
+                    if inst not in assem_st["aliases"].values()     # Never picked up
+                        or len(subassems[inst]) == 1                # Certified singleton
                 ]
                 selected_inst = random.sample(available_insts, 1)[0]
 
+                # Selected instance may already have been picked up and held
+                # in left or right hand
+                if selected_inst == assem_st["left"]:
+                    ent_path = f"/Student Agent/Left Hand/{selected_inst}"
+                elif selected_inst == assem_st["right"]:
+                    ent_path = f"/Student Agent/Right Hand/{selected_inst}"
+                else:
+                    ent_path = f"/{selected_inst}"
                 response.append((
                     "generate",
                     {
                         "utterance": f"This is a {queried_type}.",
-                        "pointing": { (0, 4): (f"/{selected_inst}", True) }
+                        "pointing": { (0, 4): (ent_path, False) }
+                            # `False`: Pass by string name instead of seg mask
                     }
                 ))
 
