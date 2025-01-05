@@ -141,18 +141,24 @@ def prepare_answer_Q(agent, utt_pointer):
                 todo_args[1][2:4] for todo_type, todo_args in agent.planner.agenda
                 if todo_type == "execute_command" and todo_args[0] in assemble_actions
             )
-            ent_left = next(
-                k for k, v in exec_state["part_identifiers"].items()
-                if v == intended_join[0]
-            )
-            ent_right = next(
-                k for k, v in exec_state["part_identifiers"].items()
-                if v == intended_join[1]
-            )
-            den_left = exec_state["recognitions"][intended_join[0]]
-            den_right = exec_state["recognitions"][intended_join[1]]
-            sym_left = agent.lt_mem.lexicon.d2s[("pcls", den_left)][0][1]
-            sym_right = agent.lt_mem.lexicon.d2s[("pcls", den_right)][0][1]
+        else:
+            # The previous action undone was an assembly between a (valid) pair
+            # of subassemblies, yet at an incorrect pose. In this case, the
+            # intended join is the undone assembly action.
+            assert last_action_type in assemble_actions
+            intended_join = last_action_params[2:4]
+
+        # Getting appropriate name handles, concepts and NL symbols
+        ent_left = agent.vision.scene[intended_join[0]]["env_handle"]
+        ent_right = agent.vision.scene[intended_join[1]]["env_handle"]
+        den_left = exec_state["recognitions"][intended_join[0]]
+        den_right = exec_state["recognitions"][intended_join[1]]
+        sym_left = agent.lt_mem.lexicon.d2s[("pcls", den_left)][0][1]
+        sym_right = agent.lt_mem.lexicon.d2s[("pcls", den_right)][0][1]
+
+        # Entity paths in environment, obtained differently per previous
+        # action type
+        if last_action_type in pick_up_actions:
             if pick_up_actions.index(last_action_type) == 0:
                 # Entity was picked up with left hand in last action, which
                 # is currently dropped back on table
@@ -164,11 +170,8 @@ def prepare_answer_Q(agent, utt_pointer):
                 ent_path_left = f"/Student Agent/Left Hand/*/{ent_left}"
                 ent_path_right = f"/*/{ent_right}"
         else:
-            # The previous action undone was an assembly between a (valid) pair
-            # of subassemblies, yet at an incorrect pose. In this case, the
-            # intended join is the undone assembly action.
-            assert last_action_type in assemble_actions
-            intended_join = ...
+            ent_path_left = f"/Student Agent/Left Hand/*/{ent_left}"
+            ent_path_right = f"/Student Agent/Right Hand/*/{ent_right}"
 
         # NL surface forms and corresponding logical forms
         surface_form_0 = f"I was trying to join this {sym_left} and this {sym_right}."
@@ -198,14 +201,8 @@ def prepare_answer_Q(agent, utt_pointer):
         referents_1 = {
             "e": { "mood": "~" },       # Infinitive
             "x0": { "entity": None, "rf_info": {} },
-            "x1": {
-                "entity": exec_state["part_identifiers"][ent_left],
-                "rf_info": {}
-            },
-            "x2": {
-                "entity": exec_state["part_identifiers"][ent_right],
-                "rf_info": {}
-            },
+            "x1": { "entity": intended_join[0], "rf_info": {} },
+            "x2": { "entity": intended_join[1], "rf_info": {} }
         }
         predicates_0 = {
             "pc0": (("sp", "intend"), "sp_intend"),
@@ -332,26 +329,24 @@ def execute_command(agent, action_spec):
 
     # Check if (the remainder) of the plan being executed need to be examined,
     # to see whether if it is still valid after agent's knowledg update, if any.
-    replanning_needed = False
-    xb_updated, kb_updated = exec_state.get(
-        "knowledge_updated", (False, False)
-    )
+    xb_updated, kb_updated = exec_state.get("knowledge_updated", (False, False))
+    exec_state["knowledge_updated"] = (False, False)    # Clear flags
 
-    if kb_updated:
-        # Always plan again upon KB update
-        replanning_needed |= True
+    # Note to self: One could imagine we could skip re-planning from scratch
+    # after the user's labeling feedback if it did not involve an instance
+    # that is already referenced in the remainder of the plan (i.e., when the
+    # corrective feedback does not refute the premise based on agent's previous
+    # object recognition output)... However, it turned out it caused too much
+    # headache to juice such opportunities, and it's much easier to simply
+    # re-plan after any form of knowledge update (after dropping all held
+    # objects in hands).
 
-    if xb_updated and not replanning_needed:
-        # One scenario in which we can skip replanning from scratch is when
-        # the teacher's labeling feedback, which resulted in XB update, did
-        # not involve labeling of an instance that is already referenced in
-        # the plan (i.e., when the corrective feedback doesn't refute the
-        # premise based on agent's previous object recognition output). Note
-        # that this only happens in case of grounding failure where agent
-        # believes some part instance needed does not exist.
+    if xb_updated or kb_updated:
+        # Plan again for the remainder of the assembly based on current execution
+        # state, belief and knowledge, then return without return value
         resolved_record = agent.lang.dialogue.export_resolved_record()
         labeling_feedback = [
-            lit
+            (lit.args[0][0], int(lit.name.strip("pcls_")))
             for spk, turn_clauses in resolved_record
             for ((_, _, _, cons), _, clause_info) in turn_clauses
             if cons is not None
@@ -359,96 +354,15 @@ def execute_command(agent, action_spec):
             if spk == "Teacher" and clause_info["mood"] == "." \
                 and lit.name.startswith("pcls")
         ]
-        labeling_feedback = {
-            lit.args[0][0]: int(lit.name.strip("pcls_"))
-            for lit in labeling_feedback
-        }
-        plan_remainder_args = set(sum([
-            action_params or ()
-            for agenda_type, (_, action_params) in agent.planner.agenda
-            if agenda_type == "execute_command"
-        ], ()))
-
-        if len(set(labeling_feedback) & plan_remainder_args) > 0:
-            # Need to plan again with updated XB
-            replanning_needed |= True
-        else:
-            # First append the popped action spec back to the left of the agenda
-            agent.planner.agenda.appendleft(("execute_command", action_spec))
-
-            # Fetch last (postponed) action spec for re-execution
-            action_type, action_params = exec_state["action_history"].pop(-1)
-
-            # Unify non-object handle with a labeled object by selecting one
-            # with matching type and adding the non-object handle to vis.scene
-            # along with env_handle field, so that _execute_pick_up can be
-            # properly executed
-            nonobj_handle = action_params[0]
-            unifying_type = exec_state["recognitions"][nonobj_handle]
-            matched_obj = [
-                obj for obj, conc in labeling_feedback.items()
-                if conc == unifying_type
-            ][0]
-            agent.vision.scene[nonobj_handle] = {
-                "unified_obj": matched_obj,
-                "env_handle": agent.vision.scene[matched_obj]["env_handle"]
-            }
-
-    exec_state["knowledge_updated"] = (False, False)    # Clear flags
-
-    if replanning_needed:
-        # Plan again for the remainder of the assembly based on current execution
-        # state, belief and knowledge, then return without return value
+        labeling_map = dict(labeling_feedback)
 
         # Update execution state to reflect recognitions hitherto committed
-        # and those certified by user feedback, while mapping non-objects
-        # (prefixed with "n") to their unified counterparts
-        nonobj_mapping = {
-            oi: obj["unified_obj"] for oi, obj in agent.vision.scene.items()
-            if "unified_obj" in obj
-        }
-        nonobj_mapping_inv = { v: k for k, v in nonobj_mapping.items() }
-        for side in [0, 1]:
-            mnp_state = exec_state["manipulator_states"][side]
-            exec_state["manipulator_states"][side] = (
-                nonobj_mapping.get(mnp_state[0], mnp_state[0]),
-                mnp_state[1],
-                {
-                    nonobj_mapping.get(oi, oi): pose
-                    for oi, pose in mnp_state[2].items()
-                } if mnp_state[2] is not None else None
-            )
-        exec_state["part_identifiers"] = {
-            pid: nonobj_mapping.get(obj, obj)
-            for pid, obj in exec_state["part_identifiers"].items()
-        }
-        exec_state["connection_graphs"] = {
-            nonobj_mapping.get(sa, sa): nx.relabel_nodes(
-                sa_graph, nonobj_mapping, copy=True
-            )
-            for sa, sa_graph in exec_state["connection_graphs"].items()
-        }
+        # and those certified by user feedback
         exec_state["recognitions"] = {
-            n: exec_state["recognitions"][nonobj_mapping_inv.get(n, n)]
+            n: exec_state["recognitions"][n]
             for gr in exec_state["connection_graphs"].values()
             for n in gr
-            if "pred_cls" in agent.vision.scene[n]      # Ignore non-objects
-        } | labeling_feedback                           # Update with feedback
-        exec_state["action_history"] = [
-            (
-                action_type,
-                tuple(nonobj_mapping.get(prm, prm) for prm in action_params)
-                    if action_params is not None else None
-            )
-            for action_type, action_params in exec_state["action_history"]
-        ]
-
-        # Scour non-objects from the visual scene, now that they are all
-        # properly handled
-        agent.vision.scene = {
-            oi: obj for oi, obj in agent.vision.scene.items()
-            if "unified_obj" not in obj
-        }
+        } | labeling_map                           # Update with feedback
 
         # Finally, re-plan
         action_sequence, recognitions = _plan_assembly(agent, exec_state["plan_goal"][1])
@@ -510,8 +424,6 @@ def _execute_build(agent, action_params):
         "plan_goal": ("build", build_target),
         "manipulator_states": [(None, None, None), (None, None, None)],
             # Resp. left & right held object, manipulator pose, component masks
-        "part_identifiers": {},
-            # Stores Unity-side identifiers mapped to individual atomic parts
         "connection_graphs": {},
         "recognitions": {},
         "join_validities": (set(), set()),
@@ -936,17 +848,17 @@ def _plan_assembly(agent, build_target):
                 break
         else:
             # All possible options would lead to invalid sequence. Remember
-            # the current sequence as invalid and start again.
+            # the current sequence as invalid.
+            # Update tracker states
+            invalid_chunk_sequences.append(current_chunk_sequence)
+            planning_attempts += 1
+            valid_joins_cached |= collision_checker.valid_joins
+            invalid_joins_cached |= collision_checker.invalid_joins
+            # Then start again
             initial_state_cp = copy.deepcopy(initial_state)
             compression_graph, chunks_assembled = initial_state_cp[:2]
             current_chunk_sequence, sa_ind = initial_state_cp[2:4]
             join_sequence, inst_pool = initial_state_cp[4:]
-            # Update tracker states
-            invalid_chunk_sequences.append(current_chunk_sequence)
-            planning_attempts += 1
-            query_count += collision_checker.query_count
-            valid_joins_cached |= collision_checker.valid_joins
-            invalid_joins_cached |= collision_checker.invalid_joins
             continue
 
         chunk_subgraph = compression_graph.subgraph(chunk_selected)
@@ -1002,7 +914,7 @@ def _plan_assembly(agent, build_target):
         # made without dropping subassemblies
         step = 0; optimal_model = None
         while True:
-            if step > len(chunk):
+            if step > len(chunk_selected):
                 # If reached here, ASP problem has no valid solution, probably
                 # due to faulty subgraph sampling; update the set of assembly
                 # implications as appropriate
@@ -1044,18 +956,24 @@ def _plan_assembly(agent, build_target):
                 for n in nodes1:
                     scope_implications[n].add((nodes1, list(nodes2)[0]))
 
+        # Tracking sequence of selected chunks, so as to remember invalid
+        # sequences that led to deadend states and prevent following the
+        # exact same sequence again
+        current_chunk_sequence.append(chunk_selected)
+
+        query_count += collision_checker.query_count
         if optimal_model is None:
-            # Start again from scratch upon planning failure
+            # Planning failure, start again from scratch
+            # Update tracker states
+            invalid_chunk_sequences.append(current_chunk_sequence)
+            planning_attempts += 1
+            valid_joins_cached |= collision_checker.valid_joins
+            invalid_joins_cached |= collision_checker.invalid_joins
+            # Then start again
             initial_state_cp = copy.deepcopy(initial_state)
             compression_graph, chunks_assembled = initial_state_cp[:2]
             current_chunk_sequence, sa_ind = initial_state_cp[2:4]
             join_sequence, inst_pool = initial_state_cp[4:]
-            # Update tracker states
-            invalid_chunk_sequences.append(current_chunk_sequence)
-            planning_attempts += 1
-            query_count += collision_checker.query_count
-            valid_joins_cached |= collision_checker.valid_joins
-            invalid_joins_cached |= collision_checker.invalid_joins
             continue
 
         # Project model into join action sequence and extract action
@@ -1080,29 +998,24 @@ def _plan_assembly(agent, build_target):
         ]
 
         # Update compression graph accordingly
-        compress_chunk(compression_graph, chunk, f"s{sa_ind}")
+        compress_chunk(compression_graph, chunk_selected, f"s{sa_ind}")
 
-        # Tracking sequence of selected chunks, so as to remember invalid
-        # sequences that led to deadend states and prevent following the
-        # exact same sequence again
-        current_chunk_sequence.append(chunk)
         # Remember which components constitute the new subassembly, while
         # removing old subassemblies in chunk that have been merged into
         # new subassembly
         chunks_assembled[f"s{sa_ind}"] = {
-            n for s in chunk if s in chunks_assembled
+            n for s in chunk_selected if s in chunks_assembled
             for n in chunks_assembled[s]
         } | {
-            n for n in chunk if n not in chunks_assembled
+            n for n in chunk_selected if n not in chunks_assembled
         }
-        for s in chunk:
+        for s in chunk_selected:
             if s in chunks_assembled:
                 del chunks_assembled[s]
 
         sa_ind += 1
 
     planning_attempts += 1
-    query_count += collision_checker.query_count
     log_msg = f"Working plan found after {planning_attempts} (re)planning attempts "
     log_msg += f"({query_count} calls total)"
     logger.info(log_msg)
@@ -1123,29 +1036,12 @@ def _plan_assembly(agent, build_target):
             if obj in part_candidates[conc_n]:
                 part_candidates[conc_n].remove(obj)
 
-    # If currently held objects must be dropped before achieving the first
-    # join in the sequence, do so
-    hands = [
-        exec_state["manipulator_states"][0][0],
-        exec_state["manipulator_states"][1][0]
-    ]
+    # Drop any currently held objects for headache-free re-planning
     for side in [0, 1]:
-        held_sa = hands[side]
-        if held_sa is None: continue
-
-        if len(exec_state["connection_graphs"][held_sa]) == 1:
-            # Singleton node
-            held_node = node_unifications[f"{held_sa}_{held_sa}"]
-        else:
-            # Non-singleton node
-            held_node = held_sa
-
-        if held_node not in join_sequence[0][:2]:
-            # Drop if cannot be used
+        if exec_state["manipulator_states"][side][0] is not None:
             action_sequence.append((drop_actions[side], None))
-            hands[side] = None
 
-    nonobj_ind = 0
+    nonobj_ind = 0; hands = [None, None]
     for s1, s2, n1, n2, res in join_sequence:
         # Convert assembly hierarchy nodes into randomly sampled objects with
         # matching part type, on first encounter. If ran out of objects in
@@ -1838,7 +1734,12 @@ def handle_action_effect(agent, effect):
     # Shortcut vars
     referents = agent.lang.dialogue.referents
     exec_state = agent.planner.execution_state      # Shortcut var
-    part_identifiers = exec_state["part_identifiers"]
+
+    # Mapping from Unity-side name to scene object index
+    env_handle_inv = {
+        obj["env_handle"]: oi
+        for oi, obj in agent.vision.scene.items()
+    }
 
     # Utility method for parsing serialized float lists passed as action effect
     parse_floats = lambda ai: tuple(
@@ -1861,19 +1762,11 @@ def handle_action_effect(agent, effect):
             flip_position_y(parse_floats(4))
         )
 
-        # Track string identifiers referring to each part instance,
-        # which is revealed every time a singleton wrapper object
-        # is picked up in Unity environment (identifiable by number
-        # of parts whose poses are reported: 1 for singletons)
-        if num_parts == 1:
-            part_uid = referents["dis"][effect_lit.args[6][0]]["name"]
-            part_identifiers[part_uid] = manip_state[0]
-
         # Poses of individual parts in the object picked up
         part_poses = {}
         for i in range(num_parts):
             part_uid = referents["dis"][effect_lit.args[6+3*i][0]]["name"]
-            part_poses[part_identifiers[part_uid]] = (
+            part_poses[env_handle_inv[part_uid]] = (
                 flip_quaternion_y(xyzw2wxyz(parse_floats(6+3*i+1))),
                 flip_position_y(parse_floats(6+3*i+2))
             )
@@ -1888,7 +1781,7 @@ def handle_action_effect(agent, effect):
 
     if action_name.startswith("assemble"):
         # Assemble action effects: closest contact point pairs after the joining
-        # movement*, pose of target-side manipulator, masks of all atomic parts
+        # movement*, pose of target-side manipulator, poses of all atomic parts
         # included in the assembled product (*: not used by learner agent)
         manip_ind = 0 if action_name.endswith("left") else 1
         manip_state = exec_state["manipulator_states"][manip_ind]
@@ -1903,14 +1796,77 @@ def handle_action_effect(agent, effect):
         )
 
         # Poses of individual parts in the object picked up
-        part_poses = {}; 
+        part_poses = {}
         for i in range(num_parts):
-            arg_start_ind = ind_offset + 1 + 3 * i
-            part_uid = referents["dis"][effect_lit.args[arg_start_ind][0]]["name"]
-            part_poses[part_identifiers[part_uid]] = (
-                flip_quaternion_y(xyzw2wxyz(parse_floats(arg_start_ind+1))),
-                flip_position_y(parse_floats(arg_start_ind+2))
+            start_ind = ind_offset + 1 + 3 * i
+            part_uid = referents["dis"][effect_lit.args[start_ind][0]]["name"]
+            part_poses[env_handle_inv[part_uid]] = (
+                flip_quaternion_y(xyzw2wxyz(parse_floats(start_ind+1))),
+                flip_position_y(parse_floats(start_ind+2))
             )
 
         exec_state["manipulator_states"][manip_ind] = \
             (manip_state[0],) + (manip_pose, part_poses)
+
+    if action_name.startswith("disassemble"):
+        # Disassemble action effects: poses of both manipulators, poses of all
+        # atomic parts included in each disassembly resultants objects
+        manip_ind = 0 if action_name.endswith("left") else 1
+
+        # (Former) names of joined subassemblies, obtained from action history,
+        # used as names of the disassembly results again
+        prev_left, prev_right = exec_state["action_history"][-1][1][:2]
+
+        # (Former) name of originally held subassembly before the disassembly
+        disassembled = exec_state["manipulator_states"][manip_ind][0]
+        # Connection graph of the disassembled subassembly; remove from
+        # exec_state
+        sa_graph = exec_state["connection_graphs"].pop(disassembled)
+
+        # Manipulator poses, left and right
+        manip_pose_left = (
+            flip_quaternion_y(xyzw2wxyz(parse_floats(2))),
+            flip_position_y(parse_floats(3))
+        )
+        manip_pose_right = (
+            flip_quaternion_y(xyzw2wxyz(parse_floats(4))),
+            flip_position_y(parse_floats(5))
+        )
+
+        # Poses of individual parts in the objects on left and right after
+        # the separation
+        ind_offset = 6
+        num_parts_left = int(
+            referents["dis"][effect_lit.args[ind_offset][0]]["name"]
+        )
+        part_poses_left = {}
+        for i in range(num_parts_left):
+            start_ind = ind_offset + 1 + 3 * i
+            part_uid = referents["dis"][effect_lit.args[start_ind][0]]["name"]
+            part_poses_left[env_handle_inv[part_uid]] = (
+                flip_quaternion_y(xyzw2wxyz(parse_floats(start_ind+1))),
+                flip_position_y(parse_floats(start_ind+2))
+            )
+        ind_offset += 1 + 3 * num_parts_left
+        num_parts_right = int(
+            referents["dis"][effect_lit.args[ind_offset][0]]["name"]
+        )
+        part_poses_right = {}
+        for i in range(num_parts_right):
+            start_ind = ind_offset + 1 + 3 * i
+            part_uid = referents["dis"][effect_lit.args[start_ind][0]]["name"]
+            part_poses_right[env_handle_inv[part_uid]] = (
+                flip_quaternion_y(xyzw2wxyz(parse_floats(start_ind+1))),
+                flip_position_y(parse_floats(start_ind+2))
+            )
+
+        exec_state["manipulator_states"] = [
+            (prev_left, manip_pose_left, part_poses_left),
+            (prev_right, manip_pose_right, part_poses_right),
+        ]
+
+        # Restore connection graphs after disassembly, obtained as subgraphs
+        graph_left = sa_graph.subgraph(part_poses_left)
+        graph_right = sa_graph.subgraph(part_poses_right)
+        exec_state["connection_graphs"][prev_left] = graph_left
+        exec_state["connection_graphs"][prev_right] = graph_right

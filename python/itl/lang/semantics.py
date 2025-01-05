@@ -115,7 +115,9 @@ class SemanticParser:
                     "e0": (
                         None, set(), [],
                         [
-                            ("va", act_type, ["e0", "x0"] + [f"x{i+1}" for i in range(len(act_params))]),
+                            ("va", act_type, ["e0", "x0"] + [
+                                f"x{i+1}" for i in range(len(act_params))
+                            ]),
                             ("sp", "pronoun1", ["x0"]),
                         ]
                     )

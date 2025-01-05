@@ -24,7 +24,7 @@ from ..lpmln.utils import flatten_ante_cons, wrap_args
 
 
 EPS = 1e-10                 # Value used for numerical stabilization
-SR_THRES = 0.8              # Mismatch surprisal threshold
+SR_THRES = 0.9              # Mismatch surprisal threshold
 U_IN_PR = 0.99              # How much the agent values information provided by the user
 
 # Connectivity graph that represents pairs of 3D inspection images to be cross-referenced
@@ -568,7 +568,7 @@ def analyze_demonstration(agent, demo_data):
 
     # Sequentially process each demonstration step
     current_held = [None, None]; current_assembly_info = None
-    part_identifiers = {}; nonatomic_subassemblies = set()
+    nonatomic_subassemblies = set()
     nl_labeling = {}
     vision_2d_data = defaultdict(list); vision_3d_data = {}; assembly_sequence = []
     for img, annotations, env_refs in demo_data:
@@ -676,19 +676,11 @@ def analyze_demonstration(agent, demo_data):
                                 # identifier, rotation, position)
                                 num_parts = int(referents["dis"][lit.args[5][0]]["name"])
 
-                                # Track string identifiers referring to each part instance,
-                                # which is revealed every time a singleton wrapper object
-                                # is picked up in Unity environment (identifiable by number
-                                # of parts whose poses are reported: 1 for singletons)
-                                if num_parts == 1:
-                                    part_uid = referents["dis"][lit.args[6][0]]["name"]
-                                    part_identifiers[part_uid] = current_held[left_or_right][0]
-
                                 # Update poses of individual parts
                                 part_poses = current_held[left_or_right][1]
                                 for i in range(num_parts):
-                                    part_uid = referents["dis"][lit.args[6+3*i][0]]["name"]
-                                    part_poses[part_identifiers[part_uid]] = (
+                                    part_name = referents["dis"][lit.args[6+3*i][0]]["name"]
+                                    part_poses[part_name] = (
                                         flip_quaternion_y(xyzw2wxyz(parse_floats(6+3*i+1))),
                                         flip_position_y(parse_floats(6+3*i+2))
                                     )
@@ -714,8 +706,8 @@ def analyze_demonstration(agent, demo_data):
                                 num_parts = int(referents["dis"][lit.args[6][0]]["name"])
                                 part_poses = current_held[left_or_right][1]
                                 for i in range(num_parts):
-                                    part_uid = referents["dis"][lit.args[7+3*i][0]]["name"]
-                                    part_poses[part_identifiers[part_uid]] = (
+                                    part_name = referents["dis"][lit.args[7+3*i][0]]["name"]
+                                    part_poses[part_name] = (
                                         flip_quaternion_y(xyzw2wxyz(parse_floats(7+3*i+1))),
                                         flip_position_y(parse_floats(7+3*i+2))
                                     )
