@@ -5,6 +5,7 @@ using System.Linq;
 using UnityEngine;
 using UnityEngine.Assertions;
 using UnityEngine.Perception.GroundTruth;
+using UnityEngine.Perception.GroundTruth.LabelManagement;
 using Unity.MLAgents;
 using Unity.MLAgents.Sensors;
 using Unity.MLAgents.Actuators;
@@ -431,32 +432,30 @@ public class DialogueAgent : Agent
         var actionEffect = "";
 
         // Coroutine that executes specified physical action
+        var leftOrRight = actionType % 2 == 1;
         switch (actionType)
         {
             case 3:
             case 4:
                 // PickUpLeft/Right action, parameter: {target object}, where target
                 // may be designated by GameObject path or segmentation mask
-                var withLeft = actionType % 2 == 1;
                 var pickUpParam1 = actionParameterBuffer.Dequeue();
                 var targetName = pickUpParam1.Item1.Replace("str|", "");
                 var targetEnt = EnvEntity.FindByObjectPath($"/{targetName}");
                 var pickUpParam2 = actionParameterBuffer.Dequeue();
                 var labelKey = pickUpParam2.Item1.Replace("str|", "");
-                actionEffect = PickUp(targetEnt, labelKey, withLeft);
+                actionEffect = PickUp(targetEnt, labelKey, leftOrRight);
                 break;
             case 5:
             case 6:
-                // DropLeft/Right action, parameter: ()
-                var fromLeft = actionType % 2 == 1;
-                actionEffect = Drop(fromLeft);
+                // DropLeft/Right action, parameter: {}
+                actionEffect = Drop(leftOrRight);
                 break;
             case 7:
             case 8:
                 // AssembleRtoL/LtoR action, two possible parameter signatures:
                 //  1) {resultant subassembly name, object/contact L, object/contact R}
                 //  2) {resultant subassembly name, manipulator transform}
-                var rightToLeft = actionType % 2 == 1;
                 var assembleParam1 = actionParameterBuffer.Dequeue();
                 var productName = assembleParam1.Item1.Replace("str|", "");
                 
@@ -466,7 +465,7 @@ public class DialogueAgent : Agent
                     var leftPoint = assembleParam2.Item1.Replace("str|", "");
                     var assembleParam3 = actionParameterBuffer.Dequeue();
                     var rightPoint = assembleParam3.Item1.Replace("str|", "");
-                    actionEffect = Assemble(productName, leftPoint, rightPoint, rightToLeft);
+                    actionEffect = Assemble(productName, leftPoint, rightPoint, leftOrRight);
                 }
                 else
                 {
@@ -483,19 +482,36 @@ public class DialogueAgent : Agent
                         position[0], position[1], position[2]
                     );          // xyz
                     actionEffect = Assemble(
-                        productName, rotationQuaternion, positionVector3, rightToLeft
+                        productName, rotationQuaternion, positionVector3, leftOrRight
                     );
                 }
                 break;
             case 9:
             case 10:
                 // InspectLeft/Right action, parameter: {view angle index}
-                var onLeft = actionType % 2 == 1;
                 var inspectParam1 = actionParameterBuffer.Dequeue();
                 var inspectParam2 = actionParameterBuffer.Dequeue();
                 var inspectedObjName = inspectParam1.Item1.Replace("str|", "");
                 var viewAngleIndex = Convert.ToInt32(inspectParam2.Item1.Replace("int|", ""));
-                actionEffect = Inspect(viewAngleIndex, inspectedObjName, onLeft);
+                actionEffect = Inspect(viewAngleIndex, inspectedObjName, leftOrRight);
+                break;
+            case 11:
+            case 12:
+                // DisassembleLeft/Right action, parameters: {resultant subassembly names on
+                // left and right, parts to take away from the subassembly held}
+                var disassembleParam1 = actionParameterBuffer.Dequeue();
+                var disassembleParam2 = actionParameterBuffer.Dequeue();
+                var disassembleParam3 = actionParameterBuffer.Dequeue();
+                var leftName = disassembleParam1.Item1.Replace("str|", "");
+                var rightName = disassembleParam2.Item1.Replace("str|", "");
+                var numTakeawayParts = Convert.ToInt32(disassembleParam3.Item1.Replace("int|", ""));
+                var takeawayParts = new List<string>();
+                for (var i = 0; i < numTakeawayParts; i++)
+                {
+                    var disassembleParamNext = actionParameterBuffer.Dequeue();
+                    takeawayParts.Add(disassembleParamNext.Item1.Replace("str|", ""));
+                }
+                actionEffect = Disassemble(leftName, rightName, takeawayParts, leftOrRight);
                 break;
         }
 
@@ -647,7 +663,7 @@ public class DialogueAgent : Agent
         else
         {
             xPos = _mainPartitionPosition.x + Random.Range(-0.15f, 0.15f);
-            zPos = _mainPartitionPosition.z + Random.Range(-0.06f, 0.12f);
+            zPos = _mainPartitionPosition.z + Random.Range(0f, 0.12f);
         }
         var volume = GetBoundingVolume(heldObj);
         var yPos = _mainPartitionPosition.y + volume.extents.y + 0.06f;
@@ -1032,6 +1048,107 @@ public class DialogueAgent : Agent
         var poseString = $"{rot.ToString("F4")},{pos.ToString("F4")}";
         poseString = poseString.Replace("(", "").Replace(")", "").Replace(", ", "/");
         actionEffect += $"{poseString})";
+
+        return actionEffect;
+    }
+
+    private string Disassemble(
+        string leftName, string rightName, List<string> takeawayParts, bool fromLeft
+    )
+    {
+        var directionString = fromLeft ? "left" : "right";
+
+        // Action aftermath info to return; poses (position, quaternion) of both
+        // manipulators after disassembly, poses of atomic parts contained
+        // in each disassembled subassembly on each side 
+        var actionEffect = $"# Effect: disassemble_{directionString}(";
+
+        // Drop an object currently held in the specified hand onto the tabletop
+        var activeHand = fromLeft ? leftHand : rightHand;
+        var emptyHand = fromLeft ? rightHand : leftHand;
+
+        // Get handle of object to be disassembled; update name
+        var heldObj = activeHand.transform.GetChild(0).gameObject;
+        heldObj.name = fromLeft ? leftName : rightName;
+
+        // Create a new subassembly gameObject to hold the parts to be taken away
+        var newObj = new GameObject(
+            fromLeft ? rightName : leftName,
+            typeof(EnvEntity), typeof(Rigidbody), typeof(Labeling)
+        )
+        {
+            // To be held by the currently empty hand
+            transform =
+            {
+                parent = emptyHand.transform,
+                position = emptyHand.transform.position
+            }
+        };
+        var newObjRigidbody = newObj.GetComponent<Rigidbody>();
+        newObjRigidbody.isKinematic = true;
+        newObjRigidbody.detectCollisions = false;
+
+        // Disassemble the subassembly by reassigning parent transforms of parts to
+        // take away from it
+        for (var i = heldObj.transform.childCount - 1; i > -1; i--)
+        {
+            var part = heldObj.transform.GetChild(i).gameObject;
+            if (takeawayParts.Contains(part.name))
+                part.transform.parent = newObj.transform;
+        }
+
+        // Re-centering both subassemblies
+        var leftObj = fromLeft ? heldObj : newObj;
+        var rightObj = fromLeft ? newObj : heldObj;
+        var leftVolume = GetBoundingVolume(leftObj);
+        
+        var rightVolume = GetBoundingVolume(rightObj);
+        foreach (Transform partTr in leftObj.transform)
+            partTr.position += leftHand.position - leftVolume.center;
+        foreach (Transform partTr in rightObj.transform)
+            partTr.position += rightHand.position - rightVolume.center;
+
+        // Update children of both subassemblies
+        leftObj.GetComponent<EnvEntity>().UpdateClosestChildren();
+        rightObj.GetComponent<EnvEntity>().UpdateClosestChildren();
+
+        // Pose of both manipulators, in camera coordinate
+        var camTr = _cameraSensor.Camera.transform;
+        var leftRot = Quaternion.Inverse(camTr.rotation) * leftHand.rotation;
+        var leftPos = camTr.InverseTransformPoint(leftHand.position);
+        var leftPoseString = $"{leftRot.ToString("F4")},{leftPos.ToString("F4")}";
+        leftPoseString = leftPoseString.Replace("(", "").Replace(")", "").Replace(", ", "/");
+        var rightRot = Quaternion.Inverse(camTr.rotation) * rightHand.rotation;
+        var rightPos = camTr.InverseTransformPoint(rightHand.position);
+        var rightPoseString = $"{rightRot.ToString("F4")},{rightPos.ToString("F4")}";
+        rightPoseString = rightPoseString.Replace("(", "").Replace(")", "").Replace(", ", "/");
+        actionEffect += $"{leftPoseString},{rightPoseString}";
+
+        // Involved (atomic) EnvEntity poses on target side after assembly
+        var bothObjs = new[] { leftObj.transform, rightObj.transform };
+        foreach (var objTr in bothObjs)
+        {
+            var atomicPartCount = 0;
+            var partPosesString = "";
+            foreach (Transform partTr in objTr)
+            {
+                atomicPartCount++;
+
+                // Unique identifier for tracking the part
+                var ent = partTr.gameObject.GetComponent<EnvEntity>();
+                partPosesString += $",{ent.name}";
+
+                // 3D pose of the part
+                var partRot = Quaternion.Inverse(camTr.rotation) * partTr.rotation;
+                var partPos = camTr.InverseTransformPoint(partTr.position);
+
+                var poseSerialized = $"{partRot.ToString("F4")},{partPos.ToString("F4")}";
+                poseSerialized = poseSerialized.Replace("(", "").Replace(")", "").Replace(", ", "/");
+                partPosesString += $",{poseSerialized}";
+            }
+            actionEffect += $",{atomicPartCount}{partPosesString}";
+        }
+        actionEffect += ")";
 
         return actionEffect;
     }
