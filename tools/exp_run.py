@@ -209,6 +209,8 @@ def main(cfg):
         env.reset()
         new_env = True
 
+        # Clean teacher's incoming message buffer in order to remove any
+
         while True:
             # Keep running until either student or teacher terminates episode
             terminate = False
@@ -376,7 +378,9 @@ def main(cfg):
                                     # type and send string parameters via channel
                                     action.discrete[0][1] = \
                                         student.lt_mem.lexicon.s2d[("va", act_type)][0][1]
-                                    str_params = ", ".join(act_params["parameters"])
+                                    str_params = ", ".join(
+                                        str(prm) for prm in act_params["parameters"]
+                                    )
                                     full_spec = f"# Action parameters: {str_params}"
                                     teacher_channel.send_string("System", full_spec, {})
 

@@ -226,90 +226,107 @@ class SimulatedTeacher:
                 if step_demonstrated: break
                 step_demonstrated = True
 
-                if len(self.ongoing_demonstration) > 0:
-                    # Keep popping and executing plan actions until plan is empty
-                    act_type, act_params = self.ongoing_demonstration.pop(0)
+                if len(self.ongoing_demonstration) == 0:
+                    # Demonstration finished (including end-of-demo message),
+                    # wait w/o terminating until receiving agent's acknowledgement
+                    # message "OK"
+                    response.append((None, None))
+                    continue
 
-                    # Annotate physical action to be executed for this step, communicated
-                    # to agent along with the action
-                    act_str_prefix = f"# Action: {act_type}"
-                    offset = len(act_str_prefix)
+                # Keep popping and executing plan actions until plan is empty
+                act_type, act_params = self.ongoing_demonstration.pop(0)
 
-                    act_dscr = None
-                    if act_type.startswith("pick_up"):
-                        # For pick_up~ actions, provide demonstrative reference by string path
-                        # to target GameObject (which will be converted into binary mask)
-                        target = act_params[0]
-                        crange = (offset+1, offset+1+len(target))
-                        act_anno = {
-                            "utterance": f"{act_str_prefix}({target})",
-                            "pointing": { crange: ("/" + act_params[0], True) }
+                # Annotate physical action to be executed for this step, communicated
+                # to agent along with the action
+                act_str_prefix = f"# Action: {act_type}"
+                offset = len(act_str_prefix)
+
+                act_dscr = None
+                if act_type is None:
+                    # End of demonstration
+                    response.append((
+                        "generate",
+                        {
+                            "utterance": f"This is a {self.target_concept}.",
+                            "pointing": { (0, 4): ("/truck", True) }
                         }
-                        assem_st["left" if act_type.endswith("left") else "right"] = target
-                        if target not in subassems:
-                            subassems[target].add(target)
+                    ))
 
-                        inst = re.findall(r"^t_(.*)_(\d+)$", target)
-                        inst = (inst[0][0], int(inst[0][1])) if len(inst) == 1 else None
-                        if inst in sampled_parts:
-                            target_label = f"a {inst[0]}"
-                        else:
-                            target_label = "the subassembly"
-                        act_dscr = {
-                            "utterance": f"Pick up {target_label}.",
-                            "pointing": {}
-                        }
+                elif act_type.startswith("pick_up"):
+                    # For pick_up~ actions, provide demonstrative reference by string path
+                    # to target GameObject (which will be converted into binary mask)
+                    target = act_params[0]
+                    crange = (offset+1, offset+1+len(target))
+                    act_anno = {
+                        "utterance": f"{act_str_prefix}({target})",
+                        "pointing": { crange: ("/" + act_params[0], True) }
+                    }
+                    assem_st["left" if act_type.endswith("left") else "right"] = target
+                    if target not in subassems:
+                        subassems[target].add(target)
 
-                    # elif act_type.startswith("drop"):
-                    #     pass
-
-                    elif act_type.startswith("assemble"):
-                        # For assemble~ actions, provide contact point info, specified by
-                        # (atomic part supertype, point identifier string) pair
-                        subassembly, target_l, target_r = act_params
-                        # Selecting a specific instance matching the target condition. One
-                        # (ugly) assumption made here is that the contact point of interest
-                        # can be uniquely specified by the part type alone.
-                        type_l, cp_l = target_l.split("/")
-                        type_r, cp_r = target_r.split("/")
-                        inst_l = next(
-                            inst for inst in subassems[assem_st["left"]] if type_l in inst
-                        )
-                        inst_r = next(
-                            inst for inst in subassems[assem_st["right"]] if type_r in inst
-                        )
-                        target_l = f"{inst_l}/{cp_l}"
-                        target_r = f"{inst_r}/{cp_r}"
-                        act_params = (subassembly, target_l, target_r)    # Rewrite params
-                        # Building action spec description string
-                        num_components = \
-                            len(subassems[assem_st["left"]] | subassems[assem_st["right"]])
-                        act_str = act_str_prefix
-                        act_str += f"({subassembly},{target_l},{target_r},{num_components})"
-                        act_anno = { "utterance": act_str, "pointing": {} }
-                        subassems[subassembly] = \
-                            subassems.pop(assem_st["left"]) | subassems.pop(assem_st["right"])
-                        assem_st["left"] = subassembly if act_type.endswith("left") else None
-                        assem_st["right"] = None if act_type.endswith("left") else subassembly
-
-                    elif act_type.startswith("inspect"):
-                        # For inspect~ actions, provide integer index of (relative) viewpoint
-                        hand = "Left" if act_type.endswith("left") else "Right"
-                        ent_path = f"/Student Agent/{hand} Hand/{assem_st[hand.lower()]}"
-                        target, view_ind = act_params
-                        crange = (offset+1, offset+1+len(target))
-                        act_anno = {
-                            "utterance": f"{act_str_prefix}({target},{view_ind})",
-                            "pointing": { crange: (ent_path, True) }
-                        }
-
+                    inst = re.findall(r"^t_(.*)_(\d+)$", target)
+                    inst = (inst[0][0], int(inst[0][1])) if len(inst) == 1 else None
+                    if inst in sampled_parts:
+                        target_label = f"a {inst[0]}"
                     else:
-                        # No parameter info to communicate, just annotate action type
-                        act_anno = {
-                            "utterance": f"{act_str_prefix}()",
-                            "pointing": {}
-                        }
+                        target_label = "the subassembly"
+                    act_dscr = {
+                        "utterance": f"Pick up {target_label}.",
+                        "pointing": {}
+                    }
 
+                # elif act_type.startswith("drop"):
+                #     pass
+
+                elif act_type.startswith("assemble"):
+                    # For assemble~ actions, provide contact point info, specified by
+                    # (atomic part supertype, point identifier string) pair
+                    subassembly, target_l, target_r = act_params
+                    # Selecting a specific instance matching the target condition. One
+                    # (ugly) assumption made here is that the contact point of interest
+                    # can be uniquely specified by the part type alone.
+                    type_l, cp_l = target_l.split("/")
+                    type_r, cp_r = target_r.split("/")
+                    inst_l = next(
+                        inst for inst in subassems[assem_st["left"]] if type_l in inst
+                    )
+                    inst_r = next(
+                        inst for inst in subassems[assem_st["right"]] if type_r in inst
+                    )
+                    target_l = f"{inst_l}/{cp_l}"
+                    target_r = f"{inst_r}/{cp_r}"
+                    act_params = (subassembly, target_l, target_r)    # Rewrite params
+                    # Building action spec description string
+                    num_components = \
+                        len(subassems[assem_st["left"]] | subassems[assem_st["right"]])
+                    act_str = act_str_prefix
+                    act_str += f"({subassembly},{target_l},{target_r},{num_components})"
+                    act_anno = { "utterance": act_str, "pointing": {} }
+                    subassems[subassembly] = \
+                        subassems.pop(assem_st["left"]) | subassems.pop(assem_st["right"])
+                    assem_st["left"] = subassembly if act_type.endswith("left") else None
+                    assem_st["right"] = None if act_type.endswith("left") else subassembly
+
+                elif act_type.startswith("inspect"):
+                    # For inspect~ actions, provide integer index of (relative) viewpoint
+                    hand = "Left" if act_type.endswith("left") else "Right"
+                    ent_path = f"/Student Agent/{hand} Hand/{assem_st[hand.lower()]}"
+                    target, view_ind = act_params
+                    crange = (offset+1, offset+1+len(target))
+                    act_anno = {
+                        "utterance": f"{act_str_prefix}({target},{view_ind})",
+                        "pointing": { crange: (ent_path, True) }
+                    }
+
+                else:
+                    # No parameter info to communicate, just annotate action type
+                    act_anno = {
+                        "utterance": f"{act_str_prefix}()",
+                        "pointing": {}
+                    }
+
+                if act_type is not None:
                     # Execute physical action
                     act_params_serialized = tuple(
                         f"{type(prm).__name__}|{prm}" for prm in act_params
@@ -318,16 +335,6 @@ class SimulatedTeacher:
                     # Provide additional action annotations
                     response.append(("generate", act_anno))
                     if act_dscr is not None: response.append(("generate", act_dscr))
-
-                else:
-                    # Last action executed, demonstration finished
-                    response.append((
-                        "generate",
-                        {
-                            "utterance": f"This is a {self.target_concept}.",
-                            "pointing": { (0, 4): ("/truck", True) }
-                        }
-                    ))
 
             elif utt.startswith("# Action:"):
                 # Agent action intent; somewhat like reading into the agent's 'mind'
@@ -456,8 +463,11 @@ class SimulatedTeacher:
                     valid_pairs_achieved = set(cp_pairs) & set(valid_joins)
 
                     # Update ongoing execution state
-                    subassems[product_name] = \
-                        subassems.pop(assem_st["left"]) | subassems.pop(assem_st["right"])
+                    sa_left = assem_st["left"]
+                    sa_right = assem_st["right"]
+                    parts_left = subassems.pop(sa_left)
+                    parts_right = subassems.pop(sa_right)
+                    subassems[product_name] = parts_left | parts_right
                     assem_st["right" if direction.endswith("left") else "left"] = None
                     assem_st["left" if direction.endswith("left") else "right"] = product_name
 
@@ -469,7 +479,29 @@ class SimulatedTeacher:
                     if join_invalid:
                         # Interrupt agent and undo the last join (by disassembling
                         # the product just assembled, at the exact same part pair)
-                        response.append(("generate", { "utterance": "Stop.", "pointing": {} }))
+                        if direction.endswith("left"):
+                            takeaway_parts = parts_right
+                        else:
+                            takeaway_parts = parts_left
+                        response += [
+                            ("generate", { "utterance": "Stop.", "pointing": {} }),
+                            ("generate", {
+                                "utterance": "What were you trying to join?",
+                                "pointing": {}
+                            }),
+                            (f"disassemble_{direction.split('_')[-1]}", {
+                                "parameters": (
+                                    f"str|{sa_left}", f"str|{sa_right}",
+                                    f"int|{len(takeaway_parts)}",
+                                ) + tuple(
+                                    f"str|{part}" for part in takeaway_parts
+                                )
+                            })
+                        ]
+                        assem_st["left"] = sa_left
+                        assem_st["right"] = sa_right
+                        subassems[sa_left] = parts_left
+                        subassems[sa_right] = parts_right
                         interrupted = True
                     else:
                         # If join not invalid, check the join off the list by decrementing
@@ -603,8 +635,6 @@ def _sample_ASP(
         if hyper == "color": continue
 
         for _, hypo in per_hypernym:
-            if hyper in all_subtypes and hypo not in all_subtypes[hyper]:
-                continue
             base_prg_str += f"{hyper}(O) :- {hypo}(O).\n"
         if hyper not in occurring_subassemblies: continue
 
@@ -620,12 +650,23 @@ def _sample_ASP(
     base_prg_str += "1{ hasColor(O, C) : color(C) }1 :- colored_part(O).\n"
     base_prg_str += ". ".join(f"color({c})" for c in all_subtypes["color"]) + ".\n"
 
-    # Add rules for specifying atomic parts
     for supertype, subtypes in all_subtypes.items():
         if supertype == "color": continue
+
+        # Add integrity constraints for avoiding unavailable choices
+        # (after fixing subtypes in `build_truck_supertype` task)
+        base_prg_str += "1{ "
+        base_prg_str += "; ".join(
+            f"{subtype}(O)" for subtype in subtypes if subtype is not None
+        )
+        base_prg_str += " }1 :- "
+        base_prg_str += f"{supertype}(O).\n"
+
+        # Add rules for reifying selected part types
         for subtype in subtypes:
             if subtype is None: continue
             base_prg_str += f"atomic(O, {subtype}) :- {subtype}(O).\n"
+        
 
     # Add integrity constraints for filtering invalid combinations
     for ci, (rule_type, scope_class, entry, _) in enumerate(constraints):
@@ -1088,4 +1129,5 @@ def _sample_demo_plan(sampled_parts):
     # All sampled parts that build target object are used
     assert len(sampled_parts) == 0
 
+    plan.append((None, None))       # This marks the end of the demo
     return plan

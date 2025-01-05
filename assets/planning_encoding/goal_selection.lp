@@ -53,8 +53,10 @@ fits_signature(n(N,NS),N,NS,P) :- commit_choice(n(N,NS),P), atomic(P).
 fits_signature(D,N,NS,c((S,I),SG)) :-
     fits_signature(D,n(N,NS),_,SG), commit_template(n(N,NS),S,I).
 
-% Handling additional constraints due to already assembled parts
+% Handling additional constraints due to already assembled parts. Unify
+% each existing object with one and only one hierarchy node.
 1{ unify_node(X,N) : commit_choice(N,C) }1 :- ext_node(X,C).
+:- unify_node(X1, N1), unify_node(X2, N2), X1 != X2, N1 = N2.
 to_connect(N1,N2) :- to_connect(N1,N2,_,_).     % Project 4->2
 :- ext_edge(X1,X2), unify_node(X1,N1), unify_node(X2,N2), not to_connect(N1,N2).
 
