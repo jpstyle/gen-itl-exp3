@@ -510,12 +510,12 @@ def _plan_assembly(agent, build_target):
             # Register part/subassembly options for each node
             for n, data in template.nodes(data=True):
                 match data["node_type"]:
-                    case "atomic_part":
+                    case "atomic":
                         options = data["parts"]
                         for opt_conc in options:
                             part_lit = Literal("atomic", wrap_args(opt_conc))
                             assembly_pieces.add(part_lit)
-                    case "subassembly":
+                    case "sa":
                         options = data["subassemblies"]
                         for opt_conc in options:
                             sa_lit = Literal("subassembly", wrap_args(opt_conc))

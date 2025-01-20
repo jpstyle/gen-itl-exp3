@@ -235,6 +235,7 @@ class SimulatedTeacher:
 
                 # Keep popping and executing plan actions until plan is empty
                 act_type, act_params = self.ongoing_demonstration.pop(0)
+                side = act_type.split("_")[-1] if act_type is not None else None
 
                 # Annotate physical action to be executed for this step, communicated
                 # to agent along with the action
@@ -242,17 +243,7 @@ class SimulatedTeacher:
                 offset = len(act_str_prefix)
 
                 act_dscr = None
-                if act_type is None:
-                    # End of demonstration
-                    response.append((
-                        "generate",
-                        {
-                            "utterance": f"This is a {self.target_concept}.",
-                            "pointing": { (0, 4): ("/truck", True) }
-                        }
-                    ))
-
-                elif act_type.startswith("pick_up"):
+                if act_type.startswith("pick_up"):
                     # For pick_up~ actions, provide demonstrative reference by string path
                     # to target GameObject (which will be converted into binary mask)
                     target = act_params[0]
@@ -261,7 +252,7 @@ class SimulatedTeacher:
                         "utterance": f"{act_str_prefix}({target})",
                         "pointing": { crange: ("/" + act_params[0], True) }
                     }
-                    assem_st["left" if act_type.endswith("left") else "right"] = target
+                    assem_st[side] = target
                     if target not in subassems:
                         subassems[target].add(target)
 
@@ -270,14 +261,32 @@ class SimulatedTeacher:
                     if inst in sampled_parts:
                         target_label = f"a {inst[0]}"
                     else:
-                        target_label = "the subassembly"
-                    act_dscr = {
-                        "utterance": f"Pick up {target_label}.",
+                        target_label = f"the {target}"
+                    if self.feedback_type in ["label", "full"]:
+                        act_dscr = {
+                            "utterance": f"Pick up {target_label}.",
+                            "pointing": {}
+                        }
+
+                elif act_type.startswith("drop"):
+                    # No parameter info to communicate, just annotate action type
+                    act_anno = {
+                        "utterance": f"{act_str_prefix}()",
                         "pointing": {}
                     }
-
-                # elif act_type.startswith("drop"):
-                #     pass
+                    # Provide NL label for the subassembly type (not a 'description'
+                    # of the action as such though) only for full feedback player
+                    # types for holonymy/meronymy info involving meaningful units
+                    # of substructures --- except the final product "truck", which
+                    # must be provided for all player types
+                    dropped_sa = assem_st[side]
+                    if self.feedback_type == "full" or dropped_sa == "truck":
+                        act_dscr = {
+                            "utterance": f"This is a {dropped_sa}.",
+                            "pointing": {
+                                (0, 4): (f"/Student Agent/*/{dropped_sa}", True)
+                            }
+                        }
 
                 elif act_type.startswith("assemble"):
                     # For assemble~ actions, provide contact point info, specified by
@@ -305,25 +314,25 @@ class SimulatedTeacher:
                     act_anno = { "utterance": act_str, "pointing": {} }
                     subassems[subassembly] = \
                         subassems.pop(assem_st["left"]) | subassems.pop(assem_st["right"])
-                    assem_st["left"] = subassembly if act_type.endswith("left") else None
-                    assem_st["right"] = None if act_type.endswith("left") else subassembly
+                    assem_st["left"] = subassembly if side == "left" else None
+                    assem_st["right"] = None if side == "left" else subassembly
+
+                    if self.feedback_type in ["label", "full"]:
+                        # Linguistic annotation (though this utterance doesn't provide
+                        # any additional learning signals in our scope)
+                        act_dscr = {
+                            "utterance": f"Join the {type_l} and the {type_r}.",
+                            "pointing": {}
+                        }
 
                 elif act_type.startswith("inspect"):
                     # For inspect~ actions, provide integer index of (relative) viewpoint
-                    hand = "Left" if act_type.endswith("left") else "Right"
-                    ent_path = f"/Student Agent/{hand} Hand/{assem_st[hand.lower()]}"
+                    ent_path = f"/Student Agent/{side.capitalize()} Hand/{assem_st[side]}"
                     target, view_ind = act_params
                     crange = (offset+1, offset+1+len(target))
                     act_anno = {
                         "utterance": f"{act_str_prefix}({target},{view_ind})",
                         "pointing": { crange: (ent_path, True) }
-                    }
-
-                else:
-                    # No parameter info to communicate, just annotate action type
-                    act_anno = {
-                        "utterance": f"{act_str_prefix}()",
-                        "pointing": {}
                     }
 
                 if act_type is not None:
@@ -334,7 +343,8 @@ class SimulatedTeacher:
                     response.append((act_type, { "parameters": act_params_serialized }))
                     # Provide additional action annotations
                     response.append(("generate", act_anno))
-                    if act_dscr is not None: response.append(("generate", act_dscr))
+                    if act_dscr is not None:
+                        response.append(("generate", act_dscr))
 
             elif utt.startswith("# Action:"):
                 # Agent action intent; somewhat like reading into the agent's 'mind'
@@ -423,7 +433,8 @@ class SimulatedTeacher:
                 if utt.startswith("# Effect: assemble"):
                     # Effect of assemble action; interested in closest contact points
                     direction, effects = re.findall(r"# Effect: assemble_(.*)\((.*)\)$", utt)[0]
-                    if direction.endswith("left"):
+                    src_side, _, tgt_side = direction.split("_")
+                    if tgt_side == "left":
                         part_tgt, part_src, product_name = assem_st.pop("join_intent")
                     else:
                         part_src, part_tgt, product_name = assem_st.pop("join_intent")
@@ -468,8 +479,8 @@ class SimulatedTeacher:
                     parts_left = subassems.pop(sa_left)
                     parts_right = subassems.pop(sa_right)
                     subassems[product_name] = parts_left | parts_right
-                    assem_st["right" if direction.endswith("left") else "left"] = None
-                    assem_st["left" if direction.endswith("left") else "right"] = product_name
+                    assem_st[src_side] = None
+                    assem_st[tgt_side] = product_name
 
                     # Interrupt if agent has assembled a pair of objects at incorrect
                     # contact point, which is determined by checking whether top 3
@@ -479,7 +490,7 @@ class SimulatedTeacher:
                     if join_invalid:
                         # Interrupt agent and undo the last join (by disassembling
                         # the product just assembled, at the exact same part pair)
-                        if direction.endswith("left"):
+                        if tgt_side == "left":
                             takeaway_parts = parts_right
                         else:
                             takeaway_parts = parts_left
@@ -1129,5 +1140,4 @@ def _sample_demo_plan(sampled_parts):
     # All sampled parts that build target object are used
     assert len(sampled_parts) == 0
 
-    plan.append((None, None))       # This marks the end of the demo
     return plan
