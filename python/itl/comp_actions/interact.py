@@ -736,12 +736,22 @@ def _plan_assembly(agent, build_target):
     # Helper method for obtaining a planning subproblem corresponding to
     # the specified compression step.
     def planning_subproblem(step_ind):
+        # Offset to integer index for this subproblem, obtained from past
+        # action history; ensure the newly assigned index doesn't overlap
+        # with any of the previously assigned ones
+        ind_offset = max([
+            int(re.findall(r"[si](\d+)(_\d+)?", action_params[-1])[0][0])
+            for action_type, action_params in exec_state["action_history"]
+            if action_type in assemble_actions
+        ] + [-1]) + 1           # [-1] to ensure max value is always obtained
+        sp_ind = step_ind + ind_offset
+
         # Obtain graph representation of the assembly subprogram for the
         # current progress, by replaying the compression sequence up to
         # the previous step, then taking subgraph for the current step
         compression_graph = connection_graph.copy()
         intermediate_chunks = {
-            sa_node: f"s{i}"
+            sa_node: f"s{i+ind_offset}"
             for i, (sa_node, _) in enumerate(compression_sequence)
         }
         for i in range(step_ind):
@@ -749,7 +759,7 @@ def _plan_assembly(agent, build_target):
             compressed_nodes = [
                 intermediate_chunks.get(n, n) for n in compressed_nodes
             ]
-            compress_chunk(compression_graph, compressed_nodes, f"s{i}")
+            compress_chunk(compression_graph, compressed_nodes, f"s{i+ind_offset}")
         subproblem_nodes = [
             intermediate_chunks.get(n, n)
             for n in compression_sequence[step_ind][1]
@@ -757,7 +767,7 @@ def _plan_assembly(agent, build_target):
         compression_graph = compression_graph.subgraph(subproblem_nodes).copy()
 
         # Chunks assembled so far involved in the subproblem, with their
-        # component objects
+        # component nodes
         flatten_node = lambda n: set.union(*[flatten_node(m) for m in cmp_seq[n]]) \
             if n in (cmp_seq := dict(compression_sequence)) else {n}
         chunks_assembled = {
@@ -768,7 +778,28 @@ def _plan_assembly(agent, build_target):
             if intermediate_chunks[sa_node] in subproblem_nodes
         }
 
-        return compression_graph, chunks_assembled
+        # Account for any progress made so far
+        node_components = chunks_assembled | {
+            n: {n} for n in compression_graph if n not in chunks_assembled
+        }
+        for sa, sa_graph in exec_state["connection_graphs"].items():
+            if len(sa_graph) == 1: continue     # No processing for singleton parts
+            sa_nodes = {
+                n for n, atomics in node_components.items()
+                if atomics <= {
+                    node_unifications[f"{sa}_{ex_obj}"] for ex_obj in sa_graph
+                }
+            }
+            # Compress further by any existing relevant subassemblies
+            if len(sa_nodes) >= 1:
+                compress_chunk(compression_graph, sa_nodes, sa)
+                sa_components = []
+                for n in sa_nodes:
+                    if n in chunks_assembled: chunks_assembled.pop(n)
+                    sa_components.append(node_components[n])
+                chunks_assembled[sa] = set.union(*sa_components)
+
+        return compression_graph, chunks_assembled, sp_ind
 
     # Compress the connection graph part by part, randomly selecting chunks
     # of parts or subassemblies to form smaller planning problems
@@ -798,14 +829,28 @@ def _plan_assembly(agent, build_target):
     # Tracking remaining nodes per atomic part type
     node_pool_checkpoint = copy.deepcopy(atomic_nodes_by_conc)
     node_pool = copy.deepcopy(node_pool_checkpoint)
-    # Index of subproblem currently being solved
-    sp_ind = 0
+    # Index of subproblem being solved
+    step_ind = 0
     # Continue until the target structure is fully compressed and planned for    
     while len(remaining_subproblems) > 0:
         # Pop the next pending subproblem
-        compression_graph, chunks_assembled = remaining_subproblems.popleft()
+        compression_graph, chunks_assembled, sp_ind = remaining_subproblems.popleft()
 
-        if len(compression_graph) < min_chunk_size:
+        if len(compression_graph) == 1:
+            # Subproblem completely solved; collect the obtained solution
+            # and prepare for the next subproblem (if any)
+            if len(join_sequence_subprob) > 0:
+                # Renaming the final product for the subproblem, if nonempty
+                # join sequence is obtained for this subproblem
+                join_sequence_subprob[-1] = \
+                    join_sequence_subprob[-1][:4] + (f"s{sp_ind}",)
+            join_sequence += join_sequence_subprob
+            join_sequence_subprob = []
+            current_chunk_sequence = ()
+            invalid_chunk_sequences = set()
+            step_ind += 1
+            continue
+        elif len(compression_graph) < min_chunk_size:
             # Subproblem size smaller than the chunking threshold, just
             # use the whole graph
             chunk_selected = set(compression_graph)
@@ -882,7 +927,7 @@ def _plan_assembly(agent, build_target):
                 # Then start again
                 remaining_subproblems = deque(
                     planning_subproblem(i)
-                    for i in range(sp_ind,len(compression_sequence))
+                    for i in range(step_ind, len(compression_sequence))
                 )           # Start subproblem from scratch
                 current_chunk_sequence = ()
                 join_sequence_subprob = []
@@ -995,7 +1040,7 @@ def _plan_assembly(agent, build_target):
             # Then start again
             remaining_subproblems = deque(
                 planning_subproblem(i)
-                for i in range(sp_ind,len(compression_sequence))
+                for i in range(step_ind, len(compression_sequence))
             )           # Start subproblem from scratch
             current_chunk_sequence = ()
             join_sequence_subprob = []
@@ -1033,38 +1078,26 @@ def _plan_assembly(agent, build_target):
         resultant_name = f"i{sp_ind}_{len(join_sequence_subprob)-1}"
         compress_chunk(compression_graph, chunk_selected, resultant_name)
 
-        if len(compression_graph) == 1:
-            # Subproblem successfully solved; collect the obtained solution
-            # and prepare for the next subproblem (if any)
-            join_sequence_subprob[-1] = \
-                join_sequence_subprob[-1][:4] + (f"s{sp_ind}",)
-                # Renaming the final product for the subproblem
-            join_sequence += join_sequence_subprob
-            join_sequence_subprob = []
-            current_chunk_sequence = ()
-            invalid_chunk_sequences = set()
-            sp_ind += 1
-        else:
-            # Subproblem not completely solved; remember which components
-            # constitute the new chunk, while removing old subassemblies in
-            # chunk that have been merged into new subassembly
-            chunks_assembled[resultant_name] = {
-                n for s in chunk_selected if s in chunks_assembled
-                for n in chunks_assembled[s]
-            } | {
-                n for n in chunk_selected if n not in chunks_assembled
-            }
-            for s in chunk_selected:
-                if s in chunks_assembled:
-                    del chunks_assembled[s]
+        # Remember which components constitute the new chunk, while
+        # removing old subassemblies in chunk that have been merged
+        # into new subassembly
+        chunks_assembled[resultant_name] = {
+            n for s in chunk_selected if s in chunks_assembled
+            for n in chunks_assembled[s]
+        } | {
+            n for n in chunk_selected if n not in chunks_assembled
+        }
+        for s in chunk_selected:
+            if s in chunks_assembled:
+                del chunks_assembled[s]
 
-            # Save the node pool status
-            node_pool_checkpoint = node_pool
+        # Save the node pool status
+        node_pool_checkpoint = node_pool
 
-            # Push back the reduced subproblem for continuation
-            remaining_subproblems.appendleft(
-                (compression_graph, chunks_assembled)
-            )
+        # Push back the reduced subproblem for continuation
+        remaining_subproblems.appendleft(
+            (compression_graph, chunks_assembled, sp_ind)
+        )
 
     planning_attempts += 1
     log_msg = f"Working plan found after {planning_attempts} (re)planning attempts "
@@ -1670,8 +1703,8 @@ def _execute_assemble(agent, action_name, action_params):
     # coordinate] and [Tr. of part instance in subassembly local coordinate],
     # then [Desired Tr. of manipulator in global coordinate] by equating
     # transforms of the two contact points of interest in global coordinate.
-    tmat_cp_local_left = structure_3d_left[3][cp_left][0]
-    tmat_cp_local_right = structure_3d_right[3][cp_right][0]
+    tmat_cp_local_left = structure_3d_left[3][cp_left][0][cp_right]
+    tmat_cp_local_right = structure_3d_right[3][cp_right][0][cp_left]
     tmat_cp_local_left = transformation_matrix(*tmat_cp_local_left)
     tmat_cp_local_right = transformation_matrix(*tmat_cp_local_right)
     if action_name.endswith("left"):

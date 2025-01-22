@@ -256,13 +256,16 @@ class SimulatedTeacher:
                     if target not in subassems:
                         subassems[target].add(target)
 
-                    inst = re.findall(r"^t_(.*)_(\d+)$", target)
-                    inst = (inst[0][0], int(inst[0][1])) if len(inst) == 1 else None
-                    if inst in sampled_parts:
-                        target_label = f"a {inst[0]}"
-                    else:
-                        target_label = f"the {target}"
                     if self.feedback_type in ["label", "full"]:
+                        inst = re.findall(r"^t_(.*)_(\d+)$", target)
+                        inst = (inst[0][0], int(inst[0][1])) if len(inst) == 1 else None
+                        if inst in sampled_parts:
+                            target_label = f"a {inst[0]}"
+                        else:
+                            if self.feedback_type == "label":
+                                target_label = "the subassembly"
+                            else:
+                                target_label = f"the {target}"
                         act_dscr = {
                             "utterance": f"Pick up {target_label}.",
                             "pointing": {}

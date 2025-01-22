@@ -770,27 +770,40 @@ def analyze_demonstration(agent, demo_data):
     # new visual concepts & neologisms; we assume here all neologisms are nouns
     # (corresponding to 'pcls')
     inst2conc_map = {}
-    for part_inst, part_type_name in part_labeling.items():
-        sym = ("n", part_type_name)
-        if sym in agent.lt_mem.lexicon:
-            # Already registered
-            _, conc_ind = agent.lt_mem.lexicon.s2d[sym][0]
-            inst2conc_map[part_inst] = conc_ind
-        else:
-            # Neologism
+    if agent.cfg.exp.feedback_type in ["bool", "demo"]:
+        # No access to any NL labeling; first assign new concept indices for
+        # part instances with vision_3d_data available (obtained from multi-
+        # view inspection), as they are understood to have all distinct types.
+        # Instances without vision_3d_data will later be classified into one
+        # of the newly assigned concepts.
+        for part_inst in vision_3d_data:
             new_conc_ind = agent.vision.add_concept("pcls")
-            agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
             inst2conc_map[part_inst] = new_conc_ind
+    else:
+        # Has access to NL labeling of part & subassembly instances, use them
+        assert agent.cfg.exp.feedback_type in ["label", "full"]
+        for part_inst, part_type_name in part_labeling.items():
+            sym = ("n", part_type_name)
+            if sym in agent.lt_mem.lexicon:
+                # Already registered
+                _, conc_ind = agent.lt_mem.lexicon.s2d[sym][0]
+                inst2conc_map[part_inst] = conc_ind
+            else:
+                # Neologism
+                new_conc_ind = agent.vision.add_concept("pcls")
+                agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
+                inst2conc_map[part_inst] = new_conc_ind
 
-        # In whichever case, the symbol shouldn't be a 'unresolved neologism'
-        if sym in agent.lang.unresolved_neologisms:
-            agent.lang.unresolved_neologisms.remove(sym)
-    # Also process any new subassembly concepts/neologisms
-    for sa_inst, sa_type_name in sa_labeling.items():
-        sym = ("n", sa_type_name)
-        if sym not in agent.lt_mem.lexicon:
-            new_conc_ind = agent.vision.add_concept("pcls")
-            agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
+            # In whichever case, the symbol shouldn't be a 'unresolved neologism'
+            if sym in agent.lang.unresolved_neologisms:
+                agent.lang.unresolved_neologisms.remove(sym)
+        # Also process any new subassembly concepts/neologisms
+        for sa_inst, sa_type_name in sa_labeling.items():
+            sym = ("n", sa_type_name)
+            if sym not in agent.lt_mem.lexicon:
+                new_conc_ind = agent.vision.add_concept("pcls")
+                agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
+    
 
     # Process 3D vision data, storing reconstructed structure data in XB    
     for part_inst, reconstruction in vision_3d_data.items():
@@ -825,10 +838,33 @@ def analyze_demonstration(agent, demo_data):
                 f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
                 examples_with_embs.append((image, mask, f_vec))
             vision_2d_data[part_inst] = examples_with_embs
+    # Based on the visual features, assign concept labels to part instances whose
+    # concept label info was not available (which happens for language-less player
+    # types), choosing the label of the visually closest labeled instance
+    insts_labeled = [
+        part_inst for part_inst in vision_2d_data
+        if part_inst in inst2conc_map
+    ]
+    insts_unlabeled = [
+        part_inst for part_inst in vision_2d_data
+        if part_inst not in inst2conc_map
+    ]
+    if len(insts_unlabeled) > 0:
+        f_vecs_labeled = np.stack([
+            vision_2d_data[part_inst][0][2] for part_inst in insts_labeled
+        ])
+        f_vecs_unlabeled = np.stack([
+            vision_2d_data[part_inst][0][2] for part_inst in insts_unlabeled
+        ])
+        pdists = pairwise_distances(f_vecs_unlabeled, f_vecs_labeled)
+        for i_unlab, i_lab in enumerate(pdists.argmin(axis=1)):
+            closest_inst = insts_labeled[i_lab]
+            inst2conc_map[insts_unlabeled[i_unlab]] = inst2conc_map[closest_inst]
     # Add 2D vision data in XB, based on the newly assigned pcls concept indices
     for part_inst, examples in vision_2d_data.items():
         if part_inst not in inst2conc_map:
-            # Cannot exactly specify which concept this instance classifies as, skip
+            # Concept label info was not available (which happens for language-less
+            # player types), 
             continue
 
         for image, mask, f_vec in examples:
@@ -869,153 +905,102 @@ def analyze_demonstration(agent, demo_data):
         cp_name_l = f"{part_supertype_l}/" + contact_l.split("/")[1]
         cp_name_r = f"{part_supertype_r}/" + contact_r.split("/")[1]
 
-        # Encodes whether the agent has processed and remembered the contact
-        # point types already
-        cp_known_l = cp_name_l in cp2conc_map
-        cp_known_r = cp_name_r in cp2conc_map
-
         # Contact point to corresponding concept, assigning new concepts as
         # needed on the fly
-        if cp_known_l:
+        if cp_name_l in cp2conc_map:
             cp_conc_ind_l = cp2conc_map[cp_name_l]
         else:
             cp_conc_ind_l = agent.vision.add_concept("pcls")
             cp2conc_map[cp_name_l] = cp_conc_ind_l
-        if cp_known_r:
+        if cp_name_r in cp2conc_map:
             cp_conc_ind_r = cp2conc_map[cp_name_r]
         else:
             cp_conc_ind_r = agent.vision.add_concept("pcls")
             cp2conc_map[cp_name_r] = cp_conc_ind_r
 
-        if cp_known_l and cp_known_r:
-            # Both contact point types are known to the agent, no need to
-            # infer and register contact point poses
-            pass
+        # Inferring contact point poses. Each contact point in a 3D part
+        # structure has different pose according to which contact point
+        # it is joining to.
+        part_pose_l = part_poses_l[part_inst_l]
+        part_pose_r = part_poses_r[part_inst_r]
+        tmat_l = transformation_matrix(*part_pose_l)
+        tmat_r = transformation_matrix(*part_pose_r)
+
+        if direction == "RToL":
+            tmat_tgt_obj = tmat_l; tmat_src_obj_before = tmat_r
+            pcl_tgt = exemplars.object_3d[part_conc_ind_l][0]
+            pcl_src = exemplars.object_3d[part_conc_ind_r][0]
         else:
-            # Either or both contact point poses unknown, need to be inferred
-            # from the ground-truth object poses and manipulator movement
-            part_pose_l = part_poses_l[part_inst_l]
-            part_pose_r = part_poses_r[part_inst_r]
-            tmat_l = transformation_matrix(*part_pose_l)
-            tmat_r = transformation_matrix(*part_pose_r)
+            tmat_tgt_obj = tmat_r; tmat_src_obj_before = tmat_l
+            pcl_tgt = exemplars.object_3d[part_conc_ind_r][0]
+            pcl_src = exemplars.object_3d[part_conc_ind_l][0]
+        pcl_tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_tgt))
+        pcl_src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_src))
 
-            if direction == "RToL":
-                tmat_tgt_obj = tmat_l; tmat_src_obj_before = tmat_r
-                pcl_tgt = exemplars.object_3d[part_conc_ind_l][0]
-                pcl_src = exemplars.object_3d[part_conc_ind_r][0]
-            else:
-                tmat_tgt_obj = tmat_r; tmat_src_obj_before = tmat_l
-                pcl_tgt = exemplars.object_3d[part_conc_ind_r][0]
-                pcl_src = exemplars.object_3d[part_conc_ind_l][0]
-            pcl_tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_tgt))
-            pcl_src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_src))
+        # Relation among manipulator & object transformations:
+        # [Tr. of src object after movement]
+        # = [Tr. of src manipulator after movement] *
+        #   inv([Tr. of src manipulator before movement]) *
+        #   [Tr. of src object before movement]
+        tmat_src_manip_before = transformation_matrix(*pose_src_manip_before)
+        tmat_src_manip_after = transformation_matrix(*pose_src_manip_after)
+        tmat_src_obj_after = tmat_src_manip_after @ \
+            inv(tmat_src_manip_before) @ tmat_src_obj_before
 
-            # Relation among manipulator & object transformations:
-            # [Tr. of src object after movement]
-            # = [Tr. of src manipulator after movement] *
-            #   inv([Tr. of src manipulator before movement]) *
-            #   [Tr. of src object before movement]
-            tmat_src_manip_before = transformation_matrix(*pose_src_manip_before)
-            tmat_src_manip_after = transformation_matrix(*pose_src_manip_after)
-            tmat_src_obj_after = tmat_src_manip_after @ \
-                inv(tmat_src_manip_before) @ tmat_src_obj_before
+        # Align the point clouds of the involved parts according to the
+        # obtained transformations to (arbitrarily) define a contact point
+        # to be aligned when assembled. Define both position and rotation.
+        pcl_tgt.transform(tmat_tgt_obj); pcl_src.transform(tmat_src_obj_after)
 
-            # Align the point clouds of the involved parts according to the
-            # obtained transformations to (arbitrarily) define a contact point
-            # to be aligned when assembled. Define both position and rotation.
-            pcl_tgt.transform(tmat_tgt_obj); pcl_src.transform(tmat_src_obj_after)
+        # Contact point poses are inferred to be weighted centroid of the
+        # associated two point clouds (position), whose orientation are determined
+        # by PCA in the 3D coordinate
+        points_cat = np.concatenate([pcl_tgt.points, pcl_src.points])
 
-            # Inference of novel contact point pose(s) are done differently according
-            # to whether either or both of the contact points are already known.
-            if not cp_known_l and not cp_known_r:
-                # Both contact points are unknown and should be added; contact point poses
-                # are inferred to be weighted centroid of the associated two point clouds
-                # (position), whose orientation are determined by PCA in the 3D coordinate
-                points_cat = np.concatenate([pcl_tgt.points, pcl_src.points])
+        # Position of contact point: weighted centroid of points in both clouds,
+        # weighted by distances (gaussian kernel) to nearest points in each other
+        pdists = pairwise_distances(pcl_tgt.points, pcl_src.points)
+        min_dists_cat = np.concatenate([pdists.min(axis=1), pdists.min(axis=0)])
+        weights = np.exp(-min_dists_cat / min_dists_cat.mean())
+        weights /= weights.sum()
+        cp_position = weights[:,None] * points_cat
+        cp_position = cp_position.sum(axis=0)
 
-                # Position of contact point: weighted centroid of points in both clouds,
-                # weighted by distances (gaussian kernel) to nearest points in each other
-                pdists = pairwise_distances(pcl_tgt.points, pcl_src.points)
-                min_dists_cat = np.concatenate([pdists.min(axis=1), pdists.min(axis=0)])
-                weights = np.exp(-min_dists_cat / min_dists_cat.mean())
-                weights /= weights.sum()
-                cp_position = weights[:,None] * points_cat
-                cp_position = cp_position.sum(axis=0)
+        # Rotation of contact point: run PCA, select the first two principal
+        # components as x and y axis (with z axis automatically determined by
+        # cross product), obtain rotation matrix from the xyz axes
+        x_axis, y_axis = PCA(n_components=2).fit(points_cat).components_
+        x_axis /= norm(x_axis); y_axis /= norm(y_axis)
+        z_axis = np.cross(x_axis, y_axis)
+        z_axis /= norm(z_axis)
+        cp_rmat = np.stack([x_axis, y_axis, z_axis], axis=1)
 
-                # Rotation of contact point: run PCA, select the first two principal
-                # components as x and y axis (with z axis automatically determined by
-                # cross product), obtain rotation matrix from the xyz axes
-                x_axis, y_axis = PCA(n_components=2).fit(points_cat).components_
-                x_axis /= norm(x_axis); y_axis /= norm(y_axis)
-                z_axis = np.cross(x_axis, y_axis)
-                z_axis /= norm(z_axis)
-                cp_rmat = np.stack([x_axis, y_axis, z_axis], axis=1)
+        # Finally obtain the 3D poses on source & target parts; for position,
+        # apply inverse of the transformations applied to the point clouds;
+        # for rotation, apply the rotation matrix first, then inverse of the
+        # rotation part of the transformations
+        pose_cp_tgt = (
+            rmat2quat(tmat_tgt_obj[:3,:3].T @ cp_rmat),
+            tuple((inv(tmat_tgt_obj) @ np.append(cp_position, 1))[:3].tolist())
+        )
+        pose_cp_src = (
+            rmat2quat(tmat_src_obj_after[:3,:3].T @ cp_rmat),
+            tuple((inv(tmat_src_obj_after) @ np.append(cp_position, 1))[:3].tolist())
+        )
+        pose_cp_l = pose_cp_tgt if direction == "RToL" else pose_cp_src
+        pose_cp_r = pose_cp_src if direction == "RToL" else pose_cp_tgt
 
-                # Finally obtain the 3D poses on source & target parts; for position,
-                # apply inverse of the transformations applied to the point clouds;
-                # for rotation, apply the rotation matrix first, then inverse of the
-                # rotation part of the transformations
-                pose_cp_tgt = (
-                    rmat2quat(tmat_tgt_obj[:3,:3].T @ cp_rmat),
-                    tuple((inv(tmat_tgt_obj) @ np.append(cp_position, 1))[:3].tolist())
-                )
-                pose_cp_src = (
-                    rmat2quat(tmat_src_obj_after[:3,:3].T @ cp_rmat),
-                    tuple((inv(tmat_src_obj_after) @ np.append(cp_position, 1))[:3].tolist())
-                )
-                pose_cp_l = pose_cp_tgt if direction == "RToL" else pose_cp_src
-                pose_cp_r = pose_cp_src if direction == "RToL" else pose_cp_tgt
-            else:
-                # One of the contact points is known and has its pose already specified
-                # in the associated point cloud. Determine the pose of the other based
-                # on this pose.
-                if cp_known_l:
-                    pose_cp_local = exemplars.object_3d[part_conc_ind_l][3][cp_conc_ind_l][0]
-                    if direction == "RToL":
-                        tmat_obj_global = tmat_tgt_obj
-                    else:
-                        tmat_obj_global = tmat_src_obj_after
-                else:
-                    pose_cp_local = exemplars.object_3d[part_conc_ind_r][3][cp_conc_ind_r][0]
-                    if direction == "RToL":
-                        tmat_obj_global = tmat_src_obj_after
-                    else:
-                        tmat_obj_global = tmat_tgt_obj
-
-                # Contact point pose at part-local, then global coordinate
-                tmat_cp_local = transformation_matrix(*pose_cp_local)
-                tmat_cp_global = tmat_obj_global @ tmat_cp_local
-
-                if cp_known_l:
-                    if direction == "RToL":
-                        tmat_cp_r = inv(tmat_src_obj_after) @ tmat_cp_global
-                    else:
-                        tmat_cp_r = inv(tmat_tgt_obj) @ tmat_cp_global
-                    pose_cp_r = (
-                        rmat2quat(tmat_cp_r[:3,:3]), tuple(tmat_cp_r[:3,3].tolist())
-                    )
-                else:
-                    if direction == "RToL":
-                        tmat_cp_l = inv(tmat_tgt_obj) @ tmat_cp_global
-                    else:
-                        tmat_cp_l = inv(tmat_src_obj_after) @ tmat_cp_global
-                    pose_cp_l = (
-                        rmat2quat(tmat_cp_l[:3,:3]), tuple(tmat_cp_l[:3,3].tolist())
-                    )
-
-            # Register contact point type and pose info as needed. Also providing
-            # the oracle string name in this work, so that we can 'cheat' when
-            # we run 'collision checks' for planning
-            if not cp_known_l:
-                exemplars.add_exs_3d(
-                    part_conc_ind_l, None, None, None,
-                    { cp_conc_ind_l: (pose_cp_l, cp_name_l) }
-                )
-            if not cp_known_r:
-                exemplars.add_exs_3d(
-                    part_conc_ind_r, None, None, None,
-                    { cp_conc_ind_r: (pose_cp_r, cp_name_r) }
-                )
+        # Register contact point type and pose info as needed. Also providing
+        # the oracle string name in this work, so that we can 'cheat' when
+        # we run 'collision checks' for planning
+        exemplars.add_exs_3d(
+            part_conc_ind_l, None, None, None,
+            { cp_conc_ind_l: ({ cp_conc_ind_r: pose_cp_l }, cp_name_l) }
+        )
+        exemplars.add_exs_3d(
+            part_conc_ind_r, None, None, None,
+            { cp_conc_ind_r: ({ cp_conc_ind_l: pose_cp_r } , cp_name_r) }
+        )
 
         # Add new subassembly tree by adding concept-annotated nodes and
         # connecting them with contact-annotated edges
@@ -1039,8 +1024,10 @@ def analyze_demonstration(agent, demo_data):
             [part_inst_l, part_inst_r]
         )
         for obj, part_conc_ind, part_inst in lr_bundle:
-            if obj in part_labeling:
-                # Atomic part, create a new node
+            if obj in part_labeling or obj in vision_2d_data:
+                # Atomic part if listed in part_labeling (for languageful
+                # player types) or vision_2d_data (fallback for languageless
+                # player types); create a new node
                 sa_graph = nx.Graph()
                 sa_graph.add_node(
                     obj, node_type="atomic",
@@ -1050,7 +1037,8 @@ def analyze_demonstration(agent, demo_data):
                 connect_nodes.append(obj)
                 part_paths.append(obj)
             elif obj in sa_labeling:
-                # Meaningful subassembly, create a new node
+                # Meaningful subassembly if listed in sa_labeling; create
+                # a new node
                 sa_graph = nx.Graph()
                 sa_graph.add_node(
                     obj, node_type="sa",

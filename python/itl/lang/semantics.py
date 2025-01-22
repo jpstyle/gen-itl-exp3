@@ -32,7 +32,7 @@ class SemanticParser:
             #   2) "I will demonstrate how to build a {truck_type}."
             #   3) "# Action/Effect: {action_type}({parameters})"
             #   4) "This is (not) a {concept_type}."
-            #   5) "Pick up a {part_type}." or "Pick up the {subassembly_type}."
+            #   5) "Pick up a {part_type}." or "Pick up the subassembly/{subassembly_type}."
             #   6) "Join the {part_type_1} and the {part_type_2}."
             #   7) "# Observing"
             #   8) "What were you trying to do?"
@@ -169,8 +169,8 @@ class SemanticParser:
                 # being demonstrated by the user
 
                 # Only consider "Pick up a {part_type}" descriptions; "Pick up
-                # the {subassembly_type}" utterances don't provide any additional
-                # learning signals in our scope
+                # the subassembly/{subassembly_type}" utterances don't provide any
+                # additional learning signals in our scope
                 pick_up_target = re.findall(r"Pick up a (.*)\.$", utt)
                 if len(pick_up_target) > 0:
                     # "~ a {part_type}" case, extract the NL label
