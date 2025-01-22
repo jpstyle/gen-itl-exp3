@@ -16,8 +16,7 @@ from sklearn.metrics import pairwise_distances
 from sklearn.decomposition import PCA
 
 from ..vision.utils import (
-    blur_and_grayscale, visual_prompt_by_mask,
-    rmat2quat, quat2rmat, xyzw2wxyz,
+    blur_and_grayscale, visual_prompt_by_mask, rmat2quat, xyzw2wxyz,
     flip_position_y, flip_quaternion_y, transformation_matrix
 )
 from ..lpmln import Literal
@@ -1055,7 +1054,7 @@ def analyze_demonstration(agent, demo_data):
                 sa_graph = nx.Graph()
                 sa_graph.add_node(
                     obj, node_type="sa",
-                    conc=agent.lt_mem.lexicon.s2d[("n", sa_labeling[obj])][0],
+                    conc=agent.lt_mem.lexicon.s2d[("n", sa_labeling[obj])][0][1],
                     part_paths=flatten_paths(assembly_trees[obj])
                 )
                 subassemblies.append(sa_graph)

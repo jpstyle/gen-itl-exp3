@@ -1,11 +1,5 @@
 import re
 
-import inflect
-
-
-singularize = inflect.engine().singular_noun
-pluralize = inflect.engine().plural
-
 class SemanticParser:
     """
     Semantic parser that first processes free-form language inputs into MRS, and then

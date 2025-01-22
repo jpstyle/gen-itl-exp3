@@ -4,6 +4,7 @@ coordination of different component modules
 """
 import os
 import re
+import random
 import logging
 from itertools import combinations, product, groupby
 from collections import defaultdict, deque, Counter
@@ -462,7 +463,7 @@ def _plan_assembly(agent, build_target):
     # Convert current visual scene (from ensemble prediction) into ASP fact
     # literals (note difference vs. agent.lt_mem.kb.visual_evidence_from_scene
     # method, which is for probabilistic reasoning by LP^MLN)
-    threshold = 0.25; dsc_bin = 20
+    threshold = 0.35; dsc_bin = 20
     observations = set()
     likelihood_values = np.stack([
         obj["pred_cls"] for obj in agent.vision.scene.values()
@@ -499,58 +500,44 @@ def _plan_assembly(agent, build_target):
     assembly_pieces = set()
     for (_, sa_conc), templates in structures.items():
         # For each valid template option
-        template_desc = "sole" if len(templates)==1 else "possible"
         for ti, template in enumerate(templates):
             # Register this specific template option
-            template_lit = Literal(
-                f"sa_{template_desc}_template", wrap_args(sa_conc, ti)
-            )
-            assembly_pieces.add(template_lit)
+            assembly_pieces.add(Literal(
+                "template_option", wrap_args(sa_conc, ti)
+            ))
 
-            # Register part/subassembly options for each node
+            # Register part/subassembly requirement for each node
             for n, data in template.nodes(data=True):
-                match data["node_type"]:
-                    case "atomic":
-                        options = data["parts"]
-                        for opt_conc in options:
-                            part_lit = Literal("atomic", wrap_args(opt_conc))
-                            assembly_pieces.add(part_lit)
-                    case "sa":
-                        options = data["subassemblies"]
-                        for opt_conc in options:
-                            sa_lit = Literal("subassembly", wrap_args(opt_conc))
-                            assembly_pieces.add(sa_lit)
-                choice_desc = "sole" if len(options)==1 else "possible"
-                for opt_conc in options:
-                    opt_lit = Literal(
-                        f"node_{choice_desc}_choice",
-                        wrap_args(sa_conc, ti, n, opt_conc)
-                    )
-                    assembly_pieces.add(opt_lit)
+                if data["node_type"] == "atomic":
+                    conc_ind = data["conc"]
+                    assembly_pieces.add(Literal("atomic", wrap_args(conc_ind)))
+                    assembly_pieces.add(Literal(
+                        "req_atomic", wrap_args(sa_conc, ti, n, conc_ind)
+                    ))
+                else:
+                    assert data["node_type"] == "sa"
+                    conc_ind, sa_ind = data["conc"]
+                    assembly_pieces.add(Literal(
+                        "req_template",
+                        wrap_args(sa_conc, ti, n, conc_ind, sa_ind)
+                    ))
 
             # Register assembly contact signatures, iterating over edges
             sgn_str = lambda sg: str(sg[0]) if len(sg) == 1 \
                 else f"c({sg[0]},{sgn_str(sg[1:])})"        # Serialization
             for u, v, data in template.edges(data=True):
                 u, v = min(u, v), max(u, v)     # Ensure sorted order
-                cp_options_u = [
-                    (sgn_str(signature), f"p_{cp[0]}_{cp[1]}")
-                    for signature, cp in data["contact"][u].items()
-                        # `signature` represents a sequence of subassembly
-                        # templates with terminal atomic part suffix
-                ]
-                cp_options_v = [
-                    (sgn_str(signature), f"p_{cp[0]}_{cp[1]}")
-                    for signature, cp in data["contact"][v].items()
-                ]
-
-                for cp_opt_u, cp_opt_v in product(cp_options_u, cp_options_v):
-                    sgn_u, cp_u = cp_opt_u; sgn_v, cp_v = cp_opt_v
-                    conn_sgn_lit = Literal(
-                        "connection_signature",
-                        wrap_args(sa_conc, ti, u, v, sgn_u, sgn_v, cp_u, cp_v)
-                    )
-                    assembly_pieces.add(conn_sgn_lit)
+                sgn_u = sgn_str(data["contact"][u][0])
+                sgn_v = sgn_str(data["contact"][v][0])
+                    # `sgn` (signature) represents a sequence of subassembly
+                    # templates with terminal atomic part suffix
+                cp_u = "p_" + str(data["contact"][u][1])
+                cp_v = "p_" + str(data["contact"][v][1])
+                conn_sgn_lit = Literal(
+                    "connection_signature",
+                    wrap_args(sa_conc, ti, u, v, sgn_u, sgn_v, cp_u, cp_v)
+                )
+                assembly_pieces.add(conn_sgn_lit)
 
     # Additional constraints introduced by current assembly progress. Selected
     # goal structure must be compliant with existing subassemblies assembled;
@@ -608,13 +595,16 @@ def _plan_assembly(agent, build_target):
         else f"{rename_node(n.arguments[0])}_{n.arguments[1]}"
     for atm in optimal_model:
         match atm.name:
-            case "atomic_node" | "sa_node":
+            case "node_atomic" | "node_sa_template":
                 # Each 'node' literal contains identifiers of its own and its direct
                 # parent's, add an edge linking the two to the committed structure 
                 # graph
                 node_rn = rename_node(atm.arguments[0])
-                node_type = atm.name.split("_")[0]
-                assembly_hierarchy.add_node(node_rn, node_type=node_type)
+                node_type = atm.name.split("_")[1]
+                conc_ind = atm.arguments[1].number
+                assembly_hierarchy.add_node(
+                    node_rn, node_type=node_type, conc=conc_ind
+                )
 
                 if atm.arguments[0].type == SymbolType.Function:
                     # Add edge between the node and its direct parent
@@ -624,13 +614,6 @@ def _plan_assembly(agent, build_target):
                         node_rn
                     )
 
-            case "commit_choice":
-                # Decision as to fill which node with an instance of which atomic part
-                # type
-                node_rn = rename_node(atm.arguments[0])
-                choice_conc = choice_conc=atm.arguments[1].number
-                assembly_hierarchy.add_node(node_rn, choice_conc=choice_conc)
-            
             case "use_as":
                 # Decision as to use which recognized object as instance of which
                 # atomic part type
@@ -658,23 +641,21 @@ def _plan_assembly(agent, build_target):
                 node_rn = rename_node(atm.arguments[1])
                 node_unifications[ex_obj] = node_rn
 
-    # Top node
-    assembly_hierarchy.add_node("n_0", node_type="sa")
     # Note: This assembly hierarchy structure object also serves to provide
     # explanation which part is required for building which subassembly
     # (that is direct parent in the hierarchy)
 
     # Pool of available instances for each part type, as recognized by agent
     atomic_node_concs = {
-        n: data["choice_conc"]
+        n: data["conc"]
         for n, data in assembly_hierarchy.nodes(data=True)
         if data["node_type"] == "atomic"
     }
     atomic_nodes_by_conc = sorted(
-        assembly_hierarchy.nodes(data=True), key=lambda x: x[1]["choice_conc"]
+        assembly_hierarchy.nodes(data=True), key=lambda x: x[1]["conc"]
     )
     atomic_nodes_by_conc = [
-        (data["choice_conc"], n)
+        (data["conc"], n)
         for n, data in atomic_nodes_by_conc if data["node_type"] == "atomic"
     ]
     atomic_nodes_by_conc = {
@@ -700,64 +681,44 @@ def _plan_assembly(agent, build_target):
     # by agent was supposed to stand for in the knowledge encoded in Unity
     # assets
     cp_oracle = {
-        (cp_conc, cp_i): gt_handle
+        cp_conc: gt_handle
         for _, _, _, cps in agent.lt_mem.exemplars.object_3d.values()
-        for cp_conc, cp_insts in cps.items()
-        for cp_i, (_, gt_handle) in enumerate(cp_insts)
+        for cp_conc, (_, gt_handle) in cps.items()
     }
 
     # Turns out if a structure consists of too many atomic parts (say, more
     # than 6 or so), ASP planner performance is significantly affected. We
-    # handle this by breaking the planning problem down to multiple smaller
-    # ones... In principle, this may risk planning failure when physical
-    # collision check is involved, depending on how the target structure is
-    # partitioned. Note that agents that are aware of semantically valid
-    # substructures are entirely free from such concerns.
+    # handle this by breaking each planning subproblem down to multiple
+    # smaller ones... In principle, this may risk planning failure when
+    # physical collision check is involved, depending on how the target
+    # structure is partitioned. Note that agents that are aware of valid
+    # substructures are relatively free from such concerns, as sizes of
+    # those substructures tend to be more manageable in general.
     connection_graph = nx.Graph()
     for u, v in connect_edges: connection_graph.add_edge(u, v)
 
-    # Initial planning problem state, obtain once at the beginning and deepcopy
-    # for manipulation at the very beginning or after reaching deadend. Reflects
-    # current progress actually made in environment so far.
-    def initial_planning_state():
-        # Graph representation of how selected chunks are compressed into
-        # subassembly nodes
-        compression_graph = connection_graph.copy()
-        # Chunks assembled so far, with their component objects
-        chunks_assembled = {}
-        # Chunking sequence made throughout the piecewise planning process
-        current_chunk_sequence = []
-        # Next integer index to assign to new subassembly; ensure the newly
-        # assigned index doesn't overlap with any of the previously assigned
-        # ones by looking through action history
-        sa_ind = max([
-            int(re.findall(r"[si](\d+)(_\d+)?", action_params[-1])[0][0])
-            for action_type, action_params in exec_state["action_history"]
-            if action_type in assemble_actions
-        ] + [-1]) + 1           # [-1] ensures max value is always obtained
-        # Joining action sequence, which abstracts from pick-up & drop steps
-        # and choices of left/right manipulators
-        join_sequence = []
-        # For counting remaining available instances per type
-        inst_pool = copy.deepcopy(atomic_nodes_by_conc)
-
-        # Account for any progress made so far
-        for sa, sa_graph in exec_state["connection_graphs"].items():
-            if len(sa_graph) == 1: continue     # No processing for singleton parts
-            chunk_nodes = {
-                node_unifications[f"{sa}_{ex_obj}"] for ex_obj in sa_graph.nodes
-            }
-            compress_chunk(compression_graph, chunk_nodes, sa)
-            chunks_assembled[sa] = chunk_nodes
-            for n in chunk_nodes:
-                conc_n = atomic_node_concs[n]
-                if n in inst_pool[conc_n]: inst_pool[conc_n].remove(n)
-
-        initial_state = (
-            compression_graph, chunks_assembled, current_chunk_sequence,
-            sa_ind, join_sequence, inst_pool
-        )
-        return initial_state
+    # Sample a 'compression sequence', i.e. a sequence of collection of nodes
+    # that altogether make up a meaningful substructure of the target structure.
+    # The sequential sampling is achieved by iteratively 'compressing' valid
+    # set of nodes in the assembly hierarchy, where by valid we mean all
+    # assembly preconditions are cleared. In the edge case where the assembly
+    # hierarchy is flat and thus has max depth of just 2, the length of the
+    # resulting compression sequence would be just 1, where the singleton
+    # collection contains all atomic nodes.
+    sa_nodes = {
+        n: [chd for _, chd in assembly_hierarchy.out_edges(n)]
+        for n in assembly_hierarchy
+        if assembly_hierarchy.nodes[n]["node_type"] == "sa"
+    }
+    compression_steps = len(sa_nodes)
+    compression_sequence = []
+    for _ in range(compression_steps):
+        compressible_nodes = [
+            n for n, children in sa_nodes.items()
+            if not any(chd in sa_nodes for chd in children)
+        ]
+        selected = random.sample(compressible_nodes, 1)[0]
+        compression_sequence.append((selected, sa_nodes.pop(selected)))
 
     # Helper method for updating compression graph by replacing the collection
     # of nodes with a new node representing the subassembly newly assembled
@@ -772,102 +733,169 @@ def _plan_assembly(agent, build_target):
                 if v in compression_graph: compression_graph.remove_node(v)
                 if u not in chunk: compression_graph.add_edge(u, name)
 
+    # Helper method for obtaining a planning subproblem corresponding to
+    # the specified compression step.
+    def planning_subproblem(step_ind):
+        # Obtain graph representation of the assembly subprogram for the
+        # current progress, by replaying the compression sequence up to
+        # the previous step, then taking subgraph for the current step
+        compression_graph = connection_graph.copy()
+        intermediate_chunks = {
+            sa_node: f"s{i}"
+            for i, (sa_node, _) in enumerate(compression_sequence)
+        }
+        for i in range(step_ind):
+            compressed_nodes = compression_sequence[i][1]
+            compressed_nodes = [
+                intermediate_chunks.get(n, n) for n in compressed_nodes
+            ]
+            compress_chunk(compression_graph, compressed_nodes, f"s{i}")
+        subproblem_nodes = [
+            intermediate_chunks.get(n, n)
+            for n in compression_sequence[step_ind][1]
+        ]
+        compression_graph = compression_graph.subgraph(subproblem_nodes).copy()
+
+        # Chunks assembled so far involved in the subproblem, with their
+        # component objects
+        flatten_node = lambda n: set.union(*[flatten_node(m) for m in cmp_seq[n]]) \
+            if n in (cmp_seq := dict(compression_sequence)) else {n}
+        chunks_assembled = {
+            intermediate_chunks[sa_node]: set.union(*[
+                flatten_node(n) for n in component_nodes
+            ])
+            for sa_node, component_nodes in compression_sequence[:step_ind]
+            if intermediate_chunks[sa_node] in subproblem_nodes
+        }
+
+        return compression_graph, chunks_assembled
+
     # Compress the connection graph part by part, randomly selecting chunks
     # of parts or subassemblies to form smaller planning problems
-    min_chunk_size = 5
-    initial_state = initial_planning_state()
-    initial_state_cp = copy.deepcopy(initial_state)
-    compression_graph, chunks_assembled = initial_state_cp[:2]
-    current_chunk_sequence, sa_ind = initial_state_cp[2:4]
-    join_sequence, inst_pool = initial_state_cp[4:]
-    # Remembering sequences of chunking that proved to reach deadend
-    invalid_chunk_sequences = []
+    remaining_subproblems = deque(
+        planning_subproblem(i) for i in range(len(compression_sequence))
+    )
+    # Remembering valid & invalid joins of subassemblies, so as to avoid
+    # calling oracle (be it cheat sheet or external motion planner)
+    valid_joins_cached = exec_state["join_validities"][0]
+    invalid_joins_cached = exec_state["join_validities"][1]
     # Record every 'assembly scope implication' such that if a set of certain
     # atomic objects are to be included in a chunk, some other object must
     # be included in the set as well, so as to avoid deadends due to violations
     # of 'precedence constraints'.
     scope_implications = { n: set() for n in connection_graph }
-    # Remembering valid & invalid joins of subassemblies, so as to avoid
-    # calling oracle (be it cheat sheet or external motion planner)
-    valid_joins_cached = exec_state["join_validities"][0]
-    invalid_joins_cached = exec_state["join_validities"][1]
     # Tracking how many piecewise planning attempts and oracle calls were made
     planning_attempts = 0; query_count = 0
+    # For remembering sequences of chunking that has proven to reach deadend
+    # for this particular subproblem
+    current_chunk_sequence = ()
+    invalid_chunk_sequences = set()
+    # Sequence of joins to be made
+    join_sequence_subprob = []      # For each subproblem
+    join_sequence = []              # Accumulated across subproblems
+    # Parameter for further subdividision of each subproblem
+    min_chunk_size = 6
+    # Tracking remaining nodes per atomic part type
+    node_pool_checkpoint = copy.deepcopy(atomic_nodes_by_conc)
+    node_pool = copy.deepcopy(node_pool_checkpoint)
+    # Index of subproblem currently being solved
+    sp_ind = 0
     # Continue until the target structure is fully compressed and planned for    
-    while len(compression_graph) > 1:
-        # Subsample designated number of nodes by BFS from each leaf node.
-        # Select one with the least non-objects, break tie randomly.
-        chunk_candidates = []
-        for n, dg in compression_graph.degree:
-            if dg > 1: continue
-            bfs_gen = nx.bfs_predecessors(compression_graph, n)
+    while len(remaining_subproblems) > 0:
+        # Pop the next pending subproblem
+        compression_graph, chunks_assembled = remaining_subproblems.popleft()
 
-            chunk = {n}
-            while len(chunk) < min_chunk_size:
-                try:
-                    next_node = next(bfs_gen)[0]
-                    chunk.add(next_node)
-                    for ante, cons in scope_implications.get(next_node, set()):
-                        objs_flat = {
-                            n for n in chunk if n not in chunks_assembled
-                        }
-                        objs_hidden = {
-                            n for s in chunk if s in chunks_assembled
-                            for n in chunks_assembled[s]
-                        }
-                        chunk_unrolled = objs_flat | objs_hidden
-                        if ante <= chunk_unrolled:
-                            for s, objs in chunks_assembled.items():
-                                if cons in objs:
-                                    chunk.add(s)
-                                    break
-                            else:
-                                chunk.add(cons)
-                except StopIteration:
-                    break
-
-            conc_counts = Counter(
-                sorted(atomic_node_concs.get(u, -1) for u in chunk)
-            )
-            shortage_count = 0
-            for conc, count in conc_counts.items():
-                # conc of -1 stands for non-atomic subassembly
-                if conc == -1: continue
-                if count > len(inst_pool[conc]):
-                    shortage_count += abs(count > len(inst_pool[conc]))
-            chunk_candidates.append((chunk, shortage_count))
-
-        chunk_candidates = sorted(chunk_candidates, key=lambda x: x[1])
-        for chunk, _ in chunk_candidates:
-            # Select chunk with smallest part instance shortage possible,
-            # while ensuring that the selection doesn't result in an
-            # invalid chunk sequence (remembered so far)
-            potential_sequence = current_chunk_sequence + [chunk]
-            if potential_sequence not in invalid_chunk_sequences:
-                chunk_selected = chunk
-                break
+        if len(compression_graph) < min_chunk_size:
+            # Subproblem size smaller than the chunking threshold, just
+            # use the whole graph
+            chunk_selected = set(compression_graph)
+            chunk_subgraph = compression_graph
         else:
-            # All possible options would lead to invalid sequence. Remember
-            # the current sequence as invalid.
-            # Update tracker states
-            invalid_chunk_sequences.append(current_chunk_sequence)
-            planning_attempts += 1
-            valid_joins_cached |= collision_checker.valid_joins
-            invalid_joins_cached |= collision_checker.invalid_joins
-            # Then start again
-            initial_state_cp = copy.deepcopy(initial_state)
-            compression_graph, chunks_assembled = initial_state_cp[:2]
-            current_chunk_sequence, sa_ind = initial_state_cp[2:4]
-            join_sequence, inst_pool = initial_state_cp[4:]
-            continue
+            # Subsample designated number of nodes by BFS from each leaf node.
+            # Select one with the least non-objects, break tie randomly.
+            chunk_candidates = []
+            for n, dg in compression_graph.degree:
+                if dg > 1: continue
+                bfs_gen = nx.bfs_predecessors(compression_graph, n)
 
-        chunk_subgraph = compression_graph.subgraph(chunk_selected)
+                chunk = {n}
+                while len(chunk) < min_chunk_size:
+                    try:
+                        next_node = next(bfs_gen)[0]
+                        chunk.add(next_node)
+                        for ante, cons in scope_implications.get(next_node, set()):
+                            objs_flat = {
+                                n for n in chunk if n not in chunks_assembled
+                            }
+                            objs_hidden = {
+                                n for s in chunk if s in chunks_assembled
+                                for n in chunks_assembled[s]
+                            }
+                            chunk_unrolled = objs_flat | objs_hidden
+                            if ante <= chunk_unrolled:
+                                for s, objs in chunks_assembled.items():
+                                    if cons in objs:
+                                        chunk.add(s)
+                                        break
+                                else:
+                                    chunk.add(cons)
+                    except StopIteration:
+                        break
 
-        # Remove instances in the selected chunk from instance pool
+                conc_counts = Counter(
+                    sorted(atomic_node_concs.get(u, -1) for u in chunk)
+                )
+                shortage_count = 0
+                for conc, count in conc_counts.items():
+                    # conc of -1 stands for non-atomic subassembly
+                    if conc == -1: continue
+                    if count > len(node_pool[conc]):
+                        shortage_count += abs(count > len(node_pool[conc]))
+                chunk_candidates.append((chunk, shortage_count))
+
+            chunk_candidates = sorted(chunk_candidates, key=lambda x: x[1])
+            for chunk, _ in chunk_candidates:
+                # Select chunk with smallest part instance shortage possible,
+                # while ensuring that the selection doesn't result in an
+                # invalid chunk sequence (remembered so far)
+                potential_sequence = current_chunk_sequence + (frozenset(chunk),)
+                if potential_sequence not in invalid_chunk_sequences:
+                    chunk_selected = chunk
+                    break
+            else:
+                # All possible options would lead to invalid sequence. Remember
+                # the current sequence as invalid.
+                # Update tracker states
+                planning_attempts += 1
+                invalid_chunk_sequences = {
+                    chk_seq for chk_seq in invalid_chunk_sequences
+                    if len(chk_seq) < (cur_len := len(current_chunk_sequence)) or any(
+                        chk1 != chk2
+                        for chk1, chk2 in zip(chk_seq[:cur_len], current_chunk_sequence)
+                    )
+                }
+                    # Removing all invalid sequences having `currect_chunk_sequence`
+                    # as prefix, for they are now all entailed
+                invalid_chunk_sequences.add(current_chunk_sequence)
+                valid_joins_cached |= collision_checker.valid_joins
+                invalid_joins_cached |= collision_checker.invalid_joins
+                # Then start again
+                remaining_subproblems = deque(
+                    planning_subproblem(i)
+                    for i in range(sp_ind,len(compression_sequence))
+                )           # Start subproblem from scratch
+                current_chunk_sequence = ()
+                join_sequence_subprob = []
+                node_pool = copy.deepcopy(node_pool_checkpoint)
+                continue
+
+            chunk_subgraph = compression_graph.subgraph(chunk_selected)
+
+        # Remove instances in the selected chunk from node_pool
         for n in chunk_selected:
             if n not in atomic_node_concs: continue     # Non-atomic
             conc_n = atomic_node_concs[n]
-            if n in inst_pool[conc_n]: inst_pool[conc_n].remove(n)
+            if n in node_pool[conc_n]: node_pool[conc_n].remove(n)
 
         # Load ASP encoding for planning sequence of atomic actions
         collision_checker = _PhysicalAssemblyPropagator(
@@ -956,25 +984,29 @@ def _plan_assembly(agent, build_target):
                 for n in nodes1:
                     scope_implications[n].add((nodes1, list(nodes2)[0]))
 
-        # Tracking sequence of selected chunks, so as to remember invalid
-        # sequences that led to deadend states and prevent following the
-        # exact same sequence again
-        current_chunk_sequence.append(chunk_selected)
-
         query_count += collision_checker.query_count
         if optimal_model is None:
             # Planning failure, start again from scratch
             # Update tracker states
-            invalid_chunk_sequences.append(current_chunk_sequence)
             planning_attempts += 1
+            invalid_chunk_sequences.add(current_chunk_sequence)
             valid_joins_cached |= collision_checker.valid_joins
             invalid_joins_cached |= collision_checker.invalid_joins
             # Then start again
-            initial_state_cp = copy.deepcopy(initial_state)
-            compression_graph, chunks_assembled = initial_state_cp[:2]
-            current_chunk_sequence, sa_ind = initial_state_cp[2:4]
-            join_sequence, inst_pool = initial_state_cp[4:]
+            remaining_subproblems = deque(
+                planning_subproblem(i)
+                for i in range(sp_ind,len(compression_sequence))
+            )           # Start subproblem from scratch
+            current_chunk_sequence = ()
+            join_sequence_subprob = []
+            node_pool = copy.deepcopy(node_pool_checkpoint)
             continue
+
+        # Tracking sequence of selected chunks, so as to remember invalid
+        # sequences that led to deadend states and prevent following the
+        # exact same sequence again
+        current_chunk_sequence = \
+            current_chunk_sequence +(frozenset(chunk_selected),)
 
         # Project model into join action sequence and extract action
         # parameters for each join action
@@ -986,34 +1018,53 @@ def _plan_assembly(agent, build_target):
             atm.arguments[0].arguments for atm in projection
         ]
         arg_val = lambda a: a.name if a.type == SymbolType.Function \
-            else f"i{sa_ind}_{a.number}"
-        join_sequence += [
+            else f"i{sp_ind}_{a.number+len(join_sequence_subprob)}"
+        join_sequence_subprob += [
             (
                 arg_val(s1), arg_val(s2),   # Involved subassemblies
                 arg_val(n1), arg_val(n2),   # Involved nodes
-                f"s{sa_ind}" if i==len(projection)-1 \
-                    else f"i{sa_ind}_{i}"   # Naming resultant subassembly
+                f"i{sp_ind}_{i+len(join_sequence_subprob)}"
+                                            # Naming resultant subassembly
             )
             for i, (s1, s2, n1, n2) in enumerate(projection)
         ]
 
         # Update compression graph accordingly
-        compress_chunk(compression_graph, chunk_selected, f"s{sa_ind}")
+        resultant_name = f"i{sp_ind}_{len(join_sequence_subprob)-1}"
+        compress_chunk(compression_graph, chunk_selected, resultant_name)
 
-        # Remember which components constitute the new subassembly, while
-        # removing old subassemblies in chunk that have been merged into
-        # new subassembly
-        chunks_assembled[f"s{sa_ind}"] = {
-            n for s in chunk_selected if s in chunks_assembled
-            for n in chunks_assembled[s]
-        } | {
-            n for n in chunk_selected if n not in chunks_assembled
-        }
-        for s in chunk_selected:
-            if s in chunks_assembled:
-                del chunks_assembled[s]
+        if len(compression_graph) == 1:
+            # Subproblem successfully solved; collect the obtained solution
+            # and prepare for the next subproblem (if any)
+            join_sequence_subprob[-1] = \
+                join_sequence_subprob[-1][:4] + (f"s{sp_ind}",)
+                # Renaming the final product for the subproblem
+            join_sequence += join_sequence_subprob
+            join_sequence_subprob = []
+            current_chunk_sequence = ()
+            invalid_chunk_sequences = set()
+            sp_ind += 1
+        else:
+            # Subproblem not completely solved; remember which components
+            # constitute the new chunk, while removing old subassemblies in
+            # chunk that have been merged into new subassembly
+            chunks_assembled[resultant_name] = {
+                n for s in chunk_selected if s in chunks_assembled
+                for n in chunks_assembled[s]
+            } | {
+                n for n in chunk_selected if n not in chunks_assembled
+            }
+            for s in chunk_selected:
+                if s in chunks_assembled:
+                    del chunks_assembled[s]
 
-        sa_ind += 1
+            # Save the node pool status
+            node_pool_checkpoint = node_pool
+
+            # Push back the reduced subproblem for continuation
+            remaining_subproblems.appendleft(
+                (compression_graph, chunks_assembled)
+            )
 
     planning_attempts += 1
     log_msg = f"Working plan found after {planning_attempts} (re)planning attempts "
@@ -1112,10 +1163,8 @@ def _plan_assembly(agent, build_target):
 
         # Join s1 and s2 at appropriate contact point
         cp_n1, cp_n2 = connect_edges[(n1, n2)]
-        cp_n1 = re.findall(r"p_(.*)_(.*)$", cp_n1)
-        cp_n2 = re.findall(r"p_(.*)_(.*)$", cp_n2)
-        cp_n1 = (int(cp_n1[0][0]), int(cp_n1[0][1]))
-        cp_n2 = (int(cp_n2[0][0]), int(cp_n2[0][1]))
+        cp_n1 = int(re.findall(r"p_(.*)$", cp_n1)[0])
+        cp_n2 = int(re.findall(r"p_(.*)$", cp_n2)[0])
         if s1 in hands:
             if hands.index(None) == 0:
                 # s1 held in right hand
@@ -1177,7 +1226,7 @@ class _PhysicalAssemblyPropagator:
         # (Injective) Mapping of individual nodes to corresponding atomic part
         # instances in the collision table
         atomic_nodes = {
-            n: data["choice_conc"] for n, data in node_data.items()
+            n: data["conc"] for n, data in node_data.items()
             if data["node_type"] == "atomic"
         }
         self.node2inst = {}; self.inst2node = {}
@@ -1201,10 +1250,8 @@ class _PhysicalAssemblyPropagator:
                 for (u, v), (cp_u, cp_v) in contacts.items():
                     if n not in (u, v): continue
 
-                    cp_u = re.findall(r"p_(.*)_(.*)$", cp_u)
-                    cp_v = re.findall(r"p_(.*)_(.*)$", cp_v)
-                    cp_u = (int(cp_u[0][0]), int(cp_u[0][1]))
-                    cp_v = (int(cp_v[0][0]), int(cp_v[0][1]))
+                    cp_u = int(re.findall(r"p_(.*)$", cp_u)[0])
+                    cp_v = int(re.findall(r"p_(.*)$", cp_v)[0])
                     cp_u = cp_indexing_inv[cp_names[cp_u]]
                     cp_v = cp_indexing_inv[cp_names[cp_v]]
 
@@ -1623,8 +1670,8 @@ def _execute_assemble(agent, action_name, action_params):
     # coordinate] and [Tr. of part instance in subassembly local coordinate],
     # then [Desired Tr. of manipulator in global coordinate] by equating
     # transforms of the two contact points of interest in global coordinate.
-    tmat_cp_local_left = structure_3d_left[3][cp_left[0]][cp_left[1]][0]
-    tmat_cp_local_right = structure_3d_right[3][cp_right[0]][cp_right[1]][0]
+    tmat_cp_local_left = structure_3d_left[3][cp_left][0]
+    tmat_cp_local_right = structure_3d_right[3][cp_right][0]
     tmat_cp_local_left = transformation_matrix(*tmat_cp_local_left)
     tmat_cp_local_right = transformation_matrix(*tmat_cp_local_right)
     if action_name.endswith("left"):
