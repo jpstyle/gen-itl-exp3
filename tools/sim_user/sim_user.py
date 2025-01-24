@@ -362,7 +362,7 @@ class SimulatedTeacher:
                     # Obtain intent of joining the target subassembly pairs at which
                     # component parts
                     _, params = re.findall(r"# Action: assemble_(.*)\((.*)\)$", utt)[0]
-                    _, _, part_left, part_right, product_name = params.split(",")
+                    _, part_left, _, part_right, product_name = params.split(",")
                     assem_st["join_intent"] = (part_left, part_right, product_name)
 
                 response.append((None, None))

@@ -779,6 +779,17 @@ def analyze_demonstration(agent, demo_data):
         for part_inst in vision_3d_data:
             new_conc_ind = agent.vision.add_concept("pcls")
             inst2conc_map[part_inst] = new_conc_ind
+            # Store 'identification code strings' so that they can be passed
+            # to Unity environment when executing pick-up actions, which will
+            # be compared against the list of licensed labels to simulate
+            # pick-up actions with correct/perturbed poses. This is needed
+            # for language-less player types only for their lack of access
+            # to NL labels.
+            type_code = next(
+                obj["type_code"] for obj in agent.vision.scene.values()
+                if obj["env_handle"] == part_inst
+            )
+            agent.lt_mem.lexicon.codesheet[new_conc_ind] = type_code
     else:
         # Has access to NL labeling of part & subassembly instances, use them
         assert agent.cfg.exp.feedback_type in ["label", "full"]

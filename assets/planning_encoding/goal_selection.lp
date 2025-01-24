@@ -38,13 +38,13 @@ fits_signature(D,N,NS,c(NS,SG)) :-
 % Handling additional constraints due to already assembled parts. Unify
 % each existing object with one and only one hierarchy node.
 1{ unify_node(X,N) : node_atomic(N,C) }1 :- ext_node(X,C).
-:- unify_node(X1, N1), unify_node(X2, N2), X1 != X2, N1 = N2.
-to_connect(N1,N2) :- to_connect(N1,N2,_,_).     % Project /4->/2
-:- ext_edge(X1,X2), unify_node(X1,N1), unify_node(X2,N2), not to_connect(N1,N2).
+:- unify_node(X1,N1), unify_node(X2,N2), X1 != X2, N1 = N2.
+:- unify_node(X1,N1), unify_node(X2,N2),
+    ext_edge(X1,X2,CP1,CP2), not to_connect(N1,N2,CP1,CP2).
 
 % Edge symmetricity
-to_connect(N2,N1) :- to_connect(N1,N2).
-ext_edge(X2,X1) :- ext_edge(X1,X2).
+to_connect(N2,N1,CP2,CP1) :- to_connect(N1,N2,CP1,CP2).
+ext_edge(X2,X1,CP2,CP1) :- ext_edge(X1,X2,CP1,CP2).
 
 % Compute final compatibility score by taking average across all atomic nodes
 total_score(TS) :- TS = #sum { X,O : is_likely(O,P,X), use_as(O,P) }.
