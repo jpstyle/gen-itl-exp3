@@ -12,6 +12,8 @@ import yaml
 import networkx as nx
 from clingo import Control, Function
 
+from python.itl.comp_actions.interact import _divide_and_conquer
+
 
 MATCH_THRES = 0.9
 VALID_JOINS = {
@@ -37,7 +39,6 @@ VALID_JOINS = {
     (("chassis_center", "back"), ("chassis_back", "center")),
     (("chassis_center", "back"), ("bolt", "bolt")),
 }
-    # Account for join symmetry
 
 class SimulatedTeacher:
     
@@ -56,7 +57,7 @@ class SimulatedTeacher:
         self.feedback_type = cfg.exp.feedback_type
 
         # Queue of actions to execute, if any demonstration is ongoing
-        self.ongoing_demonstration = []
+        self.ongoing_demonstration = (None, [])
 
         # Load appropriate domain knowledge stored as yamls in assets dir
         self.domain_knowledge = {}
@@ -69,6 +70,8 @@ class SimulatedTeacher:
             self.domain_knowledge["taxonomy"] = yaml.safe_load(yml_f)
         with open(f"{knowledge_path}/ontology_partWhole.yaml") as yml_f:
             self.domain_knowledge["part_whole"] = yaml.safe_load(yml_f)
+        with open(f"{knowledge_path}/collision_table.yaml") as yml_f:
+            self.collision_table = yaml.safe_load(yml_f)
 
         # Tabulate and store ontology knowledge in graph forms, so that transitive
         # closures are easily obtained
@@ -95,15 +98,8 @@ class SimulatedTeacher:
         self.current_episode_record = {
             # Track state of ongoing assembly progress, either observed or demonstrated
             "assembly_state": {
-                "left": None, "right": None,
-                "subassemblies": defaultdict(set),
-                "remaining_joins": {
-                    frozenset(k): len(list(v))
-                    for k, v in groupby(
-                        sorted(VALID_JOINS, key=lambda x: (x[0][0], x[1][0])),
-                        key=lambda x: (x[0][0], x[1][0])
-                    )
-                },
+                "left": None, "right": None, "subassemblies": {},
+                "joins_remaining": {frozenset(join) for join in VALID_JOINS},
                 "aliases": {}
             }
         }
@@ -154,9 +150,9 @@ class SimulatedTeacher:
 
         # Leverage ASP to obtain all possible samples of valid part set subject to
         # a set of constraints
-        sampled_inits = _sample_ASP(
+        sampled_inits = self._sample_ASP(
             self.target_concept, self.domain_knowledge,
-            constraints, all_subtypes, num_distractors, self.cfg.seed
+            constraints, all_subtypes, num_distractors
         )
 
         # Extract and store sampled part subtype info for the current scene
@@ -206,8 +202,8 @@ class SimulatedTeacher:
                 assert reported_neologism == self.target_concept
 
                 # Sample a valid workplan for demonstration and load for execution
-                sampled_plan = _sample_demo_plan(copy.deepcopy(sampled_parts))
-                self.ongoing_demonstration = sampled_plan
+                sampled_plan = self._sample_demo_plan()
+                self.ongoing_demonstration = ("full", sampled_plan)
 
                 # Notify agent that user will demonstrate how to build one
                 response.append((
@@ -226,15 +222,24 @@ class SimulatedTeacher:
                 if step_demonstrated: break
                 step_demonstrated = True
 
-                if len(self.ongoing_demonstration) == 0:
-                    # Demonstration finished (including end-of-demo message),
-                    # wait w/o terminating until receiving agent's acknowledgement
-                    # message "OK"
-                    response.append((None, None))
-                    continue
+                demo_type, demo_plan = self.ongoing_demonstration
+                if len(demo_plan) == 0:
+                    if demo_type == "full":
+                        # Demonstration finished (including end-of-demo message),
+                        # wait w/o terminating until receiving agent's acknowledgement
+                        # message "OK"
+                        response.append((None, None))
+                        continue
+                    else:
+                        # Tell the agent to resume its task execution
+                        assert demo_type == "frag"
+                        response.append(
+                            ("generate", { "utterance": "Continue.", "pointing": {} })
+                        )
+                        continue
 
                 # Keep popping and executing plan actions until plan is empty
-                act_type, act_params = self.ongoing_demonstration.pop(0)
+                act_type, act_params = demo_plan.pop(0)
                 side = act_type.split("_")[-1] if act_type is not None else None
 
                 # Annotate physical action to be executed for this step, communicated
@@ -254,7 +259,9 @@ class SimulatedTeacher:
                     }
                     assem_st[side] = target
                     if target not in subassems:
-                        subassems[target].add(target)
+                        singleton_gr = nx.Graph()
+                        singleton_gr.add_node(target)
+                        subassems[target] = singleton_gr
 
                     if self.feedback_type in ["label", "full"]:
                         inst = re.findall(r"^t_(.*)_(\d+)$", target)
@@ -311,12 +318,18 @@ class SimulatedTeacher:
                     act_params = (subassembly, target_l, target_r)    # Rewrite params
                     # Building action spec description string
                     num_components = \
-                        len(subassems[assem_st["left"]] | subassems[assem_st["right"]])
+                        len(subassems[assem_st["left"]]) + len(subassems[assem_st["right"]])
                     act_str = act_str_prefix
                     act_str += f"({subassembly},{target_l},{target_r},{num_components})"
                     act_anno = { "utterance": act_str, "pointing": {} }
-                    subassems[subassembly] = \
-                        subassems.pop(assem_st["left"]) | subassems.pop(assem_st["right"])
+                    subassems[subassembly] = nx.union(
+                        subassems.pop(assem_st["left"]), subassems.pop(assem_st["right"])
+                    )
+                    subassems[subassembly].add_edge(
+                        inst_l, inst_r, contact={
+                            inst_l: (type_l, cp_l), inst_r: (type_r, cp_r)
+                        }
+                    )
                     assem_st["left"] = subassembly if side == "left" else None
                     assem_st["right"] = None if side == "left" else subassembly
 
@@ -344,20 +357,15 @@ class SimulatedTeacher:
                         f"{type(prm).__name__}|{prm}" for prm in act_params
                     )
                     response.append((act_type, { "parameters": act_params_serialized }))
-                    # Provide additional action annotations
-                    response.append(("generate", act_anno))
+                    if demo_type == "full":
+                        # Provide additional action annotations
+                        response.append(("generate", act_anno))
                     if act_dscr is not None:
                         response.append(("generate", act_dscr))
 
             elif utt.startswith("# Action:"):
                 # Agent action intent; somewhat like reading into the agent's 'mind'
                 # for convenience's sake
-
-                if utt.startswith("# Action: pick_up"):
-                    # Obtain agent-side naming of the targetted object
-                    side, target = re.findall(r"# Action: pick_up_(.*)\((.*)\)$", utt)[0]
-                    assem_st[side] = target
-
                 if utt.startswith("# Action: assemble"):
                     # Obtain intent of joining the target subassembly pairs at which
                     # component parts
@@ -365,7 +373,7 @@ class SimulatedTeacher:
                     _, part_left, _, part_right, product_name = params.split(",")
                     assem_st["join_intent"] = (part_left, part_right, product_name)
 
-                response.append((None, None))
+                response.append((None, None))       # Then no-op
 
             elif utt.startswith("# Effect:"):
                 # Action effect feedback from Unity environment, determine whether the
@@ -378,19 +386,19 @@ class SimulatedTeacher:
                     obj_picked_up = effects.split(",")[0]
 
                     # Update ongoing execution state
-                    agent_side_alias = assem_st.pop(side)
-                    assem_st["aliases"][agent_side_alias] = obj_picked_up
                     assem_st[side] = obj_picked_up
                     if obj_picked_up not in subassems:
-                        subassems[obj_picked_up] = {obj_picked_up}
+                        singleton_gr = nx.Graph()
+                        singleton_gr.add_node(obj_picked_up)
+                        subassems[obj_picked_up] = singleton_gr
 
                     pair_invalid = False
                     if assem_st["left"] is not None and assem_st["right"] is not None:
                         # Test if a valid join can be achieved with the two subassembly
                         # objects held in each hand
                         compatible_part_pairs = {
-                            frozenset([part1, part2])
-                            for (part1, _), (part2, _) in VALID_JOINS
+                            frozenset([type1, type2])
+                            for (type1, _), (type2, _) in assem_st["joins_remaining"]
                         }
                         sa_left = subassems[assem_st["left"]]
                         sa_right = subassems[assem_st["right"]]
@@ -401,9 +409,6 @@ class SimulatedTeacher:
                             # Pass if part pair not compatible after all
                             compatible = part_pair in compatible_part_pairs
                             if not compatible: continue
-                            # Pass if trying to make a redundant join
-                            redundant = assem_st["remaining_joins"][part_pair] == 0
-                            if redundant: continue
                             # Pair valid if reached here
                             break
                         else:
@@ -417,15 +422,31 @@ class SimulatedTeacher:
                     if pair_invalid:
                         # Interrupt agent and undo the last pick up (by dropping the
                         # object just picked up)
+                        assem_st[side] = None       # Pick-up undone
                         response += [
                             ("generate", { "utterance": "Stop.", "pointing": {} }),
-                            ("generate", {
-                                "utterance": "What were you trying to join?",
-                                "pointing": {}
-                            }),
                             (f"drop_{side}", { "parameters": () })
                         ]
-                        assem_st[side] = None       # Pick-up undone
+                        if self.feedback_type == "bool":
+                            # Minimal help; no additional learning signal than the fact
+                            # that the undone pick-up action is invalid
+                            self.ongoing_demonstration = ("frag", [])
+                        elif self.feedback_type == "demo":
+                            # Language-less player type with assistance by demonstration;
+                            # sample a next valid join and proceed to demonstrate
+                            demo_segment = self._sample_demo_step()
+                            self.ongoing_demonstration = ("frag", demo_segment)
+                        else:
+                            # Languageful player types; directly inquire the intent
+                            # of the undone pick-up action
+                            assert self.feedback_type in ["label", "full"]
+                            response += [
+                                ("generate", {
+                                    "utterance": "What were you trying to join?",
+                                    "pointing": {}
+                                })
+                            ]
+                        
                         interrupted = True
 
                 if utt.startswith("# Effect: drop"):
@@ -443,13 +464,13 @@ class SimulatedTeacher:
                         part_src, part_tgt, product_name = assem_st.pop("join_intent")
                     part_src = assem_st["aliases"][part_src]
                     part_tgt = assem_st["aliases"][part_tgt]
-                    part_src = re.findall(r"t_(.*)_\d+$", part_src)[0]
-                    part_tgt = re.findall(r"t_(.*)_\d+$", part_tgt)[0]
+                    type_src = re.findall(r"t_(.*)_\d+$", part_src)[0]
+                    type_tgt = re.findall(r"t_(.*)_\d+$", part_tgt)[0]
                     valid_joins = [
-                        frozenset(((part1, cp1), (part2, cp2)))
-                        for (part1, cp1), (part2, cp2) in VALID_JOINS
-                        if (part1 == part_src and part2 == part_tgt) or
-                            (part2 == part_src and part1 == part_tgt)
+                        frozenset(((type1, cp1), (type2, cp2)))
+                        for (type1, cp1), (type2, cp2) in VALID_JOINS
+                        if (type1 == type_src and type2 == type_tgt) or
+                            (type2 == type_src and type1 == type_tgt)
                     ]
 
                     effects = effects.split(",")
@@ -470,20 +491,17 @@ class SimulatedTeacher:
                         for (part1, cp1), (part2, cp2) in cp_pairs
                     ]
                     cp_pairs = [
-                        frozenset(((part1, cp1), (part2, cp2)))
-                        for (part1, cp1), (part2, cp2) in cp_pairs
-                        if part1 == part_src and part2 == part_tgt
+                        frozenset(((type1, cp1), (type2, cp2)))
+                        for (type1, cp1), (type2, cp2) in cp_pairs
+                        if type1 == type_src and type2 == type_tgt
                     ]
                     valid_pairs_achieved = set(cp_pairs) & set(valid_joins)
 
                     # Update ongoing execution state
                     sa_left = assem_st["left"]
                     sa_right = assem_st["right"]
-                    parts_left = subassems.pop(sa_left)
-                    parts_right = subassems.pop(sa_right)
-                    subassems[product_name] = parts_left | parts_right
-                    assem_st[src_side] = None
-                    assem_st[tgt_side] = product_name
+                    graph_left = subassems[sa_left]
+                    graph_right = subassems[sa_right]
 
                     # Interrupt if agent has assembled a pair of objects at incorrect
                     # contact point, which is determined by checking whether top 3
@@ -494,15 +512,11 @@ class SimulatedTeacher:
                         # Interrupt agent and undo the last join (by disassembling
                         # the product just assembled, at the exact same part pair)
                         if tgt_side == "left":
-                            takeaway_parts = parts_right
+                            takeaway_parts = list(graph_left)
                         else:
-                            takeaway_parts = parts_left
+                            takeaway_parts = list(graph_right)
                         response += [
                             ("generate", { "utterance": "Stop.", "pointing": {} }),
-                            ("generate", {
-                                "utterance": "What were you trying to join?",
-                                "pointing": {}
-                            }),
                             (f"disassemble_{direction.split('_')[-1]}", {
                                 "parameters": (
                                     f"str|{sa_left}", f"str|{sa_right}",
@@ -512,21 +526,74 @@ class SimulatedTeacher:
                                 )
                             })
                         ]
-                        assem_st["left"] = sa_left
-                        assem_st["right"] = sa_right
-                        subassems[sa_left] = parts_left
-                        subassems[sa_right] = parts_right
+                        if self.feedback_type == "bool":
+                            # Minimal help; no additional learning signal than the fact
+                            # that the undone pick-up action is invalid
+                            self.ongoing_demonstration = ("frag", [])
+                        elif self.feedback_type == "demo":
+                            # Language-less player type with assistance by demonstration;
+                            # sample a next valid join and proceed to demonstrate
+                            demo_segment = self._sample_demo_step()
+                            self.ongoing_demonstration = ("frag", demo_segment)
+                        else:
+                            # Languageful player types; directly inquire the intent
+                            # of the undone pick-up action
+                            assert self.feedback_type in ["label", "full"]
+                            response += [
+                                ("generate", {
+                                    "utterance": "What were you trying to join?",
+                                    "pointing": {}
+                                })
+                            ]
                         interrupted = True
                     else:
-                        # If join not invalid, check the join off the list by decrementing
-                        # count
-                        for (part1, _), (part2, _) in valid_pairs_achieved:
-                            pair = frozenset([part1, part2])
-                            assem_st["remaining_joins"][pair] -= 1
+                        # If join not invalid, update ongoing execution state
+                        assert len(valid_pairs_achieved) == 1
+                        pair_joined = list(valid_pairs_achieved)[0]
+                        cp_src = next(
+                            cp for part_type, cp in pair_joined if part_type == type_src
+                        )
+                        cp_tgt = next(
+                            cp for part_type, cp in pair_joined if part_type == type_tgt
+                        )
+                        del subassems[sa_left]; del subassems[sa_right]
+                        subassems[product_name] = nx.union(graph_left, graph_right)
+                        subassems[product_name].add_edge(
+                            part_src, part_tgt, contact={
+                                part_src: (type_src, cp_src), part_tgt: (type_tgt, cp_tgt)
+                            }
+                        )
+                        assem_st[src_side] = None
+                        assem_st[tgt_side] = product_name
+                        # Check the achieved join off the set
+                        assem_st["joins_remaining"] -= valid_pairs_achieved
 
                 if not interrupted:
                     # No interruption needs to be made, keep observing...
                     response.append(("generate", { "utterance": "# Observing", "pointing": {} }))
+
+            elif utt == "I cannot find a part I need on the table.":
+                # Agent has failed to ground an instance of some part type;
+                # however, due to lack of shared vocabulary, agent was not
+                # able to directly query whether an instance of the type exists
+                # on the table (which is guaranteed by design)
+
+                # Player type may be 'bool' or 'demo'
+                assert self.feedback_type in ["bool", "demo"]
+
+                # Whichever type it is, provide a partial demonstration, up to
+                # a next join valid in current progress
+                demo_segment = self._sample_demo_step()
+                self.ongoing_demonstration = ("frag", demo_segment)
+
+                # Notify agent that user will demonstrate a valid join
+                response.append((
+                    "generate",
+                    {
+                        "utterance": "I will demonstrate a valid join.",
+                        "pointing": {}
+                    }
+                ))
 
             elif utt.startswith("Is there a "):
                 # Agent has failed to ground an instance of some part type, which
@@ -540,11 +607,14 @@ class SimulatedTeacher:
                     for (supertype, inst), subtype in sampled_parts.items()
                     if queried_type == supertype or queried_type == subtype
                 ]
+                consumed_insts = [
+                    inst for sa_graph in subassems.values() for inst in sa_graph
+                    if len(sa_graph) > 1
+                ]
                 available_insts = [
-                    inst
-                    for inst in matching_insts
-                    if inst not in assem_st["aliases"].values()     # Never picked up
-                        or len(subassems[inst]) == 1                # Certified singleton
+                    inst for inst in matching_insts
+                    if inst not in consumed_insts or        # Not used in some subassembly, or
+                        len(subassems.get(inst, {})) == 1   # Picked up once but not consumed yet
                 ]
                 selected_inst = random.sample(available_insts, 1)[0]
 
@@ -617,530 +687,689 @@ class SimulatedTeacher:
 
         return response
 
+    def _sample_ASP(
+            self, goal_object, domain_knowledge, constraints, all_subtypes, num_distractors
+        ):
+        """
+        Helper method factored out for writing & running ASP program for controlled
+        sampling, subject to provided domain knowledge. (If some other person ever gets
+        to read this part, sorry in advance :s)
+        """
+        base_prg_str = "hasPart(O0, O2) :- hasPart(O0, O1), hasPart(O1, O2).\n"
 
-def _sample_ASP(
-        goal_object, domain_knowledge, constraints, all_subtypes, num_distractors, seed
-    ):
-    """
-    Helper method factored out for writing & running ASP program for controlled
-    sampling, subject to provided domain knowledge. (If some other person ever gets
-    to read this part, sorry in advance :s)
-    """
-    base_prg_str = "hasPart(O0, O2) :- hasPart(O0, O1), hasPart(O1, O2).\n"
+        # Add rules for covering whole-to-part derivations
+        pw_graph = domain_knowledge["part_whole"]
+        pw_rules = [(n, pw_graph.out_edges(n, data="count")) for n in pw_graph.nodes]
+        pw_rules = [(n, r) for n, r in pw_rules if len(r) > 0]
+        i = 0; occurring_subassemblies = set()
+        for hol, per_holonym in pw_rules:
+            for _, mer, count in per_holonym:
+                occurring_subassemblies.add(mer)
+                for _ in range(count):
+                    base_prg_str += f"{mer}(f_{i}(O)) :- {hol}(O).\n"
+                    base_prg_str += f"hasPart(O, f_{i}(O)) :- {hol}(O).\n"
+                    i += 1
 
-    # Add rules for covering whole-to-part derivations
-    pw_graph = domain_knowledge["part_whole"]
-    pw_rules = [(n, pw_graph.out_edges(n, data="count")) for n in pw_graph.nodes]
-    pw_rules = [(n, r) for n, r in pw_rules if len(r) > 0]
-    i = 0; occurring_subassemblies = set()
-    for hol, per_holonym in pw_rules:
-        for _, mer, count in per_holonym:
-            occurring_subassemblies.add(mer)
-            for _ in range(count):
-                base_prg_str += f"{mer}(f_{i}(O)) :- {hol}(O).\n"
-                base_prg_str += f"hasPart(O, f_{i}(O)) :- {hol}(O).\n"
-                i += 1
+        # Add rules for covering supertype-subtype relations and choices
+        tx_graph = domain_knowledge["taxonomy"]
+        tx_rules = [(n, tx_graph.out_edges(n)) for n in tx_graph.nodes]
+        tx_rules = [(n, r) for (n, r) in tx_rules if len(r) > 0]
+        for hyper, per_hypernym in tx_rules:
+            if hyper == "color": continue
 
-    # Add rules for covering supertype-subtype relations and choices
-    tx_graph = domain_knowledge["taxonomy"]
-    tx_rules = [(n, tx_graph.out_edges(n)) for n in tx_graph.nodes]
-    tx_rules = [(n, r) for (n, r) in tx_rules if len(r) > 0]
-    for hyper, per_hypernym in tx_rules:
-        if hyper == "color": continue
+            for _, hypo in per_hypernym:
+                base_prg_str += f"{hyper}(O) :- {hypo}(O).\n"
+            if hyper not in occurring_subassemblies: continue
 
-        for _, hypo in per_hypernym:
-            base_prg_str += f"{hyper}(O) :- {hypo}(O).\n"
-        if hyper not in occurring_subassemblies: continue
+            base_prg_str += "1{ "
+            base_prg_str += "; ".join(
+                f"{hypo}(O)" for _, hypo in per_hypernym
+                if not (hyper in all_subtypes and hypo not in all_subtypes[hyper])
+            )       # All possible subtype options that are valid (i.e., non-None)
+            base_prg_str += " }1 :- "
+            base_prg_str += f"{hyper}(O).\n"
 
-        base_prg_str += "1{ "
-        base_prg_str += "; ".join(
-            f"{hypo}(O)" for _, hypo in per_hypernym
-            if not (hyper in all_subtypes and hypo not in all_subtypes[hyper])
-        )       # All possible subtype options that are valid (i.e., non-None)
-        base_prg_str += " }1 :- "
-        base_prg_str += f"{hyper}(O).\n"
+        # Add rules for covering color choices for applicable parts
+        base_prg_str += "1{ hasColor(O, C) : color(C) }1 :- colored_part(O).\n"
+        base_prg_str += ". ".join(f"color({c})" for c in all_subtypes["color"]) + ".\n"
 
-    # Add rules for covering color choices for applicable parts
-    base_prg_str += "1{ hasColor(O, C) : color(C) }1 :- colored_part(O).\n"
-    base_prg_str += ". ".join(f"color({c})" for c in all_subtypes["color"]) + ".\n"
+        for supertype, subtypes in all_subtypes.items():
+            if supertype == "color": continue
 
-    for supertype, subtypes in all_subtypes.items():
-        if supertype == "color": continue
-
-        # Add integrity constraints for avoiding unavailable choices
-        # (after fixing subtypes in `build_truck_supertype` task)
-        base_prg_str += "1{ "
-        base_prg_str += "; ".join(
-            f"{subtype}(O)" for subtype in subtypes if subtype is not None
-        )
-        base_prg_str += " }1 :- "
-        base_prg_str += f"{supertype}(O).\n"
-
-        # Add rules for reifying selected part types
-        for subtype in subtypes:
-            if subtype is None: continue
-            base_prg_str += f"atomic(O, {subtype}) :- {subtype}(O).\n"
-        
-
-    # Add integrity constraints for filtering invalid combinations
-    for ci, (rule_type, scope_class, entry, _) in enumerate(constraints):
-        base_prg_str += f"rule({ci}).\n"
-        parts, attributes = entry
-
-        full_scope_str = f"{scope_class}(O), "
-        full_scope_str += ", ".join(f"{p}(O{i})" for i, p in enumerate(parts)) + ", "
-        full_scope_str += ", ".join(f"hasPart(O, O{i})" for i in range(len(parts)))
-        if len(parts) > 1:
-            obj_pairs = combinations(range(len(parts)), 2)
-            full_scope_str += ", "
-            full_scope_str += ", ".join(f"O{i} != O{j}" for i, j in obj_pairs)
-        base_prg_str += f"{rule_type}_applicable({ci}) :- {scope_class}(O).\n"
-
-        if attributes is None:
-            base_prg_str += f"exception_found({ci}) :- {full_scope_str}.\n"
-        else:
-            attr_args_str = ", ".join(f"O{a}" for a in range(len(parts)))
-            piece_strs = []
-
-            for attr, pol, arg_inds in attributes:
-                if attr == "_same_color":
-                    assert len(arg_inds) == 2
-                    piece_str = f"hasColor(O{arg_inds[0]}, C0), "
-                    piece_str += f"hasColor(O{arg_inds[1]}, C1), "
-                    piece_str += "C0 = C1" if pol else "C0 != C1"
-                else:
-                    piece_args_str = ", ".join(f"O{a}" for a in arg_inds)
-                    piece_str = "" if pol else "not "
-                    if attr in all_subtypes["color"]:
-                        piece_str += f"hasColor({piece_args_str}, {attr})"
-                    else:
-                        piece_str += f"{attr}({piece_args_str})"
-                piece_strs.append(piece_str)
-
-            match rule_type:
-                case "exists":
-                    base_prg_str += \
-                        ", ".join([f"case_found({ci}) :- {full_scope_str}"]+piece_strs) + ".\n"
-                case "forall":
-                    base_prg_str += \
-                        ", ".join([f"attr_{ci}({attr_args_str}) :- {full_scope_str}"]+piece_strs) + ".\n"
-                    base_prg_str += \
-                        f"exception_found({ci}) :- {full_scope_str}, not attr_{ci}({attr_args_str}).\n"
-                case _:
-                    raise ValueError("Invalid rule type")
-
-    # 'exists' rules are violated if required attribute case is not found; 'forall' rules
-    # if any exception to required attribute is found
-    base_prg_str += "rule_violated(R) :- rule(R), exists_applicable(R), not case_found(R).\n"
-    base_prg_str += "rule_violated(R) :- rule(R), forall_applicable(R), exception_found(R).\n"
-
-    # Control the number of rules to be violated (0 or 1) by an external query atom
-    base_prg_str += ":- violate_none, rule_violated(R).\n"
-    base_prg_str += ":- violate_one, not 1{ rule_violated(R) : rule(R) }1.\n"
-
-    # Finally add a grounded instance representing the whole truck sample
-    base_prg_str += f"{goal_object}(o).\n"
-
-    # Program fragment defining the external control atoms
-    base_prg_str += "#external violate_none.\n"
-    base_prg_str += "#external violate_one.\n"
-
-    ctl = Control(["--warn=none"])
-    ctl.configuration.solve.models = 0
-    ctl.configuration.solver.seed = seed
-    ctl.add("base", [], base_prg_str)
-    ctl.ground([("base", [])])
-
-    models = []
-    ctl.assign_external(Function("violate_none", []), True)
-    with ctl.solve(yield_=True) as solve_gen:
-        for m in solve_gen:
-            models.append(m.symbols(atoms=True))
-            if len(models) > 30000: break       # Should be enough...
-
-    # Randomly select a sampled model
-    sampled_model = random.sample(models, 1)[0]
-
-    # Inverse map from subtype to supertype
-    all_subtypes_inv_map = {
-        x: k for k, v in all_subtypes.items() for x in v if x is not None
-    }
-
-    # Filter out unnecessary atoms, to extract atomic parts and colors sampled
-    tgt_parts_by_fname = {}; tgt_colors_by_fname = {}
-    for atm in sampled_model:
-        # Collate part types first, indexing by skolem function name
-        if atm.name == "atomic":
-            tgt_parts_by_fname[atm.arguments[0].name] = (
-                atm.arguments[1].name, all_subtypes_inv_map[atm.arguments[1].name]
+            # Add integrity constraints for avoiding unavailable choices
+            # (after fixing subtypes in `build_truck_supertype` task)
+            base_prg_str += "1{ "
+            base_prg_str += "; ".join(
+                f"{subtype}(O)" for subtype in subtypes if subtype is not None
             )
-    for atm in sampled_model:
-        # Then fetch matching colors for colorable parts
-        if atm.name == "hasColor":
-            tgt_colors_by_fname[atm.arguments[0].name] = atm.arguments[1].name
+            base_prg_str += " }1 :- "
+            base_prg_str += f"{supertype}(O).\n"
 
-    # Group by part supertype
-    tgt_objs_grouped_by_supertype = {
-        k: sorted([f for f, _ in v], key=lambda x: int(x.replace("f_", "")))
-        for k, v in groupby(tgt_parts_by_fname.items(), key=lambda x: x[1][1])
-    }
+            # Add rules for reifying selected part types
+            for subtype in subtypes:
+                if subtype is None: continue
+                base_prg_str += f"atomic(O, {subtype}) :- {subtype}(O).\n"
+            
 
-    if num_distractors > 0:
-        # For distractors, we want to sample additional part groups that violate
-        # exactly one of the constraints
-        ctl.assign_external(Function("violate_none", []), False)
-        ctl.assign_external(Function("violate_one", []), True)
+        # Add integrity constraints for filtering invalid combinations
+        for ci, (rule_type, scope_class, entry, _) in enumerate(constraints):
+            base_prg_str += f"rule({ci}).\n"
+            parts, attributes = entry
 
-        # Part groups to consider resampling as distractors
-        part_groups_by_type = [
-            [["cabin"]],
-            [["load"]],
-            [["chassis_center"]],
-            [["fl_fender", "fr_fender", "bl_fender", "br_fender"], ["wheel"]]
-        ]
-        part_groups_by_obj = [
-            [
-                sum([tgt_objs_grouped_by_supertype[p] for p in group], [])
-                for group in part_supertypes
-            ]
-            for part_supertypes in part_groups_by_type
-        ]
-        part_specs = {
-            obj: (tgt_parts_by_fname[obj][0], tgt_colors_by_fname.get(obj))
-            for groups in part_groups_by_obj
-            for group in groups
-            for obj in group
+            full_scope_str = f"{scope_class}(O), "
+            full_scope_str += ", ".join(f"{p}(O{i})" for i, p in enumerate(parts)) + ", "
+            full_scope_str += ", ".join(f"hasPart(O, O{i})" for i in range(len(parts)))
+            if len(parts) > 1:
+                obj_pairs = combinations(range(len(parts)), 2)
+                full_scope_str += ", "
+                full_scope_str += ", ".join(f"O{i} != O{j}" for i, j in obj_pairs)
+            base_prg_str += f"{rule_type}_applicable({ci}) :- {scope_class}(O).\n"
+
+            if attributes is None:
+                base_prg_str += f"exception_found({ci}) :- {full_scope_str}.\n"
+            else:
+                attr_args_str = ", ".join(f"O{a}" for a in range(len(parts)))
+                piece_strs = []
+
+                for attr, pol, arg_inds in attributes:
+                    if attr == "_same_color":
+                        assert len(arg_inds) == 2
+                        piece_str = f"hasColor(O{arg_inds[0]}, C0), "
+                        piece_str += f"hasColor(O{arg_inds[1]}, C1), "
+                        piece_str += "C0 = C1" if pol else "C0 != C1"
+                    else:
+                        piece_args_str = ", ".join(f"O{a}" for a in arg_inds)
+                        piece_str = "" if pol else "not "
+                        if attr in all_subtypes["color"]:
+                            piece_str += f"hasColor({piece_args_str}, {attr})"
+                        else:
+                            piece_str += f"{attr}({piece_args_str})"
+                    piece_strs.append(piece_str)
+
+                match rule_type:
+                    case "exists":
+                        base_prg_str += \
+                            ", ".join([f"case_found({ci}) :- {full_scope_str}"]+piece_strs) + ".\n"
+                    case "forall":
+                        base_prg_str += \
+                            ", ".join([f"attr_{ci}({attr_args_str}) :- {full_scope_str}"]+piece_strs) + ".\n"
+                        base_prg_str += \
+                            f"exception_found({ci}) :- {full_scope_str}, not attr_{ci}({attr_args_str}).\n"
+                    case _:
+                        raise ValueError("Invalid rule type")
+
+        # 'exists' rules are violated if required attribute case is not found; 'forall' rules
+        # if any exception to required attribute is found
+        base_prg_str += "rule_violated(R) :- rule(R), exists_applicable(R), not case_found(R).\n"
+        base_prg_str += "rule_violated(R) :- rule(R), forall_applicable(R), exception_found(R).\n"
+
+        # Control the number of rules to be violated (0 or 1) by an external query atom
+        base_prg_str += ":- violate_none, rule_violated(R).\n"
+        base_prg_str += ":- violate_one, not 1{ rule_violated(R) : rule(R) }1.\n"
+
+        # Finally add a grounded instance representing the whole truck sample
+        base_prg_str += f"{goal_object}(o).\n"
+
+        # Program fragment defining the external control atoms
+        base_prg_str += "#external violate_none.\n"
+        base_prg_str += "#external violate_one.\n"
+
+        ctl = Control(["--warn=none"])
+        ctl.configuration.solve.models = 0
+        ctl.configuration.solver.seed = self.cfg.seed
+        ctl.add("base", [], base_prg_str)
+        ctl.ground([("base", [])])
+
+        models = []
+        ctl.assign_external(Function("violate_none", []), True)
+        with ctl.solve(yield_=True) as solve_gen:
+            for m in solve_gen:
+                models.append(m.symbols(atoms=True))
+                if len(models) > 30000: break       # Should be enough...
+
+        # Randomly select a sampled model
+        sampled_model = random.sample(models, 1)[0]
+
+        # Inverse map from subtype to supertype
+        all_subtypes_inv_map = {
+            x: k for k, v in all_subtypes.items() for x in v if x is not None
         }
 
-        # Remove already sampled parts in this group so that exact same part
-        # specs (part type and color if applicable) cannot be sampled again,
-        # while fixing all other parts as identical; implement as additional
-        # clingo program fragment
-        sampled_distractor_groups = []
-        dtr_parts_by_fname = {}; dtr_colors_by_fname = {}
+        # Filter out unnecessary atoms, to extract atomic parts and colors sampled
+        tgt_parts_by_fname = {}; tgt_colors_by_fname = {}
+        for atm in sampled_model:
+            # Collate part types first, indexing by skolem function name
+            if atm.name == "atomic":
+                tgt_parts_by_fname[atm.arguments[0].name] = (
+                    atm.arguments[1].name, all_subtypes_inv_map[atm.arguments[1].name]
+                )
+        for atm in sampled_model:
+            # Then fetch matching colors for colorable parts
+            if atm.name == "hasColor":
+                tgt_colors_by_fname[atm.arguments[0].name] = atm.arguments[1].name
 
-        i = 0; sample_pool = list(range(len(part_groups_by_obj)))
-        while len(sampled_distractor_groups) < num_distractors:
-            if len(sample_pool) == 0:
-                # No more distractor sampling possible, terminate here
-                break
+        # Group by part supertype
+        tgt_objs_grouped_by_supertype = {
+            k: sorted([f for f, _ in v], key=lambda x: int(x.replace("f_", "")))
+            for k, v in groupby(tgt_parts_by_fname.items(), key=lambda x: x[1][1])
+        }
 
-            gi = random.sample(sample_pool, 1)[0]
-            sample_pool.remove(gi)
+        if num_distractors > 0:
+            # For distractors, we want to sample additional part groups that violate
+            # exactly one of the constraints
+            ctl.assign_external(Function("violate_none", []), False)
+            ctl.assign_external(Function("violate_one", []), True)
 
-            # Program fragment representing additional temporary constraints
-            alt_prg_str = f"#external active_{i}.\n"
-
-            # Ban current specs of the resampling target group
-            for group in part_groups_by_obj[gi]:
-                for obj in group:
-                    if tgt_parts_by_fname[obj][1] == "wheel":
-                        # ... yet allow resampling of wheels, many of which could
-                        # be needed
-                        continue
-
-                    part_type_str = f"{part_specs[obj][0]}(O)"
-                    part_color_str = "" if part_specs[obj][1] is None \
-                        else f", hasColor(O, {part_specs[obj][1]})"
-                    alt_prg_str += f":- {part_type_str}{part_color_str}, active_{i}.\n"
-
-            # Enforce current specs for the remainder
-            piece_strs = []; oi = 0
-            for gj, groups in enumerate(part_groups_by_obj):
-                if gi == gj: continue
-
-                for group in groups:
-                    for obj in group:
-                        part_type_str = f"{part_specs[obj][0]}(O{oi})"
-                        part_color_str = "" if part_specs[obj][1] is None \
-                            else f", hasColor(O{oi}, {part_specs[obj][1]})"
-
-                        piece_strs.append(part_type_str + part_color_str)
-                        oi += 1
-
-            piece_strs += [f"O{oi} != O{oj}" for oi, oj in combinations(range(oi), 2)]
-
-            alt_prg_str += f"remainder_preserved_{i} :- "
-            alt_prg_str += ", ".join(piece_strs)
-            alt_prg_str += f", active_{i}.\n"
-
-            alt_prg_str += f":- not remainder_preserved_{i}, active_{i}.\n"
-
-            # Manage solver control by appropriate processing of external atoms and
-            # grounding
-            if i > 0:
-                ctl.release_external(Function(f"active_{i-1}", []))
-                ctl.cleanup()
-            ctl.add(f"distractor_sampling_{i}", [], alt_prg_str)
-            ctl.ground([(f"distractor_sampling_{i}", [])])
-            ctl.assign_external(Function(f"active_{i}", []), True)
-
-            models = []
-            with ctl.solve(yield_=True) as solve_gen:
-                for m in solve_gen:
-                    if len(models) > 1000: break
-                    models.append(m.symbols(atoms=True))
-
-            if len(models) == 0:
-                # No possible sampling of distractor that violate exactly one rule
-                i += 1
-                continue
-
-            # Some rules have more violating distractor samples than others; sample
-            # by rule-basis, not model-basis
-            violated_constraints = [
-                [atm.arguments[0].number for atm in m if atm.name == "rule_violated"][0]
-                for m in models
+            # Part groups to consider resampling as distractors
+            part_groups_by_type = [
+                [["cabin"]],
+                [["load"]],
+                [["chassis_center"]],
+                [["fl_fender", "fr_fender", "bl_fender", "br_fender"], ["wheel"]]
             ]
-            model_inds_by_constraint = {
-                ci: [mi for mi, cj in enumerate(violated_constraints) if ci==cj]
-                for ci in range(len(constraints))
+            part_groups_by_obj = [
+                [
+                    sum([tgt_objs_grouped_by_supertype[p] for p in group], [])
+                    for group in part_supertypes
+                ]
+                for part_supertypes in part_groups_by_type
+            ]
+            part_specs = {
+                obj: (tgt_parts_by_fname[obj][0], tgt_colors_by_fname.get(obj))
+                for groups in part_groups_by_obj
+                for group in groups
+                for obj in group
             }
-            sampled_violated_constraint = random.sample([
-                ci for ci, (_, _, _, can_violate) in enumerate(constraints)
-                if can_violate and len(model_inds_by_constraint[ci]) > 0
-            ], 1)[0]
-            sampled_model = random.sample(
-                model_inds_by_constraint[sampled_violated_constraint]
-            , 1)[0]
-            sampled_model = models[sampled_model]
 
-            # Filter out unnecessary atoms, to extract atomic parts and colors sampled
-            types_to_collect = sum(part_groups_by_type[gi], [])
-            for atm in sampled_model:
-                # Collate part types in resampled group
-                if atm.name == "atomic":
-                    part_supertype = all_subtypes_inv_map[atm.arguments[1].name]
-                    if part_supertype in types_to_collect:
-                        dtr_parts_by_fname[atm.arguments[0].name] = (
-                            atm.arguments[1].name, part_supertype
-                        )
-            for atm in sampled_model:
-                # Then fetch matching colors for colorable parts
-                if atm.name == "hasColor" and atm.arguments[0].name in dtr_parts_by_fname:
-                    dtr_colors_by_fname[atm.arguments[0].name] = atm.arguments[1].name
+            # Remove already sampled parts in this group so that exact same part
+            # specs (part type and color if applicable) cannot be sampled again,
+            # while fixing all other parts as identical; implement as additional
+            # clingo program fragment
+            sampled_distractor_groups = []
+            dtr_parts_by_fname = {}; dtr_colors_by_fname = {}
 
-            i += 1
-            sampled_distractor_groups += part_groups_by_type[gi]
+            i = 0; sample_pool = list(range(len(part_groups_by_obj)))
+            while len(sampled_distractor_groups) < num_distractors:
+                if len(sample_pool) == 0:
+                    # No more distractor sampling possible, terminate here
+                    break
 
-        dtr_objs_grouped_by_supertype = defaultdict(list)
-        for obj, (_, part_supertype) in dtr_parts_by_fname.items():
-            dtr_objs_grouped_by_supertype[part_supertype].append(obj)
-        dtr_objs_grouped_by_supertype = dict(dtr_objs_grouped_by_supertype)
+                gi = random.sample(sample_pool, 1)[0]
+                sample_pool.remove(gi)
 
-    # Organize into final return value dict
-    sampled_inits = {}
-    for obj, (part_subtype, part_supertype) in tgt_parts_by_fname.items():
-        oi = tgt_objs_grouped_by_supertype[part_supertype].index(obj)
-        sampled_inits[f"{part_supertype}/type/t{oi}"] = \
-            all_subtypes[part_supertype].index(part_subtype)
+                # Program fragment representing additional temporary constraints
+                alt_prg_str = f"#external active_{i}.\n"
 
-        if obj in tgt_colors_by_fname:
-            sampled_inits[f"{part_supertype}/color/t{oi}"] = \
-                all_subtypes["color"].index(tgt_colors_by_fname[obj])
+                # Ban current specs of the resampling target group
+                for group in part_groups_by_obj[gi]:
+                    for obj in group:
+                        if tgt_parts_by_fname[obj][1] == "wheel":
+                            # ... yet allow resampling of wheels, many of which could
+                            # be needed
+                            continue
 
-    if num_distractors > 0:
-        for i in range(min(num_distractors, len(sampled_distractor_groups))):
-            dtr_group = sampled_distractor_groups[i]
-            for part_supertype in dtr_group:
-                for oi, obj in enumerate(dtr_objs_grouped_by_supertype[part_supertype]):
-                    part_subtype = dtr_parts_by_fname[obj][0]
-                    sampled_inits[f"{part_supertype}/type/d{oi}"] = \
-                        all_subtypes[part_supertype].index(part_subtype)
+                        part_type_str = f"{part_specs[obj][0]}(O)"
+                        part_color_str = "" if part_specs[obj][1] is None \
+                            else f", hasColor(O, {part_specs[obj][1]})"
+                        alt_prg_str += f":- {part_type_str}{part_color_str}, active_{i}.\n"
 
-                    if obj in dtr_colors_by_fname:
-                        sampled_inits[f"{part_supertype}/color/d{oi}"] = \
-                            all_subtypes["color"].index(dtr_colors_by_fname[obj])
+                # Enforce current specs for the remainder
+                piece_strs = []; oi = 0
+                for gj, groups in enumerate(part_groups_by_obj):
+                    if gi == gj: continue
 
-    return sampled_inits
+                    for group in groups:
+                        for obj in group:
+                            part_type_str = f"{part_specs[obj][0]}(O{oi})"
+                            part_color_str = "" if part_specs[obj][1] is None \
+                                else f", hasColor(O{oi}, {part_specs[obj][1]})"
 
+                            piece_strs.append(part_type_str + part_color_str)
+                            oi += 1
 
-def _sample_demo_plan(sampled_parts):
-    """
-    Helper method factored out for sampling a valid assembly plan that builds
-    a valid instance of truck structure. Since we (and the teacher) already know
-    the desired structure, let's specify a partial order plan by a set of subgoals
-    with precedence constraints and sample a valid instantiation accordingly.
-    """
-    # Represent partial plans with (action sequence, preconditions, name of resultant
-    # subassembly) tuples
-    partial_plan = [
-        # Front-left fender-wheel-bolt unit
-        (
-            [
-                ("pick_up_left", ("fl_fender", "GT")),
-                ("pick_up_right", ("wheel", "GT")),
-                ("assemble_right_to_left", ("fl_fw", "fl_fender/wheel", "wheel/bolt")),
-                ("pick_up_right", ("bolt", "GT")),
-                ("assemble_right_to_left", ("fl_fw_unit", "fl_fender/wheel", "bolt/bolt")),
-                ("drop_left", ())
-            ],
-            [],
-            "fl_fw_unit"
-        ),
+                piece_strs += [f"O{oi} != O{oj}" for oi, oj in combinations(range(oi), 2)]
 
-        # Front-right fender-wheel-bolt unit
-        (
-            [
-                ("pick_up_left", ("fr_fender", "GT")),
-                ("pick_up_right", ("wheel", "GT")),
-                ("assemble_right_to_left", ("fr_fw", "fr_fender/wheel", "wheel/bolt")),
-                ("pick_up_right", ("bolt", "GT")),
-                ("assemble_right_to_left", ("fr_fw_unit", "fr_fender/wheel", "bolt/bolt")),
-                ("drop_left", ())
-            ],
-            [],
-            "fr_fw_unit"
-        ),
+                alt_prg_str += f"remainder_preserved_{i} :- "
+                alt_prg_str += ", ".join(piece_strs)
+                alt_prg_str += f", active_{i}.\n"
 
-        # Back-left fender-wheel-bolt unit
-        (
-            [
-                ("pick_up_left", ("bl_fender", "GT")),
-                ("pick_up_right", ("wheel", "GT")),
-                ("assemble_right_to_left", ("bl_fw", "bl_fender/wheel", "wheel/bolt")),
-                ("pick_up_right", ("bolt", "GT")),
-                ("assemble_right_to_left", ("bl_fw_unit", "bl_fender/wheel", "bolt/bolt")),
-                ("drop_left", ())
-            ],
-            [],
-            "bl_fw_unit"
-        ),
+                alt_prg_str += f":- not remainder_preserved_{i}, active_{i}.\n"
 
-        # Back-right fender-wheel-bolt unit
-        (
-            [
-                ("pick_up_left", ("br_fender", "GT")),
-                ("pick_up_right", ("wheel", "GT")),
-                ("assemble_right_to_left", ("br_fw", "br_fender/wheel", "wheel/bolt")),
-                ("pick_up_right", ("bolt", "GT")),
-                ("assemble_right_to_left", ("br_fw_unit", "br_fender/wheel", "bolt/bolt")),
-                ("drop_left", ())
-            ],
-            [],
-            "br_fw_unit"
-        ),
+                # Manage solver control by appropriate processing of external atoms and
+                # grounding
+                if i > 0:
+                    ctl.release_external(Function(f"active_{i-1}", []))
+                    ctl.cleanup()
+                ctl.add(f"distractor_sampling_{i}", [], alt_prg_str)
+                ctl.ground([(f"distractor_sampling_{i}", [])])
+                ctl.assign_external(Function(f"active_{i}", []), True)
 
-        # Truck front
-        (
-            [
-                ("pick_up_left", ("chassis_front", "GT")),
-                ("pick_up_right", ("cabin", "GT")),
-                ("assemble_right_to_left", ("cf0", "chassis_front/cabin1", "cabin/front1")),
-                ("pick_up_right", ("bolt", "GT")),
-                ("assemble_right_to_left", ("cf1", "chassis_front/cabin1", "bolt/bolt")),
-                ("pick_up_right", ("bolt", "GT")),
-                ("assemble_right_to_left", ("cf2", "chassis_front/cabin2", "bolt/bolt")),
-                ("pick_up_right", ("fl_fw_unit", "SA")),
-                ("assemble_right_to_left", ("cfl", "chassis_front/lfw", "fl_fender/wheel")),
-                ("pick_up_right", ("fr_fw_unit", "SA")),
-                ("assemble_right_to_left", ("truck_front", "chassis_front/rfw", "fr_fender/wheel")),
-                ("drop_left", ())
-            ],
-            ["fl_fw_unit", "fr_fw_unit"],
-            "truck_front"
-        ),
+                models = []
+                with ctl.solve(yield_=True) as solve_gen:
+                    for m in solve_gen:
+                        if len(models) > 1000: break
+                        models.append(m.symbols(atoms=True))
 
-        # Truck back
-        (
-            [
-                ("pick_up_left", ("chassis_back", "GT")),
-                ("pick_up_right", ("load", "GT")),
-                ("assemble_right_to_left", ("lb0", "chassis_back/load", "load/back")),
-                ("pick_up_right", ("bolt", "GT")),
-                ("assemble_right_to_left", ("lb1", "chassis_back/load", "bolt/bolt")),
-                ("pick_up_right", ("bl_fw_unit", "SA")),
-                ("assemble_right_to_left", ("lb2", "chassis_back/lfw", "bl_fender/wheel")),
-                ("pick_up_right", ("br_fw_unit", "SA")),
-                ("assemble_right_to_left", ("truck_back", "chassis_back/rfw", "br_fender/wheel")),
-                ("drop_left", ())
-            ],
-            ["bl_fw_unit", "br_fw_unit"],
-            "truck_back"
-        ),
+                if len(models) == 0:
+                    # No possible sampling of distractor that violate exactly one rule
+                    i += 1
+                    continue
 
-        # Whole truck
-        (
-            [
-                ("pick_up_left", ("truck_front", "SA")),
-                ("pick_up_right", ("chassis_center", "GT")),
-                ("assemble_right_to_left", ("tfc0", "chassis_front/center", "chassis_center/front")),
-                ("pick_up_right", ("bolt", "GT")),
-                ("assemble_right_to_left", ("tfc1", "chassis_front/center", "bolt/bolt")),
-                ("pick_up_right", ("truck_back", "SA")),
-                ("assemble_right_to_left", ("tfcb", "chassis_center/back", "chassis_back/center")),
-                ("pick_up_right", ("bolt", "GT")),
-                ("assemble_right_to_left", ("truck", "chassis_center/back", "bolt/bolt")),
-                ("drop_left", ())
-            ],
-            ["truck_front", "truck_back"],
-            "truck"
-        )
-    ]
+                # Some rules have more violating distractor samples than others; sample
+                # by rule-basis, not model-basis
+                violated_constraints = [
+                    [atm.arguments[0].number for atm in m if atm.name == "rule_violated"][0]
+                    for m in models
+                ]
+                model_inds_by_constraint = {
+                    ci: [mi for mi, cj in enumerate(violated_constraints) if ci==cj]
+                    for ci in range(len(constraints))
+                }
+                sampled_violated_constraint = random.sample([
+                    ci for ci, (_, _, _, can_violate) in enumerate(constraints)
+                    if can_violate and len(model_inds_by_constraint[ci]) > 0
+                ], 1)[0]
+                sampled_model = random.sample(
+                    model_inds_by_constraint[sampled_violated_constraint]
+                , 1)[0]
+                sampled_model = models[sampled_model]
 
-    # Now sample to instantiate the partial plan
-    plan = []; introduced_subtypes = set()
-    atomic_supertypes = {k[0] for k in sampled_parts}
-    while len(partial_plan) > 0:
-        # Sample (the index of) a subgoal whose preconditions are cleared
-        subgoal_ind = random.sample([
-            i for i, (_, preconditions, _) in enumerate(partial_plan)
-            if len(preconditions) == 0
-        ], 1)[0]
+                # Filter out unnecessary atoms, to extract atomic parts and colors sampled
+                types_to_collect = sum(part_groups_by_type[gi], [])
+                for atm in sampled_model:
+                    # Collate part types in resampled group
+                    if atm.name == "atomic":
+                        part_supertype = all_subtypes_inv_map[atm.arguments[1].name]
+                        if part_supertype in types_to_collect:
+                            dtr_parts_by_fname[atm.arguments[0].name] = (
+                                atm.arguments[1].name, part_supertype
+                            )
+                for atm in sampled_model:
+                    # Then fetch matching colors for colorable parts
+                    if atm.name == "hasColor" and atm.arguments[0].name in dtr_parts_by_fname:
+                        dtr_colors_by_fname[atm.arguments[0].name] = atm.arguments[1].name
 
-        act_seq, _, result = partial_plan.pop(subgoal_ind)
+                i += 1
+                sampled_distractor_groups += part_groups_by_type[gi]
 
-        # For manual check of fender-wheel compatibility...
-        if result.endswith("_fw_unit"):
-            large_wheel_needed = sampled_parts[(f"{result[:2]}_fender", 0)].startswith("large")
-        else:
-            large_wheel_needed = None
+            dtr_objs_grouped_by_supertype = defaultdict(list)
+            for obj, (_, part_supertype) in dtr_parts_by_fname.items():
+                dtr_objs_grouped_by_supertype[part_supertype].append(obj)
+            dtr_objs_grouped_by_supertype = dict(dtr_objs_grouped_by_supertype)
 
-        # Each object argument of pick_up_left/Right arguments in the action
-        # sequence is somewhat lifted, as they only specify type; 'ground'
-        # them by sampling from existing part instances, then append to fully
-        # instantiated plan
-        for action in act_seq:
-            if action[0].startswith("pick_up") and action[1][0] in atomic_supertypes:
-                compatible_parts = []
-                for instance, subtype in sampled_parts.items():
-                    if instance[0] != action[1][0]: continue
-                    if action[1][0] == "wheel" and large_wheel_needed is not None:
-                        if subtype != "large_wheel" and large_wheel_needed: continue
-                        if subtype == "large_wheel" and not large_wheel_needed: continue
+        # Organize into final return value dict
+        sampled_inits = {}
+        for obj, (part_subtype, part_supertype) in tgt_parts_by_fname.items():
+            oi = tgt_objs_grouped_by_supertype[part_supertype].index(obj)
+            sampled_inits[f"{part_supertype}/type/t{oi}"] = \
+                all_subtypes[part_supertype].index(part_subtype)
 
-                    compatible_parts.append(instance)
+            if obj in tgt_colors_by_fname:
+                sampled_inits[f"{part_supertype}/color/t{oi}"] = \
+                    all_subtypes["color"].index(tgt_colors_by_fname[obj])
 
-                instance = random.sample(compatible_parts, 1)[0]
-                grounded_action = (action[0], (f"t_{instance[0]}_{instance[1]}", action[1][1]))
-                subtype = sampled_parts.pop(instance)
+        if num_distractors > 0:
+            for i in range(min(num_distractors, len(sampled_distractor_groups))):
+                dtr_group = sampled_distractor_groups[i]
+                for part_supertype in dtr_group:
+                    for oi, obj in enumerate(dtr_objs_grouped_by_supertype[part_supertype]):
+                        part_subtype = dtr_parts_by_fname[obj][0]
+                        sampled_inits[f"{part_supertype}/type/d{oi}"] = \
+                            all_subtypes[part_supertype].index(part_subtype)
 
-                plan.append(grounded_action)
+                        if obj in dtr_colors_by_fname:
+                            sampled_inits[f"{part_supertype}/color/d{oi}"] = \
+                                all_subtypes["color"].index(dtr_colors_by_fname[obj])
 
-                # Interleave the sampled plan with 'inspect~' actions to allow 3D scanning
-                # of newly introduced parts, for each first occurrence of pick_up~ action
-                # involving a part subtype. Note that this implies any pick_up~ action not
-                # followed by an inspect~ action involves a part subtype that is already
-                # introduced before in a previously executed pick_up~ action.
-                if subtype not in introduced_subtypes:
-                    introduced_subtypes.add(subtype)
-                    hand = "left" if action[0].endswith("left") else "right"
-                    plan += [
-                        (f"inspect_{hand}", (f"t_{instance[0]}_{instance[1]}", i))
-                        for i in range(41)
-                    ]
+        return sampled_inits
 
-            else:
-                plan.append(action)
+    def _sample_demo_plan(self):
+        """
+        Helper method factored out for sampling a valid assembly plan that builds
+        a valid instance of truck structure. Since we (and the teacher) already know
+        the desired structure, let's specify a partial order plan by a set of subgoals
+        with precedence constraints and sample a valid instantiation accordingly.
+        """
+        sampled_parts = copy.deepcopy(self.current_episode_record["sampled_parts"])
 
-        # Remove the resultant subassembly from the preconditions of the
-        # remaining subgoals in partial_plan
+        # Represent partial plans with (action sequence, preconditions, name of resultant
+        # subassembly) tuples
         partial_plan = [
-            (subgoal[0], [cond for cond in subgoal[1] if cond != result], subgoal[2])
-            for subgoal in partial_plan
+            # Front-left fender-wheel-bolt unit
+            (
+                [
+                    ("pick_up_left", ("fl_fender", "GT")),
+                    ("pick_up_right", ("wheel", "GT")),
+                    ("assemble_right_to_left", ("fl_fw", "fl_fender/wheel", "wheel/bolt")),
+                    ("pick_up_right", ("bolt", "GT")),
+                    ("assemble_right_to_left", ("fl_fw_unit", "fl_fender/wheel", "bolt/bolt")),
+                    ("drop_left", ())
+                ],
+                [],
+                "fl_fw_unit"
+            ),
+
+            # Front-right fender-wheel-bolt unit
+            (
+                [
+                    ("pick_up_left", ("fr_fender", "GT")),
+                    ("pick_up_right", ("wheel", "GT")),
+                    ("assemble_right_to_left", ("fr_fw", "fr_fender/wheel", "wheel/bolt")),
+                    ("pick_up_right", ("bolt", "GT")),
+                    ("assemble_right_to_left", ("fr_fw_unit", "fr_fender/wheel", "bolt/bolt")),
+                    ("drop_left", ())
+                ],
+                [],
+                "fr_fw_unit"
+            ),
+
+            # Back-left fender-wheel-bolt unit
+            (
+                [
+                    ("pick_up_left", ("bl_fender", "GT")),
+                    ("pick_up_right", ("wheel", "GT")),
+                    ("assemble_right_to_left", ("bl_fw", "bl_fender/wheel", "wheel/bolt")),
+                    ("pick_up_right", ("bolt", "GT")),
+                    ("assemble_right_to_left", ("bl_fw_unit", "bl_fender/wheel", "bolt/bolt")),
+                    ("drop_left", ())
+                ],
+                [],
+                "bl_fw_unit"
+            ),
+
+            # Back-right fender-wheel-bolt unit
+            (
+                [
+                    ("pick_up_left", ("br_fender", "GT")),
+                    ("pick_up_right", ("wheel", "GT")),
+                    ("assemble_right_to_left", ("br_fw", "br_fender/wheel", "wheel/bolt")),
+                    ("pick_up_right", ("bolt", "GT")),
+                    ("assemble_right_to_left", ("br_fw_unit", "br_fender/wheel", "bolt/bolt")),
+                    ("drop_left", ())
+                ],
+                [],
+                "br_fw_unit"
+            ),
+
+            # Truck front
+            (
+                [
+                    ("pick_up_left", ("chassis_front", "GT")),
+                    ("pick_up_right", ("cabin", "GT")),
+                    ("assemble_right_to_left", ("cf0", "chassis_front/cabin1", "cabin/front1")),
+                    ("pick_up_right", ("bolt", "GT")),
+                    ("assemble_right_to_left", ("cf1", "chassis_front/cabin1", "bolt/bolt")),
+                    ("pick_up_right", ("bolt", "GT")),
+                    ("assemble_right_to_left", ("cf2", "chassis_front/cabin2", "bolt/bolt")),
+                    ("pick_up_right", ("fl_fw_unit", "SA")),
+                    ("assemble_right_to_left", ("cfl", "chassis_front/lfw", "fl_fender/wheel")),
+                    ("pick_up_right", ("fr_fw_unit", "SA")),
+                    ("assemble_right_to_left", ("truck_front", "chassis_front/rfw", "fr_fender/wheel")),
+                    ("drop_left", ())
+                ],
+                ["fl_fw_unit", "fr_fw_unit"],
+                "truck_front"
+            ),
+
+            # Truck back
+            (
+                [
+                    ("pick_up_left", ("chassis_back", "GT")),
+                    ("pick_up_right", ("load", "GT")),
+                    ("assemble_right_to_left", ("lb0", "chassis_back/load", "load/back")),
+                    ("pick_up_right", ("bolt", "GT")),
+                    ("assemble_right_to_left", ("lb1", "chassis_back/load", "bolt/bolt")),
+                    ("pick_up_right", ("bl_fw_unit", "SA")),
+                    ("assemble_right_to_left", ("lb2", "chassis_back/lfw", "bl_fender/wheel")),
+                    ("pick_up_right", ("br_fw_unit", "SA")),
+                    ("assemble_right_to_left", ("truck_back", "chassis_back/rfw", "br_fender/wheel")),
+                    ("drop_left", ())
+                ],
+                ["bl_fw_unit", "br_fw_unit"],
+                "truck_back"
+            ),
+
+            # Whole truck
+            (
+                [
+                    ("pick_up_left", ("truck_front", "SA")),
+                    ("pick_up_right", ("chassis_center", "GT")),
+                    ("assemble_right_to_left", ("tfc0", "chassis_front/center", "chassis_center/front")),
+                    ("pick_up_right", ("bolt", "GT")),
+                    ("assemble_right_to_left", ("tfc1", "chassis_front/center", "bolt/bolt")),
+                    ("pick_up_right", ("truck_back", "SA")),
+                    ("assemble_right_to_left", ("tfcb", "chassis_center/back", "chassis_back/center")),
+                    ("pick_up_right", ("bolt", "GT")),
+                    ("assemble_right_to_left", ("truck", "chassis_center/back", "bolt/bolt")),
+                    ("drop_left", ())
+                ],
+                ["truck_front", "truck_back"],
+                "truck"
+            )
         ]
 
-    # All sampled parts that build target object are used
-    assert len(sampled_parts) == 0
+        # Now sample to instantiate the partial plan
+        plan = []; introduced_subtypes = set()
+        atomic_supertypes = {k[0] for k in sampled_parts}
+        while len(partial_plan) > 0:
+            # Sample (the index of) a subgoal whose preconditions are cleared
+            subgoal_ind = random.sample([
+                i for i, (_, preconditions, _) in enumerate(partial_plan)
+                if len(preconditions) == 0
+            ], 1)[0]
 
-    return plan
+            act_seq, _, result = partial_plan.pop(subgoal_ind)
+
+            # For manual check of fender-wheel compatibility...
+            if result.endswith("_fw_unit"):
+                large_wheel_needed = sampled_parts[(f"{result[:2]}_fender", 0)].startswith("large")
+            else:
+                large_wheel_needed = None
+
+            # Each object argument of pick_up_left/Right arguments in the action
+            # sequence is somewhat lifted, as they only specify type; 'ground'
+            # them by sampling from existing part instances, then append to fully
+            # instantiated plan
+            for action in act_seq:
+                if action[0].startswith("pick_up") and action[1][0] in atomic_supertypes:
+                    compatible_parts = []
+                    for instance, subtype in sampled_parts.items():
+                        if instance[0] != action[1][0]: continue
+                        if action[1][0] == "wheel" and large_wheel_needed is not None:
+                            if subtype != "large_wheel" and large_wheel_needed: continue
+                            if subtype == "large_wheel" and not large_wheel_needed: continue
+
+                        compatible_parts.append(instance)
+
+                    instance = random.sample(compatible_parts, 1)[0]
+                    grounded_action = (action[0], (f"t_{instance[0]}_{instance[1]}", action[1][1]))
+                    subtype = sampled_parts.pop(instance)
+
+                    plan.append(grounded_action)
+
+                    # Interleave the sampled plan with 'inspect~' actions to allow 3D scanning
+                    # of newly introduced parts, for each first occurrence of pick_up~ action
+                    # involving a part subtype. Note that this implies any pick_up~ action not
+                    # followed by an inspect~ action involves a part subtype that is already
+                    # introduced before in a previously executed pick_up~ action.
+                    if subtype not in introduced_subtypes:
+                        introduced_subtypes.add(subtype)
+                        hand = "left" if action[0].endswith("left") else "right"
+                        plan += [
+                            (f"inspect_{hand}", (f"t_{instance[0]}_{instance[1]}", i))
+                            for i in range(41)
+                        ]
+
+                else:
+                    plan.append(action)
+
+            # Remove the resultant subassembly from the preconditions of the
+            # remaining subgoals in partial_plan
+            partial_plan = [
+                (subgoal[0], [cond for cond in subgoal[1] if cond != result], subgoal[2])
+                for subgoal in partial_plan
+            ]
+
+        # All sampled parts that build target object are used
+        assert len(sampled_parts) == 0
+
+        return plan
+
+    def _sample_demo_step(self):
+        """
+        Helper method factored out for sampling a valid assembly plan segment up to
+        a very next join that is valid and achievable from current progress status.
+        Use the planning procedure used by the agent to obtain a full valid plan
+        until completion, then return the segment until the first assemble action.
+        """
+        # Shortcut vars
+        sampled_parts = self.current_episode_record["sampled_parts"]
+        assem_st = self.current_episode_record["assembly_state"]
+        subassems = assem_st["subassemblies"]
+
+        # Figure out a valid joining plan in the form of partial order plan,
+        # using the same procedure adopted by the agent. First prepare
+        # procedure input parameters from teacher's knowledge of sampled
+        # instances and current progress...
+
+        # Tabulate and assign arbitrary indices to relevant entities (parts,
+        # contact points)
+        all_nodes = [f"t_{supertype}_{inst}" for supertype, inst in sampled_parts]
+        part_names = dict(enumerate(set(supertype for supertype, _ in sampled_parts)))
+        cp_names = set("/".join(cp) for cps in VALID_JOINS for cp in cps)
+        cp_names = dict(enumerate(cp_names))
+        part_names_inv = { v: k for k, v in part_names.items() }
+        cp_names_inv = { v: k for k, v in cp_names.items() }
+
+        # Pick a valid target structure while accounting for the current progress
+        inst_pool = {
+            supertype: {f"t_{supertype}_{inst}" for _, inst in insts}
+            for supertype, insts in groupby(
+                sorted(sampled_parts, key=lambda x: x[0]), key=lambda x: x[0]
+            )
+        }
+        connection_graph = nx.Graph(); atomic_node_concs = {}; contacts = {}
+        connection_status = {}; node_unifications = {}
+        # Here we are leveraging the very specific domain knowledge that wheels
+        # and bolts in the list of valid joins are all distinct and instances
+        # of other types are the same ones (one and only for each)
+        remaining_joins = copy.deepcopy(VALID_JOINS)
+        for sa, sa_graph in subassems.items():
+            # Process existing joins first so that parameters will comply
+            if len(sa_graph) == 1: continue     # Ignore atomic singletons
+            for u, v, cps_uv in sa_graph.edges(data="contact"):
+                connection_graph.add_edge(u, v)
+                type_u = re.findall(r"t_(.*)_\d+$", u)[0]
+                type_v = re.findall(r"t_(.*)_\d+$", v)[0]
+                if type_u in ["wheel", "bolt"]:
+                    inst_pool[type_u].remove(u)
+                if type_v in ["wheel", "bolt"]:
+                    inst_pool[type_v].remove(v)
+                atomic_node_concs[u] = part_names_inv[type_u]
+                atomic_node_concs[v] = part_names_inv[type_v]
+                cp_u = cps_uv[u]; cp_v = cps_uv[v]
+                if (cp_u, cp_v) in remaining_joins:
+                    remaining_joins.remove((cp_u, cp_v))
+                    edge = (u, v); contact = (cp_u, cp_v)
+                else:
+                    assert (cp_v, cp_u) in remaining_joins
+                    remaining_joins.remove((cp_v, cp_u))
+                    edge = (v, u); contact = (cp_v, cp_u)
+                contacts[edge] = (
+                    "p_" + str(cp_names_inv[contact[0][0] + "/" + contact[0][1]]),
+                    "p_" + str(cp_names_inv[contact[1][0] + "/" + contact[1][1]])
+                )
+                node_unifications[f"{sa}_{u}"] = u
+                node_unifications[f"{sa}_{v}"] = v
+            connection_status[sa] = sa_graph
+        for (type1, cp1), (type2, cp2) in remaining_joins:
+            # Remaining joins to make; randomly select remaining parts where
+            # there are more than one ways/orders to sample them (wheels and
+            # bolts, in particular)
+            if type1 in ["wheel", "bolt"]:
+                inst1 = inst_pool[type1].pop()
+            else:
+                inst1 = list(inst_pool[type1])[0]
+            if type2 in ["wheel", "bolt"]:
+                inst2 = inst_pool[type2].pop()
+            else:
+                inst2 = list(inst_pool[type2])[0]
+            connection_graph.add_edge(inst1, inst2)
+            atomic_node_concs[inst1] = part_names_inv[type1]
+            atomic_node_concs[inst2] = part_names_inv[type2]
+            contacts[(inst1, inst2)] = (
+                "p_" + str(cp_names_inv[type1 + "/" + cp1]),
+                "p_" + str(cp_names_inv[type2 + "/" + cp2])
+            )
+
+        # Singleton compression sequence containing all nodes
+        compression_sequence = [("truck", all_nodes)]
+        # Now run the procedure, just the join tree is needed
+        join_tree, _, _, _ = _divide_and_conquer(
+            compression_sequence, connection_graph,
+            atomic_node_concs, contacts, part_names, cp_names,
+            (connection_status, node_unifications), (set(), set()),
+            self.cfg.paths.assets_dir
+        )
+
+        # Integer index for the resultant subassembly, obtained from list of
+        # any existing subassemblies; ensure the newly assigned index doesn't
+        # overlap with any of the previously assigned ones
+        sa_ind = max([
+            int(re.findall(r"s(\d+)", sa)[0])
+            for sa, sa_graph in subassems.items()
+            if len(sa_graph) > 1
+        ] + [-1]) + 1           # [-1] to ensure max value is always obtained
+
+        # Now select the next available join to come up with the demo
+        # fragment up until the join as return value
+        demo_frag = []
+
+        # Drop any currently held objects for headache-free demonstration
+        if assem_st["left"] is not None: demo_frag.append(("drop_left", ()))
+        if assem_st["right"] is not None: demo_frag.append(("drop_right", ()))
+
+        # Both of agent's hands are currently empty, user can freely
+        # choose a valid join to demonstrate among remaining ones
+        available_joins = [
+            n for n in join_tree if len(nx.ancestors(join_tree, n))==2
+        ]
+        next_join = available_joins[0]
+        obj_left, obj_right = [n for n, _ in join_tree.in_edges(next_join)]
+
+        # Pick up each object with left and right hand resp.
+        label_key_left = "SA" if len(subassems.get(obj_left, {})) > 1 else "GT"
+        label_key_right = "SA" if len(subassems.get(obj_right, {})) > 1 else "GT"
+        demo_frag.append(("pick_up_left", (obj_left, label_key_left)))
+        demo_frag.append(("pick_up_right", (obj_right, label_key_right)))
+
+        # For determining the assembly direction, exploit the valid joins
+        # stored in `VALID_JOINS``, hence those in `contacts`, which are all
+        # listed in tgt <- src direction
+        contact_left = join_tree.edges[(obj_left, next_join)]["join_by"]
+        contact_right = join_tree.edges[(obj_right, next_join)]["join_by"]
+        if (contact_left, contact_right) in contacts:
+            obj_tgt = obj_left
+            contact_tgt, contact_src = contact_left, contact_right
+        else:
+            assert (contact_right, contact_left) in contacts
+            obj_tgt = obj_right
+            contact_tgt, contact_src = contact_right, contact_left
+        cp_tgt, cp_src = contacts[(contact_tgt, contact_src)]
+        cp_tgt = cp_names[int(re.findall(r"p_(\d+)$", cp_tgt)[0])]
+        cp_src = cp_names[int(re.findall(r"p_(\d+)$", cp_src)[0])]
+
+        # Join the objects at the correct connection site (i.e., part and
+        # contact point) in the src->tgt direction
+        if obj_left == obj_tgt:
+            join_direction = "right_to_left"
+            cp_left, cp_right = cp_tgt, cp_src
+        else:
+            join_direction = "left_to_right"
+            cp_left, cp_right = cp_src, cp_tgt
+
+        demo_frag.append(
+            (f"assemble_{join_direction}", (f"s{sa_ind}", cp_left, cp_right))
+        )
+
+        return demo_frag

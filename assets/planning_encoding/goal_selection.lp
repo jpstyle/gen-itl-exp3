@@ -36,18 +36,40 @@ fits_signature(D,N,NS,c(NS,SG)) :-
     fits_signature(D,n(N,NS),_,SG), node_sa_template(n(N,NS),_,_).
 
 % Handling additional constraints due to already assembled parts. Unify
-% each existing object with one and only one hierarchy node.
-1{ unify_node(X,N) : node_atomic(N,C) }1 :- ext_node(X,C).
+% each existing object with one and only one hierarchy node. Atomic part
+% type of existing object may or may not be specified, which is represented
+% by arity of ext_node predicate (ext_node/2 or ext_node/1). Similarly,
+% contact points of existing object connection may or may not be specified
+% (ext_edge/4 or ext_edge/2).
+1{ unify_node(X,N) : node_atomic(N,_) }1 :- ext_node(X).
+1{ unify_node(X,N) : node_atomic(N,P) }1 :- ext_node(X,P).
 :- unify_node(X1,N1), unify_node(X2,N2), X1 != X2, N1 = N2.
 :- unify_node(X1,N1), unify_node(X2,N2),
     ext_edge(X1,X2,CP1,CP2), not to_connect(N1,N2,CP1,CP2).
+:- unify_node(X1,N1), unify_node(X2,N2), ext_edge(X1,X2), not to_connect(N1,N2).
+
+% Another type of constraints may stem from any learned instances of 'node
+% entailment' relations, i.e., knowledge of a collection of template nodes
+% that ought to belong together in an existing subassembly, knowing that
+% any physical collisions did not happen in their making. These instances
+% are leared during a later step of 'join tree planning', failure of which
+% would lead to another running of this 'goal selection' step with the updated
+% knowledge.
+node_part(N,SA) :- ext_part(X,SA), unify_node(X,N).
+% Entailment constraint will look like:
+%   :- node_part(n_a1, SA), node_part(n_a2, SA), not node_part(n_c, SA)
+% where the [n_a1, n_a2] => n_c is such a constraint.
+
+% Projection of to_connect/4 to to_connect/2, abstracting away contact info
+to_connect(N1,N2) :- to_connect(N1,N2,CP1,CP2).
 
 % Edge symmetricity
 to_connect(N2,N1,CP2,CP1) :- to_connect(N1,N2,CP1,CP2).
 ext_edge(X2,X1,CP2,CP1) :- ext_edge(X1,X2,CP1,CP2).
+ext_edge(X2,X1) :- ext_edge(X1,X2).
 
 % Compute final compatibility score by taking average across all atomic nodes
-total_score(TS) :- TS = #sum { X,O : is_likely(O,P,X), use_as(O,P) }.
+total_score(TS) :- TS = #sum { PR,O : is_likely(O,P,PR), use_as(O,P) }.
 avg_score(TS/NN) :-
     total_score(TS), NN = #count { N : node_atomic(N,_) }, NN != 0.
 

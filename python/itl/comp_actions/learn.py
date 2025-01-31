@@ -691,12 +691,12 @@ def analyze_demonstration(agent, demo_data):
                                 # & after movement, and poses of part instances contained in
                                 # the assembly product
                                 mnp_pose_before = (
-                                    flip_quaternion_y(xyzw2wxyz(parse_floats(2))),
-                                    flip_position_y(parse_floats(3))
+                                    flip_quaternion_y(xyzw2wxyz(parse_floats(5))),
+                                    flip_position_y(parse_floats(6))
                                 )
                                 mnp_pose_after = (
-                                    flip_quaternion_y(xyzw2wxyz(parse_floats(4))),
-                                    flip_position_y(parse_floats(5))
+                                    flip_quaternion_y(xyzw2wxyz(parse_floats(7))),
+                                    flip_position_y(parse_floats(8))
                                 )
                                 current_assembly_info += [
                                     "RToL" if left_or_right==0 else "LToR",
@@ -704,13 +704,13 @@ def analyze_demonstration(agent, demo_data):
                                 ]
                                 assembly_sequence.append(tuple(current_assembly_info))
 
-                                num_parts = int(referents["dis"][lit.args[6][0]]["name"])
+                                num_parts = int(referents["dis"][lit.args[11][0]]["name"])
                                 part_poses = current_held[left_or_right][1]
                                 for i in range(num_parts):
-                                    part_name = referents["dis"][lit.args[7+3*i][0]]["name"]
+                                    part_name = referents["dis"][lit.args[12+3*i][0]]["name"]
                                     part_poses[part_name] = (
-                                        flip_quaternion_y(xyzw2wxyz(parse_floats(7+3*i+1))),
-                                        flip_position_y(parse_floats(7+3*i+2))
+                                        flip_quaternion_y(xyzw2wxyz(parse_floats(12+3*i+1))),
+                                        flip_position_y(parse_floats(12+3*i+2))
                                     )
 
                                 # Making way for a new one (not necessary, just signposting)
@@ -849,28 +849,6 @@ def analyze_demonstration(agent, demo_data):
                 f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
                 examples_with_embs.append((image, mask, f_vec))
             vision_2d_data[part_inst] = examples_with_embs
-    # Based on the visual features, assign concept labels to part instances whose
-    # concept label info was not available (which happens for language-less player
-    # types), choosing the label of the visually closest labeled instance
-    insts_labeled = [
-        part_inst for part_inst in vision_2d_data
-        if part_inst in inst2conc_map
-    ]
-    insts_unlabeled = [
-        part_inst for part_inst in vision_2d_data
-        if part_inst not in inst2conc_map
-    ]
-    if len(insts_unlabeled) > 0:
-        f_vecs_labeled = np.stack([
-            vision_2d_data[part_inst][0][2] for part_inst in insts_labeled
-        ])
-        f_vecs_unlabeled = np.stack([
-            vision_2d_data[part_inst][0][2] for part_inst in insts_unlabeled
-        ])
-        pdists = pairwise_distances(f_vecs_unlabeled, f_vecs_labeled)
-        for i_unlab, i_lab in enumerate(pdists.argmin(axis=1)):
-            closest_inst = insts_labeled[i_lab]
-            inst2conc_map[insts_unlabeled[i_unlab]] = inst2conc_map[closest_inst]
     # Add 2D vision data in XB, based on the newly assigned pcls concept indices
     for part_inst, examples in vision_2d_data.items():
         if part_inst not in inst2conc_map:
@@ -889,6 +867,26 @@ def analyze_demonstration(agent, demo_data):
                 for inst in vision_2d_data if inst in inst2conc_map
             }
             exemplars.add_exs_2d(scene_img=image, exemplars=exs_2d, pointers=pointers)
+    # Concept labels must be assigned to unlabeled part instances. An orthodox approach
+    # would be to classify them to the closest example by visual features. However,
+    # our abstraction approach of using a 'collision table cheat sheet' as oracle
+    # complicates things when parts are misclassified at this stage. Since it is not
+    # our primary focus to achieve perfect classification here (and it should be
+    # relatively straightforward to achieve, in real scenarios; e.g., active perception)
+    # we will just assume unlabeled instances are perfectly classified, using the
+    # licensed label code data received from Unity.
+    for part_inst in vision_2d_data:
+        if part_inst in inst2conc_map: continue
+
+        type_code = next(
+            obj["type_code"] for obj in agent.vision.scene.values()
+            if obj["env_handle"] == part_inst
+        )
+        inst2conc_map[part_inst] = next(
+            conc_ind
+            for conc_ind, label in agent.lt_mem.lexicon.codesheet.items()
+            if label == type_code
+        )
 
     # Finally process assembly data; estimate pose of assembled parts in hand,
     # infer 3D locations of 'contact points' based on manipulator pose difference,

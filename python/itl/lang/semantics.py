@@ -30,13 +30,14 @@ class SemanticParser:
             # this experiment:
             #   1) "Build a {truck_type}."
             #   2) "I will demonstrate how to build a {truck_type}."
-            #   3) "# Action/Effect: {action_type}({parameters})"
-            #   4) "This is (not) a {concept_type}."
-            #   5) "Pick up a {part_type}." or "Pick up the subassembly/{subassembly_type}."
-            #   6) "Join the {part_type_1} and the {part_type_2}."
-            #   7) "# Observing"
-            #   8) "What were you trying to do?"
-            #   9) "Stop." & "Continue."
+            #   3) "I will demonstrate a valid join."
+            #   4) "# Action/Effect: {action_type}({parameters})"
+            #   5) "This is (not) a {concept_type}."
+            #   6) "Pick up a {part_type}." or "Pick up the subassembly/{subassembly_type}."
+            #   7) "Join the {part_type_1} and the {part_type_2}."
+            #   8) "# Observing"
+            #   9) "What were you trying to do?"
+            #   10) "Stop." & "Continue."
             if re.match(r"Build a (.*)\.$", utt):
                 # Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -93,6 +94,32 @@ class SemanticParser:
 
                 source = { "e0": utt, "e1": "# to-infinitive phrase" }
 
+            elif utt == "I will demonstrate a valid join.":
+                # Signposting that user will be demonstrating a single join
+                # that is possible from current progress
+                clauses = {
+                    "e0": (
+                        None, set(), [],
+                        [
+                            ("sp", "demonstrate", ["e0", "x0", "e1"]),
+                            ("sp", "pronoun1", ["x0"])
+                        ]
+                    ),
+                    "e1": (
+                        None, set(), [],
+                        [("va", "join", ["e1", "x1", "x2"])]
+                    )
+                }
+                referents = {
+                    "e0": { "mood": ".", "tense": "future" },
+                    "x0": { "source_evt": "e0" },
+                    "e1": { "mood": "~" },        # 'Infinitive' mood, let's say
+                    "x1": { "source_evt": "e1" },
+                    "x2": { "source_evt": "e1" }
+                }
+
+                source = { "e0": utt, "e1": "# event noun" }
+
             elif re.match(r"# Action: (.*)\((.*)\)$", utt) or \
                 re.match(r"# Effect: (.*)\((.*)\)$", utt):
                 # Annotation of intent or effect of an action in the ongoing demo;
@@ -112,8 +139,7 @@ class SemanticParser:
                         [
                             ("va", act_type, ["e0", "x0"] + [
                                 f"x{i+1}" for i in range(len(act_params))
-                            ]),
-                            ("sp", "pronoun1", ["x0"]),
+                            ])
                         ]
                     )
                 }

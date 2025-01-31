@@ -396,9 +396,12 @@ class ITLAgent:
                     for ci, ((_, _, _, cons), raw, _) in enumerate(turn_clauses):
                         if not raw.startswith("# Effect: "): continue
                         last_action_effect = cons
+                        last_actor = speaker
 
                 if last_action_effect is not None:
-                    self.comp_actions.handle_action_effect(last_action_effect)
+                    self.comp_actions.handle_action_effect(
+                        last_action_effect, last_actor
+                    )
 
                 ###################################################################
                 ##           Identify & exploit learning opportunities           ##
@@ -415,6 +418,7 @@ class ITLAgent:
                     for ci, clause in enumerate(turn_clauses):
                         (gq, bvars, ante, cons), raw, clause_info = clause
                         if cons is None: continue
+                        if raw.startswith("#"): continue
 
                         mood = clause_info["mood"]
                         # Factual statement
@@ -437,6 +441,8 @@ class ITLAgent:
 
                         # Skip any non-indicative statements (or presuppositions)
                         if clause_info["mood"] != ".": continue
+                        # Skip any nonlinguistic annotations
+                        if raw.startswith("# "): continue
 
                         # Identify learning opportunities; i.e., any deviations from the
                         # agent's estimated states of affairs, generic rules delivered
@@ -468,11 +474,9 @@ class ITLAgent:
                 )
 
                 if xb_updated or kb_updated:
-                    # Flag that agent's knowledge state is somehow updated,
-                    # so that agent can take whichever measure needed later
-                    self.planner.execution_state["knowledge_updated"] = (
-                        xb_updated, kb_updated
-                    )
+                    # Agent's knowledge state is somehow updated, flag that
+                    # re-planning is in order before execution
+                    self.planner.execution_state["replanning_needed"] = True
                 else:
                     # Terminate the loop when 'equilibrium' is reached
                     break
@@ -582,16 +586,24 @@ class ITLAgent:
                         if not utt.startswith("#")
                     ]
 
-                    if len(return_val) == 0 and len(user_linguistic_inputs) > 0:
-                        # No specific reaction to utter, acknowledge any user input
-                        self.planner.agenda.append(
-                            ("utter_simple", ("OK.", { "mood": "." }))
-                        )
-                    else:
-                        # Break loop with no-op reaction (do nothing but don't
-                        # terminate the episode)
-                        return_val.append((None, None))
+                    if self.execution_paused and len(return_val) == 0:
+                        # Entered (only) when agent, most likely to be language-less
+                        # player type, had to pause execution due to its imperfect
+                        # knowledge and thus needs to wait for user's partial demo.
+                        # Signal that it is observing user's actions, then break.
+                        return_val.append(("generate", ("# Observing", {})))
                         break
+                    else:
+                        if len(return_val) == 0 and len(user_linguistic_inputs) > 0:
+                            # No specific reaction to utter, acknowledge any user input
+                            self.planner.agenda.append(
+                                ("utter_simple", ("OK.", { "mood": "." }))
+                            )
+                        else:
+                            # Break loop with no-op reaction (do nothing but don't
+                            # terminate the episode)
+                            return_val.append((None, None))
+                            break
                 else:
                     # Break loop with return vals
                     break
