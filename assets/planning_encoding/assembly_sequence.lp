@@ -21,7 +21,7 @@ to_connect(O2,O1) :- to_connect(O1,O2).
 % total count of such occurrences will be minimized
 #program step(t).
 penalize(t) :-
-    occ(join(S1,S2,O1,O2),t), holds(max_sa_index(S),t), S1 != S, S2 != S.
+    occ(join(S1,O1,S2,O2),t), holds(max_sa_index(S),t), S1 != S, S2 != S.
 
 %% Rules common to assembly domains - Dynamic laws
 #program step(t).
@@ -29,20 +29,20 @@ penalize(t) :-
 % aligning & tightening.
 % (Note: This implementation assumes we always assemble from right to left,
 % without loss of generality)
-possible(join(S1,S2,O1,O2),t) :-
+possible(join(S1,O1,S2,O2),t) :-
     S1 != S2, O1 != O2,
     holds(part_of(O1,S1),t), holds(part_of(O2,S2),t),
     to_connect(O1,O2), not holds(connected(O1,O2),t).
-holds(connected(O1,O2),t+1) :- occ(join(S1,S2,O1,O2),t).
-holds(connected(O2,O1),t+1) :- occ(join(S1,S2,O1,O2),t).    % Symmetric
-holds(max_sa_index(S+1),t+1) :- occ(join(S1,S2,O1,O2),t), holds(max_sa_index(S),t).
--holds(max_sa_index(S),t+1) :- occ(join(S1,S2,O1,O2),t), holds(max_sa_index(S),t).
--holds(part_of(O,S1),t+1) :- occ(join(S1,S2,_,_),t), holds(part_of(O,S1),t).
--holds(part_of(O,S2),t+1) :- occ(join(S1,S2,_,_),t), holds(part_of(O,S2),t).
+holds(connected(O1,O2),t+1) :- occ(join(S1,O1,S2,O2),t).
+holds(connected(O2,O1),t+1) :- occ(join(S1,O1,S2,O2),t).    % Symmetric
+holds(max_sa_index(S+1),t+1) :- occ(join(S1,O1,S2,O2),t), holds(max_sa_index(S),t).
+-holds(max_sa_index(S),t+1) :- occ(join(S1,O1,S2,O2),t), holds(max_sa_index(S),t).
+-holds(part_of(O,S1),t+1) :- occ(join(S1,_,S2,_),t), holds(part_of(O,S1),t).
+-holds(part_of(O,S2),t+1) :- occ(join(S1,_,S2,_),t), holds(part_of(O,S2),t).
 holds(part_of(O,S+1),t+1) :-
-    occ(join(S1,S2,_,_),t), holds(max_sa_index(S),t), holds(part_of(O,S1),t).
+    occ(join(S1,_,S2,_),t), holds(max_sa_index(S),t), holds(part_of(O,S1),t).
 holds(part_of(O,S+1),t+1) :-
-    occ(join(S1,S2,_,_),t), holds(max_sa_index(S),t), holds(part_of(O,S2),t).
+    occ(join(S1,_,S2,_),t), holds(max_sa_index(S),t), holds(part_of(O,S2),t).
 
 % Note: We don't consider 'disassemble' operation here; would need to treat
 % subassembly predicate as fluent if we were to do this

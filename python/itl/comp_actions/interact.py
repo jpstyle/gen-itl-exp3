@@ -152,8 +152,8 @@ def prepare_answer_Q(agent, utt_pointer):
         # Getting appropriate name handles, concepts and NL symbols
         ent_left = agent.vision.scene[intended_join[0]]["env_handle"]
         ent_right = agent.vision.scene[intended_join[1]]["env_handle"]
-        den_left = exec_state["recognitions"][intended_join[0]][0]
-        den_right = exec_state["recognitions"][intended_join[1]][0]
+        den_left = exec_state["recognitions"][intended_join[0]]
+        den_right = exec_state["recognitions"][intended_join[1]]
         sym_left = agent.lt_mem.lexicon.d2s[("pcls", den_left)][0][1]
         sym_right = agent.lt_mem.lexicon.d2s[("pcls", den_right)][0][1]
 
@@ -290,7 +290,7 @@ def attempt_command(agent, utt_pointer):
         surface_form = f"I am unable to {raw[0].lower()}{raw[1:]}"
         gq = None; bvars = set(); ante = []
         cons = [
-            ("sp", "unable", ["x0", ri_command]),
+            ("sp", "unable", [("e", 0), "x0", ri_command]),
             ("sp", "pronoun1", ["x0"])
         ]
         logical_form = (gq, bvars, ante, cons)
@@ -346,7 +346,7 @@ def execute_command(agent, action_spec):
         # state, belief and knowledge, then return without return value
         resolved_record = agent.lang.dialogue.export_resolved_record()
         labeling_feedback = [
-            (lit.args[0][0], (int(lit.name.strip("pcls_")), True))
+            (lit.args[0][0], int(lit.name.strip("pcls_")))
             for spk, turn_clauses in resolved_record
             for ((_, _, _, cons), _, clause_info) in turn_clauses
             if cons is not None
@@ -362,12 +362,13 @@ def execute_command(agent, action_spec):
             n: exec_state["recognitions"][n]
             for gr in exec_state["connection_graphs"].values()
             for n in gr
-            if exec_state["recognitions"].get(n, (None, False))[1]
-                # Only if recognition is supported with some evidence
+            if n in exec_state["recognitions"]
         } | labeling_map                            # Update with feedback
 
         # Finally, re-plan
-        action_sequence, recognitions = _plan_assembly(agent, exec_state["plan_goal"][1])
+        build_action, build_target = exec_state["plan_goal"]
+        build_action = agent.lt_mem.lexicon.s2d[("va", build_action)][0][1]
+        action_sequence, recognitions = _plan_assembly(agent, build_target)
 
         # Record how the agent decided to recognize each (non-)object
         exec_state["recognitions"] = recognitions
@@ -461,12 +462,10 @@ def _plan_assembly(agent, build_target):
         get_conc("assemble_right_to_left"), get_conc("assemble_left_to_right")
     ]
 
-    # Utiltiy methods for serializing/unserializing between clingo function
-    # arguments and flat string representations
+    # Utiltiy method for serializing clingo function arguments into flat
+    # string representations
     serialize_node = lambda n: f"n_{n.number}" if n.type == SymbolType.Number \
         else f"{serialize_node(n.arguments[0])}_{n.arguments[1]}"
-    unserialize_node = lambda n: fields[-1] if len(fields := n.split("_")) == 2 \
-        else "n("+unserialize_node("_".join(fields[:-1])+","+fields[-1])+")"
 
     # Convert current visual scene (from ensemble prediction) into ASP fact
     # literals (note difference vs. agent.lt_mem.kb.visual_evidence_from_scene
@@ -481,10 +480,10 @@ def _plan_assembly(agent, build_target):
     val_range = max_val - min_val
 
     for oi, obj in agent.vision.scene.items():
-        if oi in exec_state["recognitions"] and exec_state["recognitions"][oi][1]:
+        if oi in exec_state["recognitions"]:
             # Object recognition already committed with confidence, or labeling
             # feedback directly provided by user; max confidence
-            ci = exec_state["recognitions"][oi][0]
+            ci = exec_state["recognitions"][oi]
             obs_lit = Literal("is_likely", wrap_args(oi, ci, dsc_bin + 1))
             observations.add(obs_lit)
         else:
@@ -555,10 +554,10 @@ def _plan_assembly(agent, build_target):
     for sa_name, sa_graph in exec_state["connection_graphs"].items():
         # Adding each existing part along with committed recognition
         for ext_node in sa_graph.nodes:
-            if exec_state["recognitions"].get(ext_node, (None, False))[1]:
+            if ext_node in exec_state["recognitions"]:
                 # Atomic part type info available, for the part instance
                 # was recognized and picked up by agent
-                ext_conc = exec_state["recognitions"][ext_node][0]
+                ext_conc = exec_state["recognitions"][ext_node]
                 ext_node_lit = Literal(
                     "ext_node",
                     wrap_args(f"{sa_name}_{ext_node}", ext_conc)
@@ -572,33 +571,13 @@ def _plan_assembly(agent, build_target):
                     "ext_node", wrap_args(f"{sa_name}_{ext_node}")
                 )
             ext_constraints.add(ext_node_lit)
-
-            # Subassembly-atomic part relation information
-            ext_part_lit = Literal(
-                "ext_part", wrap_args(f"{sa_name}_{ext_node}", sa_name)
-            )
-            ext_constraints.add(ext_part_lit)
         # Adding each connection between existing parts
-        for ext_node1, ext_node2, cps in sa_graph.edges(data="cps"):
-            if cps is not None:
-                # Contact point info available, for the join was planned
-                # and accomplished by agent
-                cp1, cp2 = cps
-                ext_edge_lit = Literal(
-                    "ext_edge", wrap_args(
-                        f"{sa_name}_{ext_node1}", f"{sa_name}_{ext_node2}",
-                        f"p_{cp1}", f"p_{cp2}"
-                    )
+        for ext_node1, ext_node2 in sa_graph.edges:
+            ext_edge_lit = Literal(
+                "ext_edge", wrap_args(
+                    f"{sa_name}_{ext_node1}", f"{sa_name}_{ext_node2}"
                 )
-            else:
-                # Contact point info not available, most likely because
-                # the join was not intended and executed by agent, but
-                # demonstrated by user
-                ext_edge_lit = Literal(
-                    "ext_edge", wrap_args(
-                        f"{sa_name}_{ext_node1}", f"{sa_name}_{ext_node2}"
-                    )
-                )
+            )
             ext_constraints.add(ext_edge_lit)
 
     # Encode assembly target info into ASP fact literal
@@ -610,201 +589,207 @@ def _plan_assembly(agent, build_target):
     # subassemblies; join tree planning failure only happens when we don't
     # have such info, which happens with language-less player types that
     # must rely on demonstrations as learning signals.
-    node_entailments = []
-    total_planning_attempts = 1; total_query_count = 0
-    while True:
-        # Prepare additional constraint on existing nodes and connections
-        # due to (any) learned node entailment relations
-        ent_constraints = []
-        for ante, cons in node_entailments:
-            constraint_rule = ":- "
-            for n in ante:
-                constraint_rule += f"node_part({unserialize_node(n)},SA), "
-            constraint_rule += f"not node_part({unserialize_node(cons[0])},SA)."
-            ent_constraints.append(constraint_rule)
 
-        # Load ASP encoding for selecting & committing to a goal structure
-        lp_path = os.path.join(agent.cfg.paths.assets_dir, "planning_encoding")
-        commit_ctl = Control(["--warn=none"])
-        commit_ctl.configuration.solve.models = 0
-        commit_ctl.configuration.solve.opt_mode = "opt"
-        commit_ctl.load(os.path.join(lp_path, "goal_selection.lp"))
+    # Load ASP encoding for selecting & committing to a goal structure
+    lp_path = os.path.join(agent.cfg.paths.assets_dir, "planning_encoding")
+    commit_ctl = Control(["--warn=none"])
+    commit_ctl.configuration.solve.models = 0
+    commit_ctl.configuration.solve.opt_mode = "opt"
+    commit_ctl.load(os.path.join(lp_path, "goal_selection.lp"))
 
-        # Add and ground all the fact literals obtained above
-        all_lits = sorted(
-            {target_lit} | observations | assembly_pieces | ext_constraints,
-            key=lambda x: x.name
-        )
-        facts_prg = "".join(str(lit) + ".\n" for lit in all_lits)
-        facts_prg += "\n".join(ent_constraints)
-        commit_ctl.add("facts", [], facts_prg)
+    # Add and ground all the fact literals obtained above
+    all_lits = sorted(
+        {target_lit} | observations | assembly_pieces | ext_constraints,
+        key=lambda x: x.name
+    )
+    facts_prg = "".join(str(lit) + ".\n" for lit in all_lits)
+    commit_ctl.add("facts", [], facts_prg)
 
-        # Optimize with clingo
-        commit_ctl.ground([("base", []), ("facts", [])])
-        with commit_ctl.solve(yield_=True) as solve_gen:
-            models = [m.symbols(atoms=True) for m in solve_gen]
-            if len(models) > 0:
-                optimal_model = models[-1]
+    # Optimize with clingo
+    commit_ctl.ground([("base", []), ("facts", [])])
+    with commit_ctl.solve(yield_=True) as solve_gen:
+        models = [m.symbols(atoms=True) for m in solve_gen]
+        if len(models) > 0:
+            optimal_model = models[-1]
 
-        # Compile the optimal solution into appropriate data structures
-        assembly_hierarchy = nx.DiGraph()
-        part_candidates = defaultdict(set)
-        connect_edges = {}
-        node_unifications = {}
-        for atm in optimal_model:
-            match atm.name:
-                case "node_atomic" | "node_sa_template":
-                    # Each 'node' literal contains identifiers of its own and its direct
-                    # parent's, add an edge linking the two to the committed structure 
-                    # graph
-                    node_rn = serialize_node(atm.arguments[0])
-                    node_type = atm.name.split("_")[1]
-                    conc_ind = atm.arguments[1].number
-                    assembly_hierarchy.add_node(
-                        node_rn, node_type=node_type, conc=conc_ind
+    # Compile the optimal solution into appropriate data structures
+    assembly_hierarchy = nx.DiGraph()
+    part_candidates = defaultdict(set)
+    node_unifications = defaultdict(set)
+    connect_edges = {}
+    for atm in optimal_model:
+        match atm.name:
+            case "node_atomic" | "node_sa_template":
+                # Each 'node' literal contains identifiers of its own and its direct
+                # parent's, add an edge linking the two to the committed structure 
+                # graph
+                node_rn = serialize_node(atm.arguments[0])
+                node_type = atm.name.split("_")[1]
+                conc_ind = atm.arguments[1].number
+                assembly_hierarchy.add_node(
+                    node_rn, node_type=node_type, conc=conc_ind
+                )
+
+                if atm.arguments[0].type == SymbolType.Function:
+                    # Add edge between the node and its direct parent
+                    assert atm.arguments[0].name == "n"
+                    assembly_hierarchy.add_edge(
+                        serialize_node(atm.arguments[0].arguments[0]),
+                        node_rn
                     )
 
-                    if atm.arguments[0].type == SymbolType.Function:
-                        # Add edge between the node and its direct parent
-                        assert atm.arguments[0].name == "n"
-                        assembly_hierarchy.add_edge(
-                            serialize_node(atm.arguments[0].arguments[0]),
-                            node_rn
-                        )
+            case "use_as":
+                # Decision as to use which recognized object as instance of which
+                # atomic part type
+                obj_name = atm.arguments[0].name
+                part_conc = atm.arguments[1].number
+                part_candidates[part_conc].add(obj_name)
 
-                case "use_as":
-                    # Decision as to use which recognized object as instance of which
-                    # atomic part type
-                    obj_name = atm.arguments[0].name
-                    part_conc = atm.arguments[1].number
-                    part_candidates[part_conc].add(obj_name)
+            case "to_connect":
+                # Derived assembly connection to make between nodes
+                node_u_rn = serialize_node(atm.arguments[0])
+                node_v_rn = serialize_node(atm.arguments[1])
+                cp_u = atm.arguments[2].name
+                cp_v = atm.arguments[3].name
+                connect_edges[(node_u_rn, node_v_rn)] = (cp_u, cp_v)
+                connect_edges[(node_v_rn, node_u_rn)] = (cp_v, cp_u)
 
-                case "to_connect":
-                    # Skip literals with projected version of the predicate
-                    if len(atm.arguments) != 4: continue
+            case "must_unify" | "may_unify":
+                # Unification between objects already used as subassembly
+                # component in environment vs. matching nodes in hierarchy
+                ex_obj = atm.arguments[0].name
+                node_rn = serialize_node(atm.arguments[1])
+                node_unifications[ex_obj].add(node_rn)
 
-                    # Derived assembly connection to make between nodes
-                    node_u_rn = serialize_node(atm.arguments[0])
-                    node_v_rn = serialize_node(atm.arguments[1])
-                    cp_u = atm.arguments[2].name
-                    cp_v = atm.arguments[3].name
-                    connect_edges[(node_u_rn, node_v_rn)] = (cp_u, cp_v)
-                    connect_edges[(node_v_rn, node_u_rn)] = (cp_v, cp_u)
+    # Note: This assembly hierarchy structure object also serves to provide
+    # explanation which part is required for building which subassembly
+    # (that is direct parent in the hierarchy)
 
-                case "unify_node":
-                    # Unification between objects already used as subassembly
-                    # component in environment vs. matching nodes in hierarchy
-                    ex_obj = atm.arguments[0].name
-                    node_rn = serialize_node(atm.arguments[1])
-                    node_unifications[ex_obj] = node_rn
-
-        # Note: This assembly hierarchy structure object also serves to provide
-        # explanation which part is required for building which subassembly
-        # (that is direct parent in the hierarchy)
-
-        # Pool of available instances for each part type, as recognized by agent
-        atomic_node_concs = {
-            n: data["conc"]
-            for n, data in assembly_hierarchy.nodes(data=True)
-            if data["node_type"] == "atomic"
+    # Pool of available instances for each part type, as recognized by agent
+    atomic_node_concs = {
+        n: data["conc"]
+        for n, data in assembly_hierarchy.nodes(data=True)
+        if data["node_type"] == "atomic"
+    }
+    # Extracted mapping from string part names to agent's internal concept
+    # denotations
+    if agent.cfg.exp.feedback_type in ["bool", "demo"]:
+        # While agent and user doesn't have shared vocab, agent has been 
+        # injected with a codesheet of correspondence between part concept
+        # and string identifier used in Unity
+        part_names = agent.lt_mem.lexicon.codesheet
+    else:
+        assert agent.cfg.exp.feedback_type in ["label", "full"]
+        part_names = {
+            d[1]: s[0][1] for d, s in agent.lt_mem.lexicon.d2s.items()
+            if d[0]=="pcls"
         }
-        # Extracted mapping from string part names to agent's internal concept
-        # denotations
-        if agent.cfg.exp.feedback_type in ["bool", "demo"]:
-            # While agent and user doesn't have shared vocab, agent has been 
-            # injected with a codesheet of correspondence between part concept
-            # and string identifier used in Unity
-            part_names = agent.lt_mem.lexicon.codesheet
-        else:
-            assert agent.cfg.exp.feedback_type in ["label", "full"]
-            part_names = {
-                d[1]: s[0][1] for d, s in agent.lt_mem.lexicon.d2s.items()
-                if d[0]=="pcls"
-            }
-        # Ground-truth oracle for inspecting what each contact point learned
-        # by agent was supposed to stand for in the knowledge encoded in Unity
-        # assets
-        cp_names = {
-            cp_conc: gt_handle
-            for _, _, _, cps in agent.lt_mem.exemplars.object_3d.values()
-            for cp_conc, (_, gt_handle) in cps.items()
+    # Ground-truth oracle for inspecting what each contact point learned
+    # by agent was supposed to stand for in the knowledge encoded in Unity
+    # assets
+    cp_names = {
+        cp_conc: gt_handle
+        for _, _, _, cps in agent.lt_mem.exemplars.object_3d.values()
+        for cp_conc, (_, gt_handle) in cps.items()
+    }
+
+    # Turns out if a structure consists of too many atomic parts (say, more
+    # than 6 or so), ASP planner performance is significantly affected. We
+    # handle this by breaking each planning subproblem down to multiple
+    # smaller ones... In principle, this may risk planning failure when
+    # physical collision check is involved, depending on how the target
+    # structure is partitioned. Note that agents that are aware of valid
+    # substructures are relatively free from such concerns, as sizes of
+    # those substructures tend to be more manageable in general.
+    connection_graph = nx.Graph()
+    for u, v in connect_edges: connection_graph.add_edge(u, v)
+
+    # Sample a 'compression sequence', i.e. a sequence of collection of nodes
+    # that altogether make up a meaningful substructure of the target structure.
+    # The sequential sampling is achieved by iteratively 'compressing' valid
+    # set of nodes in the assembly hierarchy, where by valid we mean all
+    # assembly preconditions are cleared. In the edge case where the assembly
+    # hierarchy is flat and thus has max depth of just 2, the length of the
+    # resulting compression sequence would be just 1, where the singleton
+    # collection contains all atomic nodes.
+    sa_nodes = {
+        n: [chd for _, chd in assembly_hierarchy.out_edges(n)]
+        for n in assembly_hierarchy
+        if assembly_hierarchy.nodes[n]["node_type"] == "sa"
+    }
+    compression_steps = len(sa_nodes)
+    compression_sequence = []
+    for _ in range(compression_steps):
+        compressible_nodes = [
+            n for n, children in sa_nodes.items()
+            if not any(chd in sa_nodes for chd in children)
+        ]
+        selected = random.sample(compressible_nodes, 1)[0]
+        compression_sequence.append((selected, sa_nodes.pop(selected)))
+
+    # Node unification result may not always be unique, and some objects
+    # in existing subassemblies may be potentially unifiable to more
+    # than one nodes in connection graph. Some unification decisions
+    # may lead to unsolvable planning problems, whereas others allow
+    # solutions. Iterate across all possible unification scenarios and
+    # try divide-and-conquer solving of the planning problem based on
+    # corresponding premises.
+    existing_objs = list(node_unifications)
+    unification_scenarios = product(*[
+        node_unifications[ex_obj] for ex_obj in existing_objs
+    ])
+    valid_scenarios = []
+    # Select valid scenario; all objects must be unified with different
+    # nodes, and resulting subassemblies must be all connected
+    for scenario in unification_scenarios:
+        if len(set(scenario)) != len(scenario): continue
+        unification_choice = {
+            existing_objs[i]: node for i, node in enumerate(scenario)
         }
+        sa_components = [
+            connection_graph.subgraph(n[1] for n in v)
+            for _, v in groupby(
+                sorted(unification_choice.items()),
+                key=lambda x: re.findall(r"(s\d+)_", x[0])[0]
+            )
+        ]
+        sa_components = [
+            list(nx.connected_components(sg))for sg in sa_components
+        ]
+        if all(len(sa_comps)==1 for sa_comps in sa_components):
+            valid_scenarios.append(unification_choice)
 
-        # Turns out if a structure consists of too many atomic parts (say, more
-        # than 6 or so), ASP planner performance is significantly affected. We
-        # handle this by breaking each planning subproblem down to multiple
-        # smaller ones... In principle, this may risk planning failure when
-        # physical collision check is involved, depending on how the target
-        # structure is partitioned. Note that agents that are aware of valid
-        # substructures are relatively free from such concerns, as sizes of
-        # those substructures tend to be more manageable in general.
-        connection_graph = nx.Graph()
-        for u, v in connect_edges: connection_graph.add_edge(u, v)
-
-        # Sample a 'compression sequence', i.e. a sequence of collection of nodes
-        # that altogether make up a meaningful substructure of the target structure.
-        # The sequential sampling is achieved by iteratively 'compressing' valid
-        # set of nodes in the assembly hierarchy, where by valid we mean all
-        # assembly preconditions are cleared. In the edge case where the assembly
-        # hierarchy is flat and thus has max depth of just 2, the length of the
-        # resulting compression sequence would be just 1, where the singleton
-        # collection contains all atomic nodes.
-        sa_nodes = {
-            n: [chd for _, chd in assembly_hierarchy.out_edges(n)]
-            for n in assembly_hierarchy
-            if assembly_hierarchy.nodes[n]["node_type"] == "sa"
-        }
-        compression_steps = len(sa_nodes)
-        compression_sequence = []
-        for _ in range(compression_steps):
-            compressible_nodes = [
-                n for n, children in sa_nodes.items()
-                if not any(chd in sa_nodes for chd in children)
-            ]
-            selected = random.sample(compressible_nodes, 1)[0]
-            compression_sequence.append((selected, sa_nodes.pop(selected)))
-
-        dnc_result = _divide_and_conquer(
+    total_planning_attempts = total_query_count = 0
+    for unification_choice in valid_scenarios:
+        # Try solving the planning problem with the unification premise
+        # encoded in `unification_choice`
+        join_tree, planning_attempts, query_count = _divide_and_conquer(
             compression_sequence, connection_graph,
             atomic_node_concs, connect_edges, part_names, cp_names,
-            (exec_state["connection_graphs"], node_unifications),
+            (exec_state["connection_graphs"], unification_choice),
             exec_state["join_validities"], agent.cfg.paths.assets_dir
         )
-        join_tree, planning_attempts, query_count, scope_implications = dnc_result
         total_planning_attempts += planning_attempts
         total_query_count += query_count
-
         if join_tree is not None:
-            # Successfully found a valid join tree, break and proceed
-            break
-        else:
-            # Divide-and-conquer procedure reported planning failure, which
-            # indicates bad node unification input. Run another round with
-            # updated knowledge of node inclusion entailment.
-            node_entailments += scope_implications
+            break       # Working solution found
+    else:
+        # All episode is guaranteed to be solvable, shouldn't reach here
+        raise ValueError()
 
     log_msg = "Working plan found after "
     log_msg += f"{total_planning_attempts} (re)planning attempts "
-    log_msg += f"({query_count} calls total)"
+    log_msg += f"({total_query_count} calls total)"
     logger.info(log_msg)
 
     action_sequence, node2obj_map = _linearize_join_tree(
-        join_tree, exec_state, connection_graph, connect_edges,
-        atomic_node_concs, node_unifications, part_candidates,
+        copy.deepcopy(join_tree), exec_state, connection_graph,
+        connect_edges, atomic_node_concs, node_unifications, part_candidates,
         (pick_up_actions, drop_actions, assemble_actions)
     )
 
-    # Agent's 'decisions' as to how each object is classified as instances
-    # of (known) visual concepts. Merge given assumptions and newly made
-    # recognition decisions according to the generated plan.
-    type_unknowns = {
-        re.findall(r"s\d+_(o\d+)$", lit.args[0][0])[0]
-        for lit in ext_constraints
-        if lit.name == "ext_node" and len(lit.args) == 1
-    }           # Let's stay uncommitted on types of unknown ones
     recognitions = exec_state["recognitions"] | {
-        oi: (conc, oi not in type_unknowns)
-        for oi, conc in node2obj_map.values()
+        oi: conc for oi, conc in node2obj_map.values()
     }
 
     return action_sequence, recognitions
@@ -821,13 +806,6 @@ def _divide_and_conquer(
     subproblems and conquer each subproblem. Start from scratch if a bad
     subproblem division led to deadend.
     """
-    # If this flag is turned off at any point, it means the procedure has
-    # decided the divide & conquer planning cannot yield a valid join
-    # tree due to bad input (generally node unification results, in our
-    # case). As soon as this happens, break planning loop and report
-    # failure, along with any learned node entailment relationships.
-    planning_feasible = True
-
     # Inverse direction mapping of `atomic_node_concs`, from concept to
     # corresponding node group
     atomic_nodes_by_conc = {
@@ -864,7 +842,11 @@ def _divide_and_conquer(
     # of 'precedence constraints'.
     scope_implications = set()
     # Tracking how many piecewise planning attempts and oracle calls were made
-    planning_attempts = 0; query_count = 0
+    planning_attempts = 1; query_count = 0
+    # For remembering sequences of chunking that has proven to reach deadend
+    # for this particular subproblem
+    current_chunk_sequence = ()
+    invalid_chunk_sequences = set()
     # Sequence of joins to be made
     join_sequence_subprob = []      # For each subproblem
     join_sequence = []              # Accumulated across subproblems
@@ -877,6 +859,11 @@ def _divide_and_conquer(
     while len(remaining_subproblems) > 0:
         # Pop the next pending subproblem
         compression_graph, chunks_assembled = remaining_subproblems.popleft()
+        # Inverse of chunks_assembled, mapping from atomic to affiliated chunk
+        chunk_affiliations = {
+            n: chunk for chunk, atomics in chunks_assembled.items()
+            for n in atomics
+        }
 
         if len(compression_graph) == 1:
             # Subproblem completely solved; collect the obtained solution
@@ -885,63 +872,80 @@ def _divide_and_conquer(
                 # Renaming the final product for the subproblem, if nonempty
                 # join sequence is obtained for this subproblem
                 join_sequence_subprob[-1] = \
-                    join_sequence_subprob[-1][:4] + (f"c{step_ind}",)
+                    join_sequence_subprob[-1][:-1] + (f"c{step_ind}",)
             join_sequence += join_sequence_subprob
             join_sequence_subprob = []
+            current_chunk_sequence = ()
+            invalid_chunk_sequences = set()
             step_ind += 1
             continue
-        else:
-            # Continue joining nodes in compression graph according to (any)
-            # scope implications
 
-            # Candidate joins of nodes and involved atomics
-            get_atomics = lambda n: chunks_assembled[n] \
-                if n in chunks_assembled else {n}
-            candidate_joins = {
-                frozenset([n1, n2]): get_atomics(n1) | get_atomics(n2)
-                for n1, n2 in compression_graph.edges
-            }
-            # Continue filtering out join options that would lead to violation
-            # of scope implications
-            valid_joins = []
-            for join, atomics in candidate_joins.items():
+        # Continue joining groups of nodes in compression graph that are valid
+        # according to (any) scope implications
+
+        # Candidate chunks of nodes and involved atomics, with seeds initialized
+        # as all edges in compression graph
+        get_atomics = lambda n: chunks_assembled[n] \
+            if n in chunks_assembled else {n}
+        candidate_chunks = {
+            frozenset([n1, n2]): get_atomics(n1) | get_atomics(n2)
+            for n1, n2 in compression_graph.edges
+        }
+        # Complete any candidate chunk that violates any scope implication
+        # by continuously adding implication consequent nodes
+        while True:
+            new_candidate_chunks = {}
+            for chunk, atomics in candidate_chunks.items():
                 for ante, cons in scope_implications:
                     if ante <= atomics and cons not in atomics:
-                        # Making this join at this point will result in
-                        # reaching deadend due to physical collision
-                        break
+                        # Consequent node needs to be added to the current
+                        # chunk being inspected
+                        chunk = chunk | {chunk_affiliations.get(cons, cons)}
+                        atomics = atomics | get_atomics(cons)
                 else:
-                    valid_joins.append(join)
+                    # Current chunk is good to go
+                    new_candidate_chunks[chunk] = atomics
 
-            if len(valid_joins) > 0:
-                chunk_selected = random.sample(valid_joins, 1)[0]
-                chunk_subgraph = compression_graph.subgraph(chunk_selected)
+            if set(new_candidate_chunks) == set(candidate_chunks):
+                # Fixpoint, can break
+                break
             else:
-                # No valid joins, deadend reached; start again from scratch.
-                # Update tracker states and restart.
-                planning_attempts += 1
-                no_new_validities = \
-                    collision_checker.valid_joins <= valid_joins_cached and \
-                    collision_checker.invalid_joins <= invalid_joins_cached
+                # Run another round of chunk inspection
+                candidate_chunks = new_candidate_chunks
 
-                if planning_attempts > 20 and no_new_validities:
-                    # If reached here, consider the `goal_selection.lp` returned
-                    # a solution with bad node unification result (due to lack
-                    # of accurate label information)
-                    planning_feasible = False
-                    break
-                else:
-                    valid_joins_cached |= collision_checker.valid_joins
-                    invalid_joins_cached |= collision_checker.invalid_joins
-                    remaining_subproblems = deque(
-                        _planning_subproblem(
-                            i, compression_sequence, connection_graph, current_progress
-                        )
-                        for i in range(step_ind, len(compression_sequence))
-                    )           # Start subproblem from scratch
-                    join_sequence_subprob = []
-                    node_pool = copy.deepcopy(node_pool_checkpoint)
-                    continue
+        # Filter out chunks that would lead to invalid chunk sequence
+        candidate_chunks = [
+            chk for chk in candidate_chunks
+            if current_chunk_sequence + (frozenset(chk),) not in \
+                invalid_chunk_sequences
+        ]
+        if len(candidate_chunks) > 0:
+            # Sample a chunk among the valid candidates
+            chunk_selected = random.sample(candidate_chunks, 1)[0]
+            chunk_subgraph = compression_graph.subgraph(chunk_selected)
+        else:
+            # No valid chunks, deadend reached
+            if len(current_chunk_sequence) == 0:
+                # Current sequence length zero indicates the subproblem
+                # is unsolvable, possibly relying on bad premises.
+                return None, planning_attempts, query_count
+            else:
+                # Register current chunk sequence as invalid so that it
+                # won't be tried again. Update tracker states and restart.
+                planning_attempts += 1
+                invalid_chunk_sequences.add(current_chunk_sequence)
+                valid_joins_cached |= collision_checker.valid_joins
+                invalid_joins_cached |= collision_checker.invalid_joins
+                remaining_subproblems = deque(
+                    _planning_subproblem(
+                        i, compression_sequence, connection_graph, current_progress
+                    )
+                    for i in range(step_ind, len(compression_sequence))
+                )           # Start subproblem from scratch
+                current_chunk_sequence = ()
+                join_sequence_subprob = []
+                node_pool = copy.deepcopy(node_pool_checkpoint)
+                continue
 
         # Remove instances in the selected chunk from node_pool
         for n in chunk_selected:
@@ -1034,37 +1038,32 @@ def _divide_and_conquer(
             if len(nodes2) == 1:
                 scope_implications.add((nodes1, list(nodes2)[0]))
 
+        # Tracking sequence of selected chunks, so as to remember invalid
+        # sequences that led to deadend states and prevent following the
+        # exact same sequence again
+        current_chunk_sequence = \
+            current_chunk_sequence + (frozenset(chunk_selected),)
+
         query_count += collision_checker.query_count
         if optimal_model is None:
             # Planning failure, start again from scratch. Update tracker states
             # and restart.
             planning_attempts += 1
-            no_new_validities = \
-                collision_checker.valid_joins <= valid_joins_cached and \
-                collision_checker.invalid_joins <= invalid_joins_cached
+            invalid_chunk_sequences.add(current_chunk_sequence)
+            valid_joins_cached |= collision_checker.valid_joins
+            invalid_joins_cached |= collision_checker.invalid_joins
+            remaining_subproblems = deque(
+                _planning_subproblem(
+                    i, compression_sequence, connection_graph, current_progress
+                )
+                for i in range(step_ind, len(compression_sequence))
+            )           # Start subproblem from scratch
+            current_chunk_sequence = ()
+            join_sequence_subprob = []
+            node_pool = copy.deepcopy(node_pool_checkpoint)
+            continue
 
-            if planning_attempts > 20 and no_new_validities:
-                # If reached here, consider the `goal_selection.lp` returned
-                # a solution with bad node unification result (due to lack
-                # of accurate label information)
-                planning_feasible = False
-                break
-            else:
-                # Another round
-                valid_joins_cached |= collision_checker.valid_joins
-                invalid_joins_cached |= collision_checker.invalid_joins
-                remaining_subproblems = deque(
-                    _planning_subproblem(
-                        i, compression_sequence, connection_graph, current_progress
-                    )
-                    for i in range(step_ind, len(compression_sequence))
-                )           # Start subproblem from scratch
-                join_sequence_subprob = []
-                node_pool = copy.deepcopy(node_pool_checkpoint)
-                continue
-
-        # Project model into join action sequence and extract action
-        # parameters for each join action
+        # Project model into join action sequence
         projection = sorted([
             atm for atm in optimal_model[0]
             if atm.name=="occ" and atm.arguments[0].name=="join"
@@ -1072,32 +1071,37 @@ def _divide_and_conquer(
         projection = [
             atm.arguments[0].arguments for atm in projection
         ]
+
+        # Extract action parameters for each join action
+        resultant_ind_offset = len(join_sequence_subprob)
         arg_val = lambda a: a.name if a.type == SymbolType.Function \
-            else f"i{step_ind}_{a.number+len(join_sequence_subprob)}"
-        join_sequence_subprob += [
-            (
-                arg_val(s1), arg_val(n1), arg_val(s2), arg_val(n2),
-                f"i{step_ind}_{i+len(join_sequence_subprob)}"
-                                            # Naming resultant subassembly
+            else f"i{step_ind}_{a.number+resultant_ind_offset}"
+        for i, (s1, n1, s2, n2) in enumerate(projection):
+            s1, n1 = arg_val(s1), arg_val(n1)
+            s2, n2 = arg_val(s2), arg_val(n2)
+            # Naming resultant subassembly
+            resultant_name = f"i{step_ind}_{i+resultant_ind_offset}"
+            # Append joining step info
+            join_sequence_subprob.append(
+                (s1, n1, s2, n2, resultant_name)
             )
-            for i, (s1, s2, n1, n2) in enumerate(projection)
-        ]
 
         # Update compression graph accordingly
         resultant_name = f"i{step_ind}_{len(join_sequence_subprob)-1}"
         _compress_chunk(compression_graph, chunk_selected, resultant_name)
 
-        # Remember which components constitute the new chunk, while
-        # removing old subassemblies in chunk that have been merged
-        # into new subassembly
+        # Remember which components constitute the new chunk
         chunks_assembled[resultant_name] = {
             n for s in chunk_selected if s in chunks_assembled
             for n in chunks_assembled[s]
         } | {
             n for n in chunk_selected if n not in chunks_assembled
         }
-        for s in chunk_selected:
-            if s in chunks_assembled: del chunks_assembled[s]
+        # Remove old chunks that are now not a node in compression graph
+        chunks_assembled = {
+            chunk: atomics for chunk, atomics in chunks_assembled.items()
+            if chunk in compression_graph
+        }
 
         # Save the node pool status
         node_pool_checkpoint = node_pool
@@ -1107,37 +1111,18 @@ def _divide_and_conquer(
             (compression_graph, chunks_assembled)
         )
 
-    if planning_feasible:
-        # What we have figured out, stored in `join_sequence`, is actually one
-        # of the possible linearizations of the valid underlying partial-order
-        # joining plan. Recover the partial-order plan (represented as tree),
-        # then we will later find the linearization that will postpone
-        # involvements of non-objects as much as possible.
-        assert join_sequence is not None
-        join_tree = nx.DiGraph()
-        for s1, n1, s2, n2, res in join_sequence:
-            join_tree.add_edge(s1, res, join_by=n1)
-            join_tree.add_edge(s2, res, join_by=n2)
+    # What we have figured out, stored in `join_sequence`, is actually one
+    # of the possible linearizations of the valid underlying partial-order
+    # joining plan. Recover the partial-order plan (represented as tree),
+    # then we will later find the linearization that will postpone
+    # involvements of non-objects as much as possible.
+    assert join_sequence is not None
+    join_tree = nx.DiGraph()
+    for s1, n1, s2, n2, res in join_sequence:
+        join_tree.add_edge(s1, res, join_by=n1)
+        join_tree.add_edge(s2, res, join_by=n2)
 
-        return join_tree, planning_attempts, query_count, None
-    else:
-        # Report inability to finish, returning the set of learned
-        # scope implications due to physical collision, which will be
-        # exploited to further guide node unification
-        learned_implications = [
-            (
-                [collision_checker.inst2node[inst] for inst in insts1],
-                [collision_checker.inst2node[inst] for inst in insts2]
-            )
-            for insts1, insts2 in collision_checker.invalid_joins
-            if len(insts1)==1 or len(insts2)==1
-        ]
-        learned_implications = [
-            (nodes2, nodes1) if len(nodes1)==1 else (nodes1, nodes2)
-            for nodes1, nodes2 in learned_implications
-        ]       # Sort in ante-cons order (consequent side has length of 1)
-
-        return None, planning_attempts, query_count, learned_implications
+    return join_tree, planning_attempts, query_count
 
 def _compress_chunk(compression_graph, chunk, name):
     """
@@ -1158,8 +1143,8 @@ def _planning_subproblem(
     step_ind, compression_sequence, connection_graph, current_progress
 ):
     """
-    Helper method for obtaining a planning subproblem corresponding to
-    the specified compression step.
+    Helper method for obtaining a set planning subproblems corresponding
+    to the specified compression step
     """
     connection_status, node_unifications = current_progress
 
@@ -1201,20 +1186,22 @@ def _planning_subproblem(
     }
     for sa, sa_graph in connection_status.items():
         if len(sa_graph) == 1: continue     # No processing for singleton parts
+        # Finding the set of nodes in this compression graph covered by
+        # this existing subassembly
         sa_nodes = {
             n for n, atomics in node_components.items()
             if atomics <= {
                 node_unifications[f"{sa}_{ex_obj}"] for ex_obj in sa_graph
             }
         }
-        # Compress further by any existing relevant subassemblies
         if len(sa_nodes) >= 1:
+            # Further compress set of nodes covered by this existing subassembly
             _compress_chunk(compression_graph, sa_nodes, sa)
-            sa_components = []
+            sa_atomics = []
             for n in sa_nodes:
                 if n in chunks_assembled: chunks_assembled.pop(n)
-                sa_components.append(node_components[n])
-            chunks_assembled[sa] = set.union(*sa_components)
+                sa_atomics.append(node_components[n])
+            chunks_assembled[sa] = set.union(*sa_atomics)
 
     return compression_graph, chunks_assembled
 
@@ -1333,12 +1320,12 @@ class _PhysicalAssemblyPropagator:
                 init.add_watch(lit)
                 t = atm.symbol.arguments[1].number
                 s1 = arg_val(arg1.arguments[0])
-                s2 = arg_val(arg1.arguments[1])
-                n1 = arg_val(arg1.arguments[2])
+                n1 = arg_val(arg1.arguments[1])
+                s2 = arg_val(arg1.arguments[2])
                 n2 = arg_val(arg1.arguments[3])
 
-                self.join_actions_a2l[(s1, s2, n1, n2, t)] = lit
-                self.join_actions_l2a[lit].add((s1, s2, n1, n2, t))
+                self.join_actions_a2l[(s1, n1, s2, n2, t)] = lit
+                self.join_actions_l2a[lit].add((s1, n1, s2, n2, t))
 
             if holds_part_of:
                 lit = init.solver_literal(atm.literal)
@@ -1369,8 +1356,8 @@ class _PhysicalAssemblyPropagator:
             # Update ongoing assembly status for this thread accordingly
             if lit in self.join_actions_l2a:
                 # Join of s1 & s2 happens at time step t
-                for s1, s2, n1, n2, t in self.join_actions_l2a[lit]:
-                    status["joins"][t] = (s1, s2, n1, n2)
+                for s1, n1, s2, n2, t in self.join_actions_l2a[lit]:
+                    status["joins"][t] = (s1, n1, s2, n2)
                     updated.add((s1, t))
                     updated.add((s2, t))
 
@@ -1394,7 +1381,7 @@ class _PhysicalAssemblyPropagator:
 
         # After the round of updates, test if each join action would entail
         # a collision-free path
-        for t, (s1, s2, n1, n2) in status["joins"].items():
+        for t, (s1, n1, s2, n2) in status["joins"].items():
             if not ((s1, t) in updated or (s2, t) in updated):
                 # Nothing about this join action has been updated, can skip
                 continue
@@ -1455,7 +1442,7 @@ class _PhysicalAssemblyPropagator:
                     if minimal_pair is not None:
                         self.invalid_joins.add(minimal_pair)
 
-                join_lit = self.join_actions_a2l[(s1, s2, n1, n2, t)]
+                join_lit = self.join_actions_a2l[(s1, n1, s2, n2, t)]
                 part_of_lits = [
                     self.part_of_fluents_a2l[(n, s1, t)] for n in nodes_s1
                 ] + [
@@ -1475,9 +1462,9 @@ class _PhysicalAssemblyPropagator:
             # Update ongoing assembly status for this thread accordingly
             if lit in self.join_actions_l2a:
                 # Join of s1 & s2 actually doesn't happen at time step t
-                for s1, s2, n1, n2, t in self.join_actions_l2a[lit]:
+                for s1, n1, s2, n2, t in self.join_actions_l2a[lit]:
                     if t in status["joins"]: 
-                        assert status["joins"][t] == (s1, s2, n1, n2)
+                        assert status["joins"][t] == (s1, n1, s2, n2)
                         del status["joins"][t]
 
             if lit in self.part_of_fluents_l2a:
@@ -1550,26 +1537,30 @@ def _linearize_join_tree(
     """
     pick_up_actions, drop_actions, assemble_actions = action_inds
 
+    action_sequence = []        # Return value
+
+    if len(join_tree) == 0:
+        # If empty join tree was provided, it means all necessary joins
+        # are already accomplished and there's no more action to take.
+        # Drop whatever is held in the hands and call it a day.
+        for side in [0, 1]:
+            if exec_state["manipulator_states"][side][0] is not None:
+                action_sequence.append((drop_actions[side], ()))
+
+        return action_sequence, {}
+
     # First stipulate any unified node-to-object mappings
     node2obj_map = {}
     for sa, sa_graph in exec_state["connection_graphs"].items():
         for obj in sa_graph.nodes:
             assert f"{sa}_{obj}" in node_unifications
-            unified_node = node_unifications[f"{sa}_{obj}"]
+            if len(node_unifications[f"{sa}_{obj}"]) > 1: continue
+
+            unified_node = list(node_unifications[f"{sa}_{obj}"])[0]
             conc_n = atomic_node_concs[unified_node]
             node2obj_map[unified_node] = (obj, conc_n)
             if obj in part_candidates[conc_n]:
                 part_candidates[conc_n].remove(obj)
-
-    # Implement the select linearization as an actual action sequence, with
-    # all the necessary information fleshed out (to be passed to the Unity
-    # environment as parameters)
-    action_sequence = []
-
-    # Drop any currently held objects for headache-free re-planning
-    for side in [0, 1]:
-        if exec_state["manipulator_states"][side][0] is not None:
-            action_sequence.append((drop_actions[side], ()))
 
     # Offset to integer index for resultant subassemblies, obtained from
     # list of any existing subassemblies; ensure the newly assigned index
@@ -1580,161 +1571,207 @@ def _linearize_join_tree(
         if len(sa_graph) > 1
     ] + [-1]) + 1           # [-1] to ensure max value is always obtained
 
-    sa_ind = 0; nonobj_ind = 0; hands = [None, None]
-    sa_name_mapping = {}
-    while len(join_tree) > 1:
-        # List of all next-to-terminal nodes, which should have only two
-        # ancestors, representing currently available joins
+    # Implement the select linearization as an actual action sequence, with
+    # all the necessary information fleshed out (to be passed to the Unity
+    # environment as parameters)
+    hands = [exec_state["manipulator_states"][side][0] for side in [0, 1]]
+
+    # If either hand is non-empty, see if any join can be made immediately
+    # without dropping them, only if it wouldn't involve any non-object
+    next_join = None
+    if any(held is not None for held in hands):
         available_joins = [
             n for n in join_tree if len(nx.ancestors(join_tree, n))==2
         ]
+        available_joins = [
+            (join_res,) + tuple(n for n, _ in join_tree.in_edges(join_res))
+            for join_res in available_joins
+        ]
         available_joins_without_nonobjs = [
-            n for n in available_joins
+            (join_res, n1, n2) for join_res, n1, n2 in available_joins
             if all(
                 u not in atomic_node_concs or 
                     len(part_candidates[atomic_node_concs[u]]) > 0
-                for u, _ in join_tree.in_edges(n)
+                for u, _ in join_tree.in_edges(join_res)
             )
         ]
-
-        # Select one, and continue building up as much as possible; i.e.,
-        # until ran out of atomic parts of matching type in pool
-        if len(available_joins_without_nonobjs) > 0:
-            current_join = available_joins_without_nonobjs[0]
+        available_without_dropping = [
+            (join_res, n1, n2)
+            for join_res, n1, n2 in available_joins_without_nonobjs
+            if set(hands) - {None} <= {n1, n2}
+        ]
+        if len(available_without_dropping) > 0:
+            # Narrow down the options for the first join to the currently
+            # possible joins
+            next_join = available_without_dropping[0][0]
         else:
-            current_join = available_joins[0]
-        current_join = tuple(
-            (u, join_tree.edges[(u, v)]["join_by"])
-            for u, v in join_tree.in_edges(current_join)
-        ) + (current_join,)
-        while True:
-            (n1, a1), (n2, a2), res = current_join
+            # No such joins possible, drop currently handheld objects
+            # and just randomly pick a join
+            for side in [0, 1]:
+                if hands[side] is not None:
+                    hands[side] = None
+                    action_sequence.append((drop_actions[side], ()))
 
-            # Convert atomic nodes in hierarchy into randomly sampled objects
-            # with matching part type, on first encounter
-            for n in [a1, a2]:
-                if n in atomic_node_concs and n not in node2obj_map:
-                    conc_n = atomic_node_concs[n]
-                    if len(part_candidates[conc_n]) > 0:
-                        o = part_candidates[conc_n].pop()
-                    else:
-                        o = f"n{nonobj_ind}"
-                        nonobj_ind += 1
-                    node2obj_map[n] = (o, conc_n)
-
-            # Fetch matching (non-)object and unify with subassembly names if
-            # necessary
-            o1 = node2obj_map[a1][0]; o2 = node2obj_map[a2][0]
-            s1 = o1 if n1 == a1 else n1
-            s2 = o2 if n2 == a2 else n2
-
-            if s1 in hands or s2 in hands:
-                # Immediately using the subassembly built in the previous join
-                empty_side = hands.index(None)
-                occupied_side = list({0, 1} - {empty_side})[0]
-
-                # Pick up the other involved subassembly with the empty hand
-                pick_up_target = s2 if hands[occupied_side] == s1 else s1
-                action_sequence.append((
-                    pick_up_actions[empty_side], (pick_up_target,)
-                ))
-            else:
-                # Boths hand are (now) empty; pick up s1 and s2 on the left and
-                # the right side each
-                action_sequence.append((pick_up_actions[0], (s1,)))
-                action_sequence.append((pick_up_actions[1], (s2,)))
-
-            # Determine joining direction by comparing the degrees of the part
-            # nodes involved: smaller to larger. If the degrees are equal, break
-            # tie by comparing average neighbor degree.
-            deg_handle = lambda n: (
-                connection_graph.degree[n],
-                nx.average_neighbor_degree(connection_graph)[n]
-            )
-            if deg_handle(a1) >= deg_handle(a2):
-                # a1 is more 'central', a2 is more 'peripheral'; join a2 to a1
-                if s1 in hands:
-                    direction = 1 if hands.index(None) == 0 else 0
-                elif s2 in hands:
-                    direction = 0 if hands.index(None) == 0 else 1
-                else:
-                    direction = 0
-            else:
-                # a2 is more 'central', a1 is more 'peripheral'; join a2 to a1
-                if s1 in hands:
-                    direction = 0 if hands.index(None) == 0 else 1
-                elif s2 in hands:
-                    direction = 1 if hands.index(None) == 0 else 0
-                else:
-                    direction = 1
-
-            # Join s1 and s2 at appropriate contact point
-            sa_name = f"s{sa_ind+sa_ind_offset}"
-            sa_name_mapping[res] = sa_name
-            cp_a1, cp_a2 = contacts[(a1, a2)]
-            cp_a1 = int(re.findall(r"p_(.*)$", cp_a1)[0])
-            cp_a2 = int(re.findall(r"p_(.*)$", cp_a2)[0])
-            if s1 in hands:
-                if hands.index(None) == 0:
-                    # s1 held in right hand
-                    join_params = (s2, o2, cp_a2, s1, o1, cp_a1, sa_name)
-                else:
-                    # s1 held in left hand
-                    join_params = (s1, o1, cp_a1, s2, o2, cp_a2, sa_name)
-            elif s2 in hands:
-                if hands.index(None) == 0:
-                    # s2 held in right hand
-                    join_params = (s1, o1, cp_a1, s2, o2, cp_a2, sa_name)
-                else:
-                    # s2 held in left hand
-                    join_params = (s2, o2, cp_a2, s1, o1, cp_a1, sa_name)
-            else:
-                # Use join parameter order as-is
-                join_params = (s1, o1, cp_a1, s2, o2, cp_a2, sa_name)
-            action_sequence.append((assemble_actions[direction], join_params))
-
-            # Update hands status
-            hands = [None, None]
-            hands[direction] = res
-
-            # Current join accomplished, remove from tree
-            join_tree.remove_node(n1); join_tree.remove_node(n2)
-            if len(join_tree) == 1: break       # If finished
-
-            sa_ind += 1
-
-            # Can continue to climb up the tree if either:
-            #   1) All remaining joins involve non-objs
-            #   2) The parent join can be accomplished immediately, without
-            #       involving non-objs
-            next_join_candidate = list(join_tree.out_edges(res))[0][1]
-            other = list({
-                u for u, _ in join_tree.in_edges(next_join_candidate)
-            } - {res})[0]
-            can_continue = len(join_tree.in_edges(other)) == 0 and (
-                len(available_joins_without_nonobjs) == 0 or (
-                    other not in atomic_node_concs or
-                    len(part_candidates[atomic_node_concs[other]]) > 0
+    sa_ind = 0; nonobj_ind = 0
+    sa_name_mapping = {}
+    while len(join_tree) != 1:
+        # `next_join` is not None only if the first join can be made
+        # with object(s) currently handheld; otherwise, select one,
+        # prioritizing those not involving any non-objs
+        if next_join is None:
+            # List of all next-to-terminal nodes, which should have only two
+            # ancestors, representing currently available joins
+            available_joins = [
+                n for n in join_tree if len(nx.ancestors(join_tree, n))==2
+            ]
+            available_joins_without_nonobjs = [
+                n for n in available_joins
+                if all(
+                    u not in atomic_node_concs or 
+                        len(part_candidates[atomic_node_concs[u]]) > 0
+                    for u, _ in join_tree.in_edges(n)
                 )
-            )
-            if can_continue:
-                # Fetch next join info
-                current_join = tuple(
-                    (u, join_tree.edges[(u, v)]["join_by"])
-                    for u, v in join_tree.in_edges(next_join_candidate)
-                ) + (next_join_candidate,)
-            else:
-                # Cannot continue without involving a non-obj, drop and move
-                # onto a different starting join
-                empty_side = hands.index(None)
-                occupied_side = list({0, 1} - {empty_side})[0]
-                action_sequence.append((drop_actions[occupied_side], ()))
-                break
+            ]
 
-    # Drop the finished product on the table
-    empty_side = hands.index(None)
-    occupied_side = list({0, 1} - {empty_side})[0]
-    action_sequence.append((drop_actions[occupied_side], ()))
+            # Select one available join, and continue building up as much as
+            # possible
+            if len(available_joins_without_nonobjs) > 0:
+                next_join = available_joins_without_nonobjs[0]
+            else:
+                next_join = available_joins[0]
+
+        (n1, a1), (n2, a2) = tuple(
+            (u, join_tree.edges[(u, v)]["join_by"])
+            for u, v in join_tree.in_edges(next_join)
+        )
+        res = next_join
+
+        # Convert atomic nodes in hierarchy into randomly sampled objects
+        # with matching part type, on first encounter
+        for n in [a1, a2]:
+            if n in atomic_node_concs and n not in node2obj_map:
+                conc_n = atomic_node_concs[n]
+                if len(part_candidates[conc_n]) > 0:
+                    o = part_candidates[conc_n].pop()
+                else:
+                    o = f"n{nonobj_ind}"
+                    nonobj_ind += 1
+                node2obj_map[n] = (o, conc_n)
+
+        # Fetch matching (non-)object and unify with subassembly names if
+        # necessary
+        o1 = node2obj_map[a1][0]; o2 = node2obj_map[a2][0]
+        s1 = o1 if n1 == a1 else n1
+        s2 = o2 if n2 == a2 else n2
+
+        if s1 in hands or s2 in hands:
+            # Immediately using the subassembly built in the previous join
+            empty_side = hands.index(None)
+            occupied_side = list({0, 1} - {empty_side})[0]
+
+            # Pick up the other involved subassembly with the empty hand
+            pick_up_target = s2 if hands[occupied_side] == s1 else s1
+            action_sequence.append((
+                pick_up_actions[empty_side], (pick_up_target,)
+            ))
+        else:
+            # Boths hand are (now) empty; pick up s1 and s2 on the left and
+            # the right side each
+            action_sequence.append((pick_up_actions[0], (s1,)))
+            action_sequence.append((pick_up_actions[1], (s2,)))
+
+        # Determine joining direction by comparing the degrees of the part
+        # nodes involved: smaller to larger. If the degrees are equal, break
+        # tie by comparing average neighbor degree.
+        deg_handle = lambda n: (
+            connection_graph.degree[n],
+            nx.average_neighbor_degree(connection_graph)[n]
+        )
+        if deg_handle(a1) >= deg_handle(a2):
+            # a1 is more 'central', a2 is more 'peripheral'; join a2 to a1
+            if s1 in hands:
+                direction = 1 if hands.index(None) == 0 else 0
+            elif s2 in hands:
+                direction = 0 if hands.index(None) == 0 else 1
+            else:
+                direction = 0
+        else:
+            # a2 is more 'central', a1 is more 'peripheral'; join a2 to a1
+            if s1 in hands:
+                direction = 0 if hands.index(None) == 0 else 1
+            elif s2 in hands:
+                direction = 1 if hands.index(None) == 0 else 0
+            else:
+                direction = 1
+
+        # Join s1 and s2 at appropriate contact point
+        sa_name = f"s{sa_ind+sa_ind_offset}"
+        sa_name_mapping[res] = sa_name
+        cp_a1, cp_a2 = contacts[(a1, a2)]
+        cp_a1 = int(re.findall(r"p_(.*)$", cp_a1)[0])
+        cp_a2 = int(re.findall(r"p_(.*)$", cp_a2)[0])
+        if s1 in hands:
+            if hands.index(None) == 0:
+                # s1 held in right hand
+                join_params = (s2, o2, cp_a2, s1, o1, cp_a1, sa_name)
+            else:
+                # s1 held in left hand
+                join_params = (s1, o1, cp_a1, s2, o2, cp_a2, sa_name)
+        elif s2 in hands:
+            if hands.index(None) == 0:
+                # s2 held in right hand
+                join_params = (s1, o1, cp_a1, s2, o2, cp_a2, sa_name)
+            else:
+                # s2 held in left hand
+                join_params = (s2, o2, cp_a2, s1, o1, cp_a1, sa_name)
+        else:
+            # Use join parameter order as-is
+            join_params = (s1, o1, cp_a1, s2, o2, cp_a2, sa_name)
+        action_sequence.append((assemble_actions[direction], join_params))
+
+        # Update hands status
+        hands = [None, None]
+        hands[direction] = res
+
+        # Current join accomplished, remove from tree
+        join_tree.remove_node(n1); join_tree.remove_node(n2)
+        if len(list(join_tree.out_edges(res))) == 0:
+            # Drop and end current loop if finished for the current tree
+            empty_side = hands.index(None)
+            occupied_side = list({0, 1} - {empty_side})[0]
+            action_sequence.append((drop_actions[occupied_side], ()))
+            hands = [None, None]
+            next_join = None
+            continue
+
+        sa_ind += 1
+
+        # Can continue to climb up the tree if either:
+        #   1) All remaining joins involve non-objs
+        #   2) The parent join can be accomplished immediately, without
+        #       involving non-objs
+        next_join_candidate = list(join_tree.out_edges(res))[0][1]
+        other = list({
+            u for u, _ in join_tree.in_edges(next_join_candidate)
+        } - {res})[0]
+        can_continue = len(join_tree.in_edges(other)) == 0 and (
+            len(available_joins_without_nonobjs) == 0 or (
+                other not in atomic_node_concs or
+                len(part_candidates[atomic_node_concs[other]]) > 0
+            )
+        )
+        if can_continue:
+            # Fetch next join info
+            next_join = next_join_candidate
+        else:
+            # Cannot continue without involving a non-obj, drop and move
+            # onto a different starting join
+            empty_side = hands.index(None)
+            occupied_side = list({0, 1} - {empty_side})[0]
+            action_sequence.append((drop_actions[occupied_side], ()))
+            hands = [None, None]
+            next_join = None
+            continue
 
     # Rename subassembly names in action parameters according to the
     # collected mapping
@@ -1764,7 +1801,7 @@ def _execute_pick_up(agent, action_name, action_params):
     if "env_handle" in target_info:
         # Existing atomic object, provide the environment side name
         env_handle = target_info["env_handle"]
-        estim_type = exec_state["recognitions"][target][0]
+        estim_type = exec_state["recognitions"][target]
         if agent.cfg.exp.feedback_type in ["bool", "demo"]:
             estim_type = agent.lt_mem.lexicon.codesheet[estim_type]
         else:
@@ -1804,7 +1841,7 @@ def _execute_pick_up(agent, action_name, action_params):
         # grounding failure
 
         # Target concept, as recognized (estimation might be incorrect)
-        target_conc = exec_state["recognitions"][target][0]
+        target_conc = exec_state["recognitions"][target]
 
         if agent.cfg.exp.feedback_type in ["bool", "demo"]:
             # Language-less agents do not share vocabulary referring to parts
@@ -1911,8 +1948,8 @@ def _execute_assemble(agent, action_name, action_params):
     tmat_part_left = transformation_matrix(*poses_part_left[part_left])
     tmat_part_right = transformation_matrix(*poses_part_right[part_right])
 
-    part_conc_left = exec_state["recognitions"][part_left][0]
-    part_conc_right = exec_state["recognitions"][part_right][0]
+    part_conc_left = exec_state["recognitions"][part_left]
+    part_conc_right = exec_state["recognitions"][part_right]
     cp_list_left = agent.lt_mem.exemplars.object_3d[part_conc_left][3]
     cp_list_right = agent.lt_mem.exemplars.object_3d[part_conc_right][3]
 
@@ -1959,13 +1996,9 @@ def _execute_assemble(agent, action_name, action_params):
     tmat_rel = inv(tmat_tgt_part) @ tmat_part_moved
     graph_joined = nx.union(graph_left, graph_right)
     if action_name.endswith("left"):
-        graph_joined.add_edge(
-            part_left, part_right, rel_tr=tmat_rel, cps=(cp_left, cp_right)
-        )
+        graph_joined.add_edge(part_left, part_right, rel_tr=tmat_rel)
     else:
-        graph_joined.add_edge(
-            part_right, part_left, rel_tr=tmat_rel, cps=(cp_right, cp_left)
-        )
+        graph_joined.add_edge(part_right, part_left, rel_tr=tmat_rel)
     exec_state["connection_graphs"][product_name] = graph_joined
     # Remove used objects from connection graph listing
     del exec_state["connection_graphs"][obj_left]
@@ -2181,14 +2214,7 @@ def handle_action_effect(agent, effect, actor):
                     flip_position_y(parse_floats(start_ind+2))
                 )
 
-            # Update status of current collection of subassemblies; note
-            # that contact point info may be obscure (as opposed to joins
-            # which are planned and executed by agent in `_execute_assemble`)
-            # since agents learning from demo fragments are language-less, thus
-            # type info of involved atomic parts may not directly available.
-            # In case any of the type of the involved atomic parts in either
-            # side of the joined subassemblies are unknown to agent, omit
-            # the contact point info in the edge (i.e., "cps" field).
+            # Update status of current collection of subassemblies
             joined_left = exec_state["manipulator_states"][0][0]
             joined_right = exec_state["manipulator_states"][1][0]
             graph_left = exec_state["connection_graphs"][joined_left]
@@ -2199,29 +2225,7 @@ def handle_action_effect(agent, effect, actor):
             else:
                 join_edge = (atomic_right, atomic_left)     # L to R
             product_gr.add_edge(join_edge[0], join_edge[1])
-            rcgn_supported_left = atomic_left in exec_state["recognitions"] and \
-                exec_state["recognitions"][atomic_left][1]
-            rcgn_supported_right = atomic_right in exec_state["recognitions"] and \
-                exec_state["recognitions"][atomic_right][1]
-            if rcgn_supported_left and rcgn_supported_right:
-                # Types of both atomics 'known', add contact point info
-                part_conc_left = exec_state["recognitions"][atomic_left][0]
-                part_conc_right = exec_state["recognitions"][atomic_right][0]
-                cp_list_left = agent.lt_mem.exemplars.object_3d[part_conc_left][3]
-                cp_list_right = agent.lt_mem.exemplars.object_3d[part_conc_right][3]
-                cp_conc_left = next(
-                    conc_ind for conc_ind, (_, cp_name) in cp_list_left.items()
-                    if cp_name == re.findall(r"t_(.*)_\d+", cp_left[0])[0]+"/"+cp_left[1]
-                )
-                cp_conc_right = next(
-                    conc_ind for conc_ind, (_, cp_name) in cp_list_right.items()
-                    if cp_name == re.findall(r"t_(.*)_\d+", cp_right[0])[0]+"/"+cp_right[1]
-                )
-                product_gr.edges[join_edge]["cps"] = (
-                    cp_conc_left, cp_conc_right
-                ) if tgt_side == 0 else (
-                    cp_conc_right, cp_conc_left
-                )
+
             del exec_state["connection_graphs"][joined_left]
             del exec_state["connection_graphs"][joined_right]
             exec_state["connection_graphs"][product_name] = product_gr
@@ -2292,8 +2296,8 @@ def handle_action_effect(agent, effect, actor):
         ]
 
         # Restore connection graphs after disassembly, obtained as subgraphs
-        graph_left = sa_graph.subgraph(part_poses_left)
-        graph_right = sa_graph.subgraph(part_poses_right)
+        graph_left = sa_graph.subgraph(part_poses_left).copy()
+        graph_right = sa_graph.subgraph(part_poses_right).copy()
         exec_state["connection_graphs"][prev_left] = graph_left
         exec_state["connection_graphs"][prev_right] = graph_right
 

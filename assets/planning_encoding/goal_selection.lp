@@ -35,37 +35,30 @@ fits_signature(n(N,NS),N,NS,NS) :- node_atomic(n(N,NS),_).
 fits_signature(D,N,NS,c(NS,SG)) :-
     fits_signature(D,n(N,NS),_,SG), node_sa_template(n(N,NS),_,_).
 
-% Handling additional constraints due to already assembled parts. Unify
-% each existing object with one and only one hierarchy node. Atomic part
-% type of existing object may or may not be specified, which is represented
-% by arity of ext_node predicate (ext_node/2 or ext_node/1). Similarly,
-% contact points of existing object connection may or may not be specified
-% (ext_edge/4 or ext_edge/2).
-1{ unify_node(X,N) : node_atomic(N,_) }1 :- ext_node(X).
-1{ unify_node(X,N) : node_atomic(N,P) }1 :- ext_node(X,P).
-:- unify_node(X1,N1), unify_node(X2,N2), X1 != X2, N1 = N2.
-:- unify_node(X1,N1), unify_node(X2,N2),
-    ext_edge(X1,X2,CP1,CP2), not to_connect(N1,N2,CP1,CP2).
-:- unify_node(X1,N1), unify_node(X2,N2), ext_edge(X1,X2), not to_connect(N1,N2).
-
-% Another type of constraints may stem from any learned instances of 'node
-% entailment' relations, i.e., knowledge of a collection of template nodes
-% that ought to belong together in an existing subassembly, knowing that
-% any physical collisions did not happen in their making. These instances
-% are leared during a later step of 'join tree planning', failure of which
-% would lead to another running of this 'goal selection' step with the updated
-% knowledge.
-node_part(N,SA) :- ext_part(X,SA), unify_node(X,N).
-% Entailment constraint will look like:
-%   :- node_part(n_a1, SA), node_part(n_a2, SA), not node_part(n_c, SA)
-% where the [n_a1, n_a2] => n_c is such a constraint.
-
-% Projection of to_connect/4 to to_connect/2, abstracting away contact info
-to_connect(N1,N2) :- to_connect(N1,N2,CP1,CP2).
+% Handling additional constraints due to already assembled parts. Atomic
+% part type of existing object may or may not be specified, represented
+% by arity of ext_node predicate (ext_node/2 or ext_node/1).
+1{ must_unify(X,N) : node_atomic(N,P) }1 :- ext_node(X,P).
+:- must_unify(X1,N1), must_unify(X2,N2), X1 != X2, N1 = N2.
+:- must_unify(X1,N1), must_unify(X2,N2), ext_edge(X1,X2),
+    not to_connect(N1,N2,_,_).
+% If one side of existing object connection unifies to an atomic node with
+% known type while the other's type is not specified, the latter *MAY* be
+% unified with one of other atomic nodes connected to the unified node, as
+% long as the nodes are not already unified with objects with known types
+may_unify(X1,N1) :- ext_node(X1), ext_edge(X1,X2), must_unify(X2,N2),
+    to_connect(N1,N2,_,_), not must_unify(_,N1).
+% If both sides of existing object connection have their types unspecified,
+% they *MAY* be freely unified to some connected nodes, as long as the nodes
+% are not already unified with objects with known types
+may_unify(X1,N1) :- ext_node(X1), ext_node(X2), ext_edge(X1,X2),
+    to_connect(N1,N2,_,_), not must_unify(_,N1).
+% Even unknown-type existing objects should be unified with at least one of
+% the nodes
+:- ext_node(X), not may_unify(X,_).
 
 % Edge symmetricity
 to_connect(N2,N1,CP2,CP1) :- to_connect(N1,N2,CP1,CP2).
-ext_edge(X2,X1,CP2,CP1) :- ext_edge(X1,X2,CP1,CP2).
 ext_edge(X2,X1) :- ext_edge(X1,X2).
 
 % Compute final compatibility score by taking average across all atomic nodes

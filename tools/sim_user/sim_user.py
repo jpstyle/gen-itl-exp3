@@ -1305,7 +1305,7 @@ class SimulatedTeacher:
         # Singleton compression sequence containing all nodes
         compression_sequence = [("truck", all_nodes)]
         # Now run the procedure, just the join tree is needed
-        join_tree, _, _, _ = _divide_and_conquer(
+        join_tree, _, _ = _divide_and_conquer(
             compression_sequence, connection_graph,
             atomic_node_concs, contacts, part_names, cp_names,
             (connection_status, node_unifications), (set(), set()),
@@ -1324,30 +1324,73 @@ class SimulatedTeacher:
         # Now select the next available join to come up with the demo
         # fragment up until the join as return value
         demo_frag = []
-
-        # Drop any currently held objects for headache-free demonstration
-        if assem_st["left"] is not None: demo_frag.append(("drop_left", ()))
-        if assem_st["right"] is not None: demo_frag.append(("drop_right", ()))
-
-        # Both of agent's hands are currently empty, user can freely
-        # choose a valid join to demonstrate among remaining ones
         available_joins = [
             n for n in join_tree if len(nx.ancestors(join_tree, n))==2
         ]
-        next_join = available_joins[0]
-        obj_left, obj_right = [n for n, _ in join_tree.in_edges(next_join)]
+        available_joins = [
+            (join_res,) + tuple(n for n, _ in join_tree.in_edges(join_res))
+            for join_res in available_joins
+        ]
 
-        # Pick up each object with left and right hand resp.
-        label_key_left = "SA" if len(subassems.get(obj_left, {})) > 1 else "GT"
-        label_key_right = "SA" if len(subassems.get(obj_right, {})) > 1 else "GT"
-        demo_frag.append(("pick_up_left", (obj_left, label_key_left)))
-        demo_frag.append(("pick_up_right", (obj_right, label_key_right)))
+        current_held = (assem_st["left"], assem_st["right"])
+        if assem_st["left"] is not None or assem_st["right"] is not None:
+            # If holding anything, see if any of the available joins can be
+            # demonstrated without dropping them
+            available_without_dropping = [
+                (join_res, n1, n2) for join_res, n1, n2 in available_joins
+                if set(current_held) - {None} <= {n1, n2}
+            ]
+            if len(available_without_dropping) > 0:
+                # Narrow down the options to the currently possible joins
+                available_joins = available_without_dropping
+            else:
+                # No such joins possible, drop currently handheld objects
+                # and just randomly pick a join
+                if assem_st["left"] is not None:
+                    assem_st["left"] = None
+                    demo_frag.append(("drop_left", ()))
+                if assem_st["right"] is not None:
+                    assem_st["right"] = None
+                    demo_frag.append(("drop_right", ()))
+
+        # Specifying objects to be held (or already held) in left and right
+        # hand, respectively
+        next_join = available_joins[0]
+        if assem_st["left"] is None and assem_st["right"] is None:
+            # Both of agent's hands are currently empty, user can arbitrarily
+            # choose a valid join to demonstrate among remaining ones
+            join_res, obj_left, obj_right = next_join
+
+        elif assem_st["left"] is not None and assem_st["right"] is not None:
+            # Both of agent's hands are currently occupied, and the next
+            # join to demonstrate can be achieved immediately
+            print(0)
+
+        else:
+            # Either of agent's hands is empty and need to pick up the other
+            # object
+            join_res = next_join[0]
+            if assem_st["left"] in next_join:
+                obj_left = assem_st["left"]
+                obj_right = next_join[2] if obj_left == next_join[1] else next_join[1]
+            else:
+                assert assem_st["right"] in next_join
+                obj_left = next_join[2] if obj_right == next_join[1] else next_join[1]
+                obj_right = assem_st["right"]
+
+        # Pick up each object with left and right hand resp. as needed
+        if assem_st["left"] is None:
+            label_key_left = "SA" if len(subassems.get(obj_left, {})) > 1 else "GT"
+            demo_frag.append(("pick_up_left", (obj_left, label_key_left)))
+        if assem_st["right"] is None:
+            label_key_right = "SA" if len(subassems.get(obj_right, {})) > 1 else "GT"
+            demo_frag.append(("pick_up_right", (obj_right, label_key_right)))
 
         # For determining the assembly direction, exploit the valid joins
         # stored in `VALID_JOINS``, hence those in `contacts`, which are all
         # listed in tgt <- src direction
-        contact_left = join_tree.edges[(obj_left, next_join)]["join_by"]
-        contact_right = join_tree.edges[(obj_right, next_join)]["join_by"]
+        contact_left = join_tree.edges[(obj_left, join_res)]["join_by"]
+        contact_right = join_tree.edges[(obj_right, join_res)]["join_by"]
         if (contact_left, contact_right) in contacts:
             obj_tgt = obj_left
             contact_tgt, contact_src = contact_left, contact_right
