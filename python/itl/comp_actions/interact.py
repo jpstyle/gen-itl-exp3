@@ -595,6 +595,7 @@ def _plan_assembly(agent, build_target):
     commit_ctl = Control(["--warn=none"])
     commit_ctl.configuration.solve.models = 0
     commit_ctl.configuration.solve.opt_mode = "opt"
+    commit_ctl.configuration.solver.seed = agent.cfg.seed
     commit_ctl.load(os.path.join(lp_path, "goal_selection.lp"))
 
     # Add and ground all the fact literals obtained above
@@ -745,6 +746,7 @@ def _plan_assembly(agent, build_target):
         if len(set(scenario)) != len(scenario): continue
         unification_choice = {
             existing_objs[i]: node for i, node in enumerate(scenario)
+            if re.match(r"(s\d+)_", existing_objs[i])   # Dismiss singletons
         }
         sa_components = [
             connection_graph.subgraph(n[1] for n in v)
@@ -767,7 +769,8 @@ def _plan_assembly(agent, build_target):
             compression_sequence, connection_graph,
             atomic_node_concs, connect_edges, part_names, cp_names,
             (exec_state["connection_graphs"], unification_choice),
-            exec_state["join_validities"], agent.cfg.paths.assets_dir
+            exec_state["join_validities"],
+            agent.cfg.paths.assets_dir, agent.cfg.seed
         )
         total_planning_attempts += planning_attempts
         total_query_count += query_count
@@ -784,9 +787,9 @@ def _plan_assembly(agent, build_target):
 
     action_sequence, node2obj_map = _linearize_join_tree(
         copy.deepcopy(join_tree), exec_state, connection_graph,
-        connect_edges, atomic_node_concs, node_unifications, part_candidates,
+        connect_edges, atomic_node_concs, unification_choice, part_candidates,
         (pick_up_actions, drop_actions, assemble_actions)
-    )
+    )       # The valid `unification_choice` obtained above is passed as well
 
     recognitions = exec_state["recognitions"] | {
         oi: conc for oi, conc in node2obj_map.values()
@@ -797,7 +800,7 @@ def _plan_assembly(agent, build_target):
 def _divide_and_conquer(
     compression_sequence, connection_graph,
     atomic_node_concs, contacts, part_names, cp_names,
-    current_progress, join_validities, assets_dir
+    current_progress, join_validities, assets_dir, seed
 ):
     """
     Helper method factored out for piecewise planning of a join sequence
@@ -824,25 +827,72 @@ def _divide_and_conquer(
     with open(f"{knowledge_path}/collision_table.yaml") as yml_f:
         collision_table = yaml.safe_load(yml_f)
 
-    # Compress the connection graph part by part, randomly selecting chunks
-    # of parts or subassemblies to form smaller planning problems
-    remaining_subproblems = deque(
-        _planning_subproblem(
-            i, compression_sequence, connection_graph, current_progress
-        )
-        for i in range(len(compression_sequence))
-    )
     # Remembering valid & invalid joins of subassemblies, so as to avoid
     # calling oracle (be it cheat sheet or external motion planner)
     valid_joins_cached = join_validities[0]
     invalid_joins_cached = join_validities[1]
-    # Record every 'assembly scope implication' such that if a set of certain
-    # atomic objects are to be included in a chunk, some other object must
-    # be included in the set as well, so as to avoid deadends due to violations
-    # of 'precedence constraints'.
-    scope_implications = set()
+
+    # Method for obtaining a new instance of physical collision 'theory'
+    # propagator
+    def new_propagator():
+        return _PhysicalAssemblyPropagator(
+            (connection_graph, contacts), atomic_node_concs,
+            (collision_table, part_names, cp_names),
+            (valid_joins_cached, invalid_joins_cached)
+        )
+    # Instantiate a new propagator, which will establish a mapping between
+    # connection graph nodes and collision table instances.
+    collision_checker = new_propagator()
+    # Record any available 'assembly scope entailment' such that if a set of
+    # certain atomic objects are to be included in a chunk, some other object
+    # must be included in the set as well, so as to avoid deadends due to
+    # violations of precedence constraints
+    scope_entailments = set()
+    def update_scope_entailments(propagator):
+        # Update list of known scope entailments from invalid joins witnessed
+        for insts1, insts2 in propagator.invalid_joins:
+            nodes1 = frozenset(propagator.inst2node[i] for i in insts1)
+            nodes2 = frozenset(propagator.inst2node[i] for i in insts2)
+
+            # Process each direction only if the 'consequent' side of the
+            # entailment has one object in the set
+            if len(nodes1) == 1:
+                scope_entailments.add((nodes2, list(nodes1)[0]))
+            if len(nodes2) == 1:
+                scope_entailments.add((nodes1, list(nodes2)[0]))
+    update_scope_entailments(collision_checker)
+
+    # Compress the connection graph part by part, randomly selecting chunks
+    # of parts or subassemblies to form smaller planning problems
+    remaining_subproblems = deque(
+        _planning_subproblems(
+            compression_sequence, connection_graph, current_progress
+        )
+    )
+
     # Tracking how many piecewise planning attempts and oracle calls were made
     planning_attempts = 1; query_count = 0
+
+    # At any point, test if initial configuration of a subproblem violates
+    # any scope entailment from start, in which case the subproblem is
+    # fundamentally unsolvable. Keep testing with scope entailments being
+    # continuously updated.
+    def subproblem_invalid(subproblem):
+        chunks_assembled = subproblem[1]
+        for ante, cons in scope_entailments:
+            # Return true if ante is included in some chunk but cons is not
+            # included in the same chunk
+            if any(
+                ante <= atomics and cons not in atomics
+                for atomics in chunks_assembled.values()
+            ):
+                return True
+        else:
+            # Passed all test
+            return False
+    if any(subproblem_invalid(sp) for sp in remaining_subproblems):
+        return None, planning_attempts, query_count
+
     # For remembering sequences of chunking that has proven to reach deadend
     # for this particular subproblem
     current_chunk_sequence = ()
@@ -873,6 +923,7 @@ def _divide_and_conquer(
                 # join sequence is obtained for this subproblem
                 join_sequence_subprob[-1] = \
                     join_sequence_subprob[-1][:-1] + (f"c{step_ind}",)
+            collision_checker = new_propagator()
             join_sequence += join_sequence_subprob
             join_sequence_subprob = []
             current_chunk_sequence = ()
@@ -881,7 +932,7 @@ def _divide_and_conquer(
             continue
 
         # Continue joining groups of nodes in compression graph that are valid
-        # according to (any) scope implications
+        # according to (any) scope entailments
 
         # Candidate chunks of nodes and involved atomics, with seeds initialized
         # as all edges in compression graph
@@ -891,12 +942,12 @@ def _divide_and_conquer(
             frozenset([n1, n2]): get_atomics(n1) | get_atomics(n2)
             for n1, n2 in compression_graph.edges
         }
-        # Complete any candidate chunk that violates any scope implication
-        # by continuously adding implication consequent nodes
+        # Complete any candidate chunk that violates any scope entailment
+        # by continuously adding entailment consequent nodes
         while True:
             new_candidate_chunks = {}
             for chunk, atomics in candidate_chunks.items():
-                for ante, cons in scope_implications:
+                for ante, cons in scope_entailments:
                     if ante <= atomics and cons not in atomics:
                         # Consequent node needs to be added to the current
                         # chunk being inspected
@@ -937,15 +988,19 @@ def _divide_and_conquer(
                 valid_joins_cached |= collision_checker.valid_joins
                 invalid_joins_cached |= collision_checker.invalid_joins
                 remaining_subproblems = deque(
-                    _planning_subproblem(
-                        i, compression_sequence, connection_graph, current_progress
-                    )
-                    for i in range(step_ind, len(compression_sequence))
-                )           # Start subproblem from scratch
-                current_chunk_sequence = ()
-                join_sequence_subprob = []
-                node_pool = copy.deepcopy(node_pool_checkpoint)
-                continue
+                    _planning_subproblems(
+                        compression_sequence, connection_graph, current_progress
+                    )[step_ind:]
+                )
+                if any(subproblem_invalid(sp) for sp in remaining_subproblems):
+                    # Some subproblem proven to be unsolvable, can return
+                    return None, planning_attempts, query_count
+                else:
+                    # Start again
+                    current_chunk_sequence = ()
+                    join_sequence_subprob = []
+                    node_pool = copy.deepcopy(node_pool_checkpoint)
+                    continue
 
         # Remove instances in the selected chunk from node_pool
         for n in chunk_selected:
@@ -954,16 +1009,13 @@ def _divide_and_conquer(
             if n in node_pool[conc_n]: node_pool[conc_n].remove(n)
 
         # Load ASP encoding for planning sequence of atomic actions
-        collision_checker = _PhysicalAssemblyPropagator(
-            (connection_graph, contacts), atomic_node_concs,
-            (collision_table, part_names, cp_names),
-            (valid_joins_cached, invalid_joins_cached)
-        )
+        collision_checker = new_propagator()
         lp_path = os.path.join(assets_dir, "planning_encoding")
         plan_ctl = Control(["--warn=none"])
         plan_ctl.register_propagator(collision_checker)
         plan_ctl.configuration.solve.models = 0
         plan_ctl.configuration.solve.opt_mode = "opt"
+        plan_ctl.configuration.solver.seed = seed
         plan_ctl.load(os.path.join(lp_path, "assembly_sequence.lp"))
 
         # Committed goal condition expressed as ASP fact literals
@@ -1001,10 +1053,10 @@ def _divide_and_conquer(
             if step > len(chunk_selected):
                 # If reached here, ASP problem has no valid solution, probably
                 # due to faulty subgraph sampling; update the set of assembly
-                # implications as appropriate
+                # entailments as appropriate
 
                 # Break from this while loop to restart planning (after due
-                # updates of scope implications)
+                # updates of scope entailments)
                 break
 
             if step > 0:
@@ -1026,17 +1078,8 @@ def _divide_and_conquer(
                 else:
                     step += 1
 
-        # Update list of known scope implications from invalid joins witnessed
-        for insts1, insts2 in collision_checker.invalid_joins:
-            nodes1 = frozenset(collision_checker.inst2node[i] for i in insts1)
-            nodes2 = frozenset(collision_checker.inst2node[i] for i in insts2)
-
-            # Process each direction only if the 'consequent' side of the
-            # implication has one object in the set
-            if len(nodes1) == 1:
-                scope_implications.add((nodes2, list(nodes1)[0]))
-            if len(nodes2) == 1:
-                scope_implications.add((nodes1, list(nodes2)[0]))
+        # Update list of known scope entailments
+        update_scope_entailments(collision_checker)
 
         # Tracking sequence of selected chunks, so as to remember invalid
         # sequences that led to deadend states and prevent following the
@@ -1053,15 +1096,19 @@ def _divide_and_conquer(
             valid_joins_cached |= collision_checker.valid_joins
             invalid_joins_cached |= collision_checker.invalid_joins
             remaining_subproblems = deque(
-                _planning_subproblem(
-                    i, compression_sequence, connection_graph, current_progress
-                )
-                for i in range(step_ind, len(compression_sequence))
-            )           # Start subproblem from scratch
-            current_chunk_sequence = ()
-            join_sequence_subprob = []
-            node_pool = copy.deepcopy(node_pool_checkpoint)
-            continue
+                _planning_subproblems(
+                    compression_sequence, connection_graph, current_progress
+                )[step_ind:]
+            )
+            if any(subproblem_invalid(sp) for sp in remaining_subproblems):
+                # Some subproblem proven to be unsolvable, can return
+                return None, planning_attempts, query_count
+            else:
+                # Start again
+                current_chunk_sequence = ()
+                join_sequence_subprob = []
+                node_pool = copy.deepcopy(node_pool_checkpoint)
+                continue
 
         # Project model into join action sequence
         projection = sorted([
@@ -1139,14 +1186,29 @@ def _compress_chunk(compression_graph, chunk, name):
             if v in compression_graph: compression_graph.remove_node(v)
             if u not in chunk: compression_graph.add_edge(u, name)
 
-def _planning_subproblem(
-    step_ind, compression_sequence, connection_graph, current_progress
+def _planning_subproblems(
+    compression_sequence, connection_graph, current_progress
 ):
     """
-    Helper method for obtaining a set planning subproblems corresponding
-    to the specified compression step
+    Helper method for obtaining a set of planning subproblems from the
+    provided compression sequence and connection graph, while accounting
+    for current assembly progress
     """
+    compression_sequence = copy.deepcopy(compression_sequence)
     connection_status, node_unifications = current_progress
+    chunks_status = {
+        sa: {
+            node_unifications[f"{sa}_{ex_obj}"] for ex_obj in sa_graph
+        }
+        for sa, sa_graph in connection_status.items()
+        if len(sa_graph) > 1            # Dismiss singletons
+    }                       # Node grouping state tracker across sequence
+
+    subproblems = []        # Return value
+
+    # Method for flattening nonatomic node to set of contained atomic nodes
+    flatten_node = lambda n, cmp_seq: {n} if n not in cmp_seq \
+        else set.union(*[flatten_node(m, cmp_seq) for m in cmp_seq[n]])
 
     # Obtain graph representation of the assembly subprogram for the
     # current progress, by replaying the compression sequence up to
@@ -1156,54 +1218,75 @@ def _planning_subproblem(
         sa_node: f"c{i}"
         for i, (sa_node, _) in enumerate(compression_sequence)
     }
-    for i in range(step_ind):
-        compressed_nodes = compression_sequence[i][1]
-        compressed_nodes = [
+    for step_ind in range(len(compression_sequence)):
+        # First compress by intermediate chunks
+        compressed_nodes = compression_sequence[step_ind][1]
+        compressed_nodes = {
             intermediate_chunks.get(n, n) for n in compressed_nodes
-        ]
-        _compress_chunk(compression_graph, compressed_nodes, f"c{i}")
-    subproblem_nodes = [
-        intermediate_chunks.get(n, n)
-        for n in compression_sequence[step_ind][1]
-    ]
-    compression_graph = compression_graph.subgraph(subproblem_nodes).copy()
-
-    # Chunks assembled so far involved in the subproblem, with their
-    # component nodes
-    flatten_node = lambda n: set.union(*[flatten_node(m) for m in cmp_seq[n]]) \
-        if n in (cmp_seq := dict(compression_sequence)) else {n}
-    chunks_assembled = {
-        intermediate_chunks[sa_node]: set.union(*[
-            flatten_node(n) for n in component_nodes
-        ])
-        for sa_node, component_nodes in compression_sequence[:step_ind]
-        if intermediate_chunks[sa_node] in subproblem_nodes
-    }
-
-    # Account for any progress made so far
-    node_components = chunks_assembled | {
-        n: {n} for n in compression_graph if n not in chunks_assembled
-    }
-    for sa, sa_graph in connection_status.items():
-        if len(sa_graph) == 1: continue     # No processing for singleton parts
-        # Finding the set of nodes in this compression graph covered by
-        # this existing subassembly
-        sa_nodes = {
-            n for n, atomics in node_components.items()
-            if atomics <= {
-                node_unifications[f"{sa}_{ex_obj}"] for ex_obj in sa_graph
-            }
         }
-        if len(sa_nodes) >= 1:
-            # Further compress set of nodes covered by this existing subassembly
-            _compress_chunk(compression_graph, sa_nodes, sa)
-            sa_atomics = []
-            for n in sa_nodes:
-                if n in chunks_assembled: chunks_assembled.pop(n)
-                sa_atomics.append(node_components[n])
-            chunks_assembled[sa] = set.union(*sa_atomics)
+        subproblem_graph = compression_graph.subgraph(compressed_nodes).copy()
+        _compress_chunk(compression_graph, compressed_nodes, f"c{step_ind}")
+            # Compress for the remaining steps
 
-    return compression_graph, chunks_assembled
+        # Chunks assembled so far involved in the subproblem, with their
+        # component atomics
+        chunks_assembled = {
+            intermediate_chunks[sa_node]: set.union(*[
+                flatten_node(n, dict(compression_sequence))
+                for n in component_nodes
+            ])
+            for sa_node, component_nodes in compression_sequence[:step_ind]
+            if intermediate_chunks[sa_node] in compressed_nodes
+        }
+
+        # Account for any progress made in environment so far
+        node_components = chunks_assembled | {
+            n: {n} for n in subproblem_graph if n not in chunks_assembled
+        }
+        for sa, sa_atomics in chunks_status.items():
+            if sa in subproblem_graph: continue    # Already included
+
+            # Finding the set of nodes in compression graph covered by
+            # this existing subassembly
+            subsumed_nodes = [
+                n for n, atomics in node_components.items()
+                if atomics <= sa_atomics
+            ]
+            if len(subsumed_nodes) == 0: continue
+
+            # Further compress set of nodes covered by this existing subassembly
+            _compress_chunk(subproblem_graph, subsumed_nodes, sa)
+            chunks_assembled[sa] = sa_atomics
+            for n in subsumed_nodes:
+                if n in chunks_assembled: chunks_assembled.pop(n)
+
+        if len(subproblem_graph) > 1:
+            # Meaningful joins are yet to be made out of this subproblem,
+            # resulting in the final product with name as listed in
+            # `intermediate_chunks`. Update `chunks_status`.
+            sa_node = compression_sequence[step_ind][0]
+            chunk_atomics = set()
+            for n in subproblem_graph:
+                if n in chunks_status:
+                    chunk_atomics |= chunks_status.pop(n)
+                else:
+                    chunk_atomics.add(n)
+            chunks_status[intermediate_chunks[sa_node]] = chunk_atomics
+
+        # Now we can safely replace `compression_sequence[step_ind][1]` with
+        # the set of all atomics covered by this subproblem
+        compression_sequence[step_ind] = (
+            compression_sequence[step_ind][0],
+            list(set.union(*[
+                chunks_assembled[n] if n in chunks_assembled else {n}
+                for n in subproblem_graph
+            ]))
+        )
+
+        # Append to the list of subproblems
+        subproblems.append((subproblem_graph, chunks_assembled))
+
+    return subproblems
 
 class _PhysicalAssemblyPropagator:
     def __init__(
@@ -1313,7 +1396,7 @@ class _PhysicalAssemblyPropagator:
 
             occ_join = pred == "occ" and arg1.name == "join"
             holds_part_of = pred == "holds" and arg1.name == "part_of" \
-                and atm.symbol.positive     # Dismiss -holds() atoms!
+                and atm.symbol.positive     # Dismiss -holds() atoms
 
             if occ_join:
                 lit = init.solver_literal(atm.literal)
@@ -1554,9 +1637,7 @@ def _linearize_join_tree(
     for sa, sa_graph in exec_state["connection_graphs"].items():
         for obj in sa_graph.nodes:
             assert f"{sa}_{obj}" in node_unifications
-            if len(node_unifications[f"{sa}_{obj}"]) > 1: continue
-
-            unified_node = list(node_unifications[f"{sa}_{obj}"])[0]
+            unified_node = node_unifications[f"{sa}_{obj}"]
             conc_n = atomic_node_concs[unified_node]
             node2obj_map[unified_node] = (obj, conc_n)
             if obj in part_candidates[conc_n]:
@@ -1577,7 +1658,7 @@ def _linearize_join_tree(
     hands = [exec_state["manipulator_states"][side][0] for side in [0, 1]]
 
     # If either hand is non-empty, see if any join can be made immediately
-    # without dropping them, only if it wouldn't involve any non-object
+    # without dropping them
     next_join = None
     if any(held is not None for held in hands):
         available_joins = [
@@ -1587,17 +1668,9 @@ def _linearize_join_tree(
             (join_res,) + tuple(n for n, _ in join_tree.in_edges(join_res))
             for join_res in available_joins
         ]
-        available_joins_without_nonobjs = [
-            (join_res, n1, n2) for join_res, n1, n2 in available_joins
-            if all(
-                u not in atomic_node_concs or 
-                    len(part_candidates[atomic_node_concs[u]]) > 0
-                for u, _ in join_tree.in_edges(join_res)
-            )
-        ]
         available_without_dropping = [
             (join_res, n1, n2)
-            for join_res, n1, n2 in available_joins_without_nonobjs
+            for join_res, n1, n2 in available_joins
             if set(hands) - {None} <= {n1, n2}
         ]
         if len(available_without_dropping) > 0:
@@ -1615,24 +1688,24 @@ def _linearize_join_tree(
     sa_ind = 0; nonobj_ind = 0
     sa_name_mapping = {}
     while len(join_tree) != 1:
+        # List of all next-to-terminal nodes, which should have only two
+        # ancestors, representing currently available joins
+        available_joins = [
+            n for n in join_tree if len(nx.ancestors(join_tree, n))==2
+        ]
+        available_joins_without_nonobjs = [
+            n for n in available_joins
+            if all(
+                u not in atomic_node_concs or 
+                    len(part_candidates[atomic_node_concs[u]]) > 0
+                for u, _ in join_tree.in_edges(n)
+            )
+        ]
+
         # `next_join` is not None only if the first join can be made
         # with object(s) currently handheld; otherwise, select one,
         # prioritizing those not involving any non-objs
         if next_join is None:
-            # List of all next-to-terminal nodes, which should have only two
-            # ancestors, representing currently available joins
-            available_joins = [
-                n for n in join_tree if len(nx.ancestors(join_tree, n))==2
-            ]
-            available_joins_without_nonobjs = [
-                n for n in available_joins
-                if all(
-                    u not in atomic_node_concs or 
-                        len(part_candidates[atomic_node_concs[u]]) > 0
-                    for u, _ in join_tree.in_edges(n)
-                )
-            ]
-
             # Select one available join, and continue building up as much as
             # possible
             if len(available_joins_without_nonobjs) > 0:

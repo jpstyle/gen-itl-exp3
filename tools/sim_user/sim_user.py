@@ -1309,7 +1309,7 @@ class SimulatedTeacher:
             compression_sequence, connection_graph,
             atomic_node_concs, contacts, part_names, cp_names,
             (connection_status, node_unifications), (set(), set()),
-            self.cfg.paths.assets_dir
+            self.cfg.paths.assets_dir, self.cfg.seed
         )
 
         # Integer index for the resultant subassembly, obtained from list of
@@ -1375,8 +1375,8 @@ class SimulatedTeacher:
                 obj_right = next_join[2] if obj_left == next_join[1] else next_join[1]
             else:
                 assert assem_st["right"] in next_join
-                obj_left = next_join[2] if obj_right == next_join[1] else next_join[1]
                 obj_right = assem_st["right"]
+                obj_left = next_join[2] if obj_right == next_join[1] else next_join[1]
 
         # Pick up each object with left and right hand resp. as needed
         if assem_st["left"] is None:
