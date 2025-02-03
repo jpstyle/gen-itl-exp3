@@ -63,12 +63,6 @@ public class DialogueAgent : Agent
 
     // Behavior type as MLAgent
     private BehaviorType _behaviorType;
-
-    // A bit of 'cheating' for stabilizing pose estimation results, as physical
-    // simulations may perturb rotation after dropping objects. Cache localRotations
-    // of held objects when dropping, and restore when picking them
-    // back up
-    private Dictionary<string, Quaternion> _rotationCache;
     
     // Boolean flag indicating an Utter action is invoked as coroutine and currently
     // running; for preventing multiple invocation of Utter coroutine 
@@ -99,7 +93,6 @@ public class DialogueAgent : Agent
             );
 
         _behaviorType = GetComponent<BehaviorParameters>().BehaviorType;
-        _rotationCache = new Dictionary<string, Quaternion>();
         _nextTimeToAct = Time.time;
 
         leftOriginalPosition = leftHand.localPosition;
@@ -355,15 +348,19 @@ public class DialogueAgent : Agent
                 }
                 else
                 {
-                    partStrings.Add(req);
-
-                    var range = (stringPointer, stringPointer + req.Length);
-
                     // Find relevant EnvEntity and fetch mask
-                    var foundEnt = EnvEntity.FindByObjectPath("/" + req);
-                    responseMasks[range] = new EntityRef(GetSensorMask(foundEnt));
+                    var foundEnt = EnvEntity.FindByObjectPath("/" + req + "/" + req);
+                    var gtMaskRef = new EntityRef(GetSensorMask(foundEnt));
 
-                    stringPointer += req.Length;
+                    // Part instance name + subtype string identifier; the latter is used
+                    // as `identifying codes` for language-less player types
+                    var nameWithType = req + "/" + foundEnt.licensedLabels[0]; 
+                    partStrings.Add(nameWithType);
+
+                    var range = (stringPointer, stringPointer + nameWithType.Length);
+                    responseMasks[range] = gtMaskRef;
+
+                    stringPointer += nameWithType.Length;
                     if (gtMaskRequests.Count > 0) stringPointer += 2;
                         // Account for ", " delimiter
                 }
@@ -571,8 +568,6 @@ public class DialogueAgent : Agent
         var targetObj = targetEnt.gameObject;
         targetObj.transform.parent = activeHand.transform;
         targetObj.transform.localPosition = Vector3.zero;
-        if (_rotationCache.TryGetValue(targetObj.name, out var cachedRotation))
-            targetObj.transform.localRotation = cachedRotation;
         var objRigidbody = targetObj.GetComponent<Rigidbody>();
         objRigidbody.isKinematic = true;
         objRigidbody.detectCollisions = false;
@@ -647,9 +642,6 @@ public class DialogueAgent : Agent
 
         // Get handle of object
         var heldObj = activeHand.transform.GetChild(0).gameObject;
-
-        // Cache the current local rotation so that it can be restored later
-        _rotationCache[heldObj.name] = heldObj.transform.localRotation;
         
         // Move target object above (y) some random x/z-position within the main
         // work area partition, 'release' by nullifying the hand's child status,
@@ -689,10 +681,12 @@ public class DialogueAgent : Agent
     {
         var directionString = rightToLeft ? "right_to_left" : "left_to_right";
 
-        // Action aftermath info to return; poses (position, quaternion) of the
-        // manipulator before and after movement, poses of atomic parts contained
-        // in the assembled product
+        // Action aftermath info to return; resultant product name, involved contact points
+        // resp. from left and right sides, poses (position, quaternion) of the manipulator
+        // before and after movement, pose of target-side manipulator, poses of atomic parts
+        // contained in the assembled product
         var actionEffect = $"# Effect: assemble_{directionString}(";
+        actionEffect += $"{productName},{leftPoint},{rightPoint},";
 
         // Assemble two subassemblies held in each hand as guided by the specified
         // target contact points, left-to-right or right-to-left
@@ -768,7 +762,13 @@ public class DialogueAgent : Agent
         var afterString = $"{rotAfter.ToString("F4")},{posAfter.ToString("F4")}";
         afterString = afterString.Replace("(", "").Replace(")", "").Replace(", ", "/");
 
-        actionEffect += $"{beforeString},{afterString}";
+        // Pose of target side manipulator, in camera coordinate
+        var rotTarget = Quaternion.Inverse(camTr.rotation) * tgtHand.rotation;
+        var posTarget = camTr.InverseTransformPoint(tgtHand.position);
+        var targetString = $"{rotTarget.ToString("F4")},{posTarget.ToString("F4")}";
+        targetString = targetString.Replace("(", "").Replace(")", "").Replace(", ", "/");
+
+        actionEffect += $"{beforeString},{afterString},{targetString}";
 
         // Handles to subassembly objects held in source & target hands
         var srcHeld = srcHand.transform.GetChild(0).gameObject;
