@@ -18,7 +18,7 @@ vision:
 
 exp:
     task: "build_truck_supertype"
-    feedback_type: "label"     # Options: "bool", "demo", "label", "full"
+    player_type: "label"     # Options: "bool", "demo", "label", "full"
     num_episodes: 3000
 
 seed: 42

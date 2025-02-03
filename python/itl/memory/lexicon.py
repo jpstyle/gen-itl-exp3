@@ -48,6 +48,13 @@ class Lexicon:
         self.add(("va", "disassemble_left"), ("arel", 11))
         self.add(("va", "disassemble_right"), ("arel", 12))
 
+        # For language-less agents only; storing string pseudolabels that can
+        # be tested in Unity environment for determining whether a pick-up
+        # action is executed with the correct part type assumption. This is
+        # to keep the symbols in the main lexicon and those in the code listings
+        # conceptually separate since the latter isn't agent's proper vocabulary.
+        self.codesheet = {}
+
     def __repr__(self):
         return f"Lexicon(len={len(self.s2d)})"
 

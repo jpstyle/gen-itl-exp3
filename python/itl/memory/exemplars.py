@@ -132,14 +132,19 @@ class Exemplars:
         if conc_ind in self.object_3d:
             # Entry exists; interpret intent as adding contact points
             if contact_points is not None:
-                for cp_conc_ind, annos in contact_points.items():
-                    self.object_3d[conc_ind][3][cp_conc_ind] += annos
+                for cp_conc_ind, anno in contact_points.items():
+                    contacts_info = self.object_3d[conc_ind][3]
+                    if cp_conc_ind in contacts_info:
+                        assert anno[1] == contacts_info[cp_conc_ind][1]
+                        contacts_info[cp_conc_ind] = (
+                            contacts_info[cp_conc_ind][0] | anno[0],
+                            anno[1]
+                        )
+                    else:
+                        contacts_info[cp_conc_ind] = anno
         else:
             # New entry
-            if contact_points is None:
-                contact_points = defaultdict(list)
-            else:
-                contact_points = defaultdict(list, contact_points)
+            contact_points = contact_points or {}
 
             # Store the provided info
             self.object_3d[conc_ind] = (

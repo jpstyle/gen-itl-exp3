@@ -54,7 +54,7 @@ def main(cfg):
     # Experiment tag
     exp_tag = "_".join([
         cfg.exp.task.split("_")[-1],
-        cfg.exp.feedback_type,
+        cfg.exp.player_type,
         str(cfg.seed)
     ])
 
@@ -273,9 +273,15 @@ def main(cfg):
                                 student.symbolic.sensemake_vis(None, visual_evidence)
                                 # Record instance names used in the environment side associated
                                 # with each object
+                                aliases = teacher.current_episode_record["assembly_state"]["aliases"]
+                                    # Provide teacher with access to the object correspondence as well
                                 for i, crange in enumerate(dem_refs):
-                                    env_handle = utterance[crange[0]:crange[1]]
-                                    student.vision.scene[f"o{i}"]["env_handle"] = env_handle
+                                    name_with_type = utterance[crange[0]:crange[1]].split("/")
+                                    env_handle, type_code = name_with_type
+                                    student.vision.scene[f"o{i}"].update({
+                                        "env_handle": env_handle, "type_code": type_code
+                                    })
+                                    aliases[f"o{i}"] = env_handle
                             else:
                                 # General case where message from Teacher or Student-side
                                 # action effect feedback from Unity environment has arrived

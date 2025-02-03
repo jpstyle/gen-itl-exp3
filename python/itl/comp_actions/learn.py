@@ -559,6 +559,7 @@ def analyze_demonstration(agent, demo_data):
     that apply among different concepts.
     """
     # Shortcuts
+    exemplars = agent.lt_mem.exemplars
     referents = agent.lang.dialogue.referents
     value_assignment = agent.lang.dialogue.value_assignment
 
@@ -569,7 +570,7 @@ def analyze_demonstration(agent, demo_data):
     # Sequentially process each demonstration step
     current_held = [None, None]; current_assembly_info = None
     nonatomic_subassemblies = set()
-    nl_labeling = {}
+    part_labeling = {}; sa_labeling = {}
     vision_2d_data = defaultdict(list); vision_3d_data = {}; assembly_sequence = []
     for img, annotations, env_refs in demo_data:
         # Appropriately handle each annotation
@@ -690,12 +691,12 @@ def analyze_demonstration(agent, demo_data):
                                 # & after movement, and poses of part instances contained in
                                 # the assembly product
                                 mnp_pose_before = (
-                                    flip_quaternion_y(xyzw2wxyz(parse_floats(2))),
-                                    flip_position_y(parse_floats(3))
+                                    flip_quaternion_y(xyzw2wxyz(parse_floats(5))),
+                                    flip_position_y(parse_floats(6))
                                 )
                                 mnp_pose_after = (
-                                    flip_quaternion_y(xyzw2wxyz(parse_floats(4))),
-                                    flip_position_y(parse_floats(5))
+                                    flip_quaternion_y(xyzw2wxyz(parse_floats(7))),
+                                    flip_position_y(parse_floats(8))
                                 )
                                 current_assembly_info += [
                                     "RToL" if left_or_right==0 else "LToR",
@@ -703,13 +704,13 @@ def analyze_demonstration(agent, demo_data):
                                 ]
                                 assembly_sequence.append(tuple(current_assembly_info))
 
-                                num_parts = int(referents["dis"][lit.args[6][0]]["name"])
+                                num_parts = int(referents["dis"][lit.args[11][0]]["name"])
                                 part_poses = current_held[left_or_right][1]
                                 for i in range(num_parts):
-                                    part_name = referents["dis"][lit.args[7+3*i][0]]["name"]
+                                    part_name = referents["dis"][lit.args[12+3*i][0]]["name"]
                                     part_poses[part_name] = (
-                                        flip_quaternion_y(xyzw2wxyz(parse_floats(7+3*i+1))),
-                                        flip_position_y(parse_floats(7+3*i+2))
+                                        flip_quaternion_y(xyzw2wxyz(parse_floats(12+3*i+1))),
+                                        flip_position_y(parse_floats(12+3*i+2))
                                     )
 
                                 # Making way for a new one (not necessary, just signposting)
@@ -729,13 +730,13 @@ def analyze_demonstration(agent, demo_data):
                 elif raw.startswith("Pick up a"):
                     # NL description providing labeling of the atomic part just
                     # picked up with a pick_up~ action
-                    nl_labeling[current_held[left_or_right][0]] = \
+                    part_labeling[current_held[left_or_right][0]] = \
                         re.findall(r"Pick up a (.*)\.$", raw)[0]
 
                 elif raw.startswith("This is a"):
                     # NL description providing labeling of the subassembly just
                     # placed on the desk with a drop~ action
-                    nl_labeling[lastly_dropped] = \
+                    sa_labeling[lastly_dropped] = \
                         re.findall(r"This is a (.*)\.$", raw)[0]
 
             else:
@@ -769,28 +770,58 @@ def analyze_demonstration(agent, demo_data):
     # new visual concepts & neologisms; we assume here all neologisms are nouns
     # (corresponding to 'pcls')
     inst2conc_map = {}
-    for part_inst, part_type_name in nl_labeling.items():
-        sym = ("n", part_type_name)
-        if sym in agent.lt_mem.lexicon:
-            # Already registered
-            _, conc_ind = agent.lt_mem.lexicon.s2d[sym][0]
-            inst2conc_map[part_inst] = conc_ind
-        else:
-            # Neologism
+    if agent.cfg.exp.player_type in ["bool", "demo"]:
+        # No access to any NL labeling; first assign new concept indices for
+        # part instances with vision_3d_data available (obtained from multi-
+        # view inspection), as they are understood to have all distinct types.
+        # Instances without vision_3d_data will later be classified into one
+        # of the newly assigned concepts.
+        for part_inst in vision_3d_data:
             new_conc_ind = agent.vision.add_concept("pcls")
-            agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
             inst2conc_map[part_inst] = new_conc_ind
+            # Store 'identification code strings' so that they can be passed
+            # to Unity environment when executing pick-up actions, which will
+            # be compared against the list of licensed labels to simulate
+            # pick-up actions with correct/perturbed poses. This is needed
+            # for language-less player types only for their lack of access
+            # to NL labels.
+            type_code = next(
+                obj["type_code"] for obj in agent.vision.scene.values()
+                if obj["env_handle"] == part_inst
+            )
+            agent.lt_mem.lexicon.codesheet[new_conc_ind] = type_code
+    else:
+        # Has access to NL labeling of part & subassembly instances, use them
+        assert agent.cfg.exp.player_type in ["label", "full"]
+        for part_inst, part_type_name in part_labeling.items():
+            sym = ("n", part_type_name)
+            if sym in agent.lt_mem.lexicon:
+                # Already registered
+                _, conc_ind = agent.lt_mem.lexicon.s2d[sym][0]
+                inst2conc_map[part_inst] = conc_ind
+            else:
+                # Neologism
+                new_conc_ind = agent.vision.add_concept("pcls")
+                agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
+                inst2conc_map[part_inst] = new_conc_ind
 
-        # In whichever case, the symbol shouldn't be a 'unresolved neologism'
-        if sym in agent.lang.unresolved_neologisms:
-            agent.lang.unresolved_neologisms.remove(sym)
+            # In whichever case, the symbol shouldn't be a 'unresolved neologism'
+            if sym in agent.lang.unresolved_neologisms:
+                agent.lang.unresolved_neologisms.remove(sym)
+        # Also process any new subassembly concepts/neologisms
+        for sa_inst, sa_type_name in sa_labeling.items():
+            sym = ("n", sa_type_name)
+            if sym not in agent.lt_mem.lexicon:
+                new_conc_ind = agent.vision.add_concept("pcls")
+                agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
+    
 
     # Process 3D vision data, storing reconstructed structure data in XB    
     for part_inst, reconstruction in vision_3d_data.items():
         point_cloud, views, descriptors = reconstruction
 
         # Store the reconstructed structure info in XB
-        agent.lt_mem.exemplars.add_exs_3d(
+        exemplars.add_exs_3d(
             inst2conc_map[part_inst],
             np.asarray(point_cloud.points), views, descriptors
         )
@@ -821,11 +852,12 @@ def analyze_demonstration(agent, demo_data):
     # Add 2D vision data in XB, based on the newly assigned pcls concept indices
     for part_inst, examples in vision_2d_data.items():
         if part_inst not in inst2conc_map:
-            # Cannot exactly specify which concept this instance classifies as, skip
+            # Concept label info was not available (which happens for language-less
+            # player types), 
             continue
 
         for image, mask, f_vec in examples:
-            exemplars = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
+            exs_2d = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
             pointers = {
                 ("pcls", inst2conc_map[inst], "pos" if inst==part_inst else "neg"): {
                     # (Whether object is newly added to XB, index 0 as only one is newly
@@ -834,15 +866,33 @@ def analyze_demonstration(agent, demo_data):
                 }
                 for inst in vision_2d_data if inst in inst2conc_map
             }
-            agent.lt_mem.exemplars.add_exs_2d(
-                scene_img=image, exemplars=exemplars, pointers=pointers
-            )
+            exemplars.add_exs_2d(scene_img=image, exemplars=exs_2d, pointers=pointers)
+    # Concept labels must be assigned to unlabeled part instances. An orthodox approach
+    # would be to classify them to the closest example by visual features. However,
+    # our abstraction approach of using a 'collision table cheat sheet' as oracle
+    # complicates things when parts are misclassified at this stage. Since it is not
+    # our primary focus to achieve perfect classification here (and it should be
+    # relatively straightforward to achieve, in real scenarios; e.g., active perception)
+    # we will just assume unlabeled instances are perfectly classified, using the
+    # licensed label code data received from Unity.
+    for part_inst in vision_2d_data:
+        if part_inst in inst2conc_map: continue
+
+        type_code = next(
+            obj["type_code"] for obj in agent.vision.scene.values()
+            if obj["env_handle"] == part_inst
+        )
+        inst2conc_map[part_inst] = next(
+            conc_ind
+            for conc_ind, label in agent.lt_mem.lexicon.codesheet.items()
+            if label == type_code
+        )
 
     # Finally process assembly data; estimate pose of assembled parts in hand,
     # infer 3D locations of 'contact points' based on manipulator pose difference,
     # and topological structure of (sub)assemblies
-    assembly_trees = {}             # Trees representing (sub)assembly structures
-
+    assembly_trees = {}          # Tracking progress as structure trees
+    cp2conc_map = {}
     for assembly_step in assembly_sequence:
         # Unpacking assembly step information
         (obj_l, part_poses_l), contact_l = assembly_step[0]
@@ -856,23 +906,43 @@ def analyze_demonstration(agent, demo_data):
         part_inst_r = contact_r.split("/")[0]
         part_conc_ind_l = inst2conc_map[part_inst_l]
         part_conc_ind_r = inst2conc_map[part_inst_r]
+
+        # Obtain oracle cp identifier strings by reducing part instance field
+        # values into part (super)type values
+        part_supertype_l = re.findall(r"t_(.*)_\d+$", part_inst_l)[0]
+        part_supertype_r = re.findall(r"t_(.*)_\d+$", part_inst_r)[0]
+        cp_name_l = f"{part_supertype_l}/" + contact_l.split("/")[1]
+        cp_name_r = f"{part_supertype_r}/" + contact_r.split("/")[1]
+
+        # Contact point to corresponding concept, assigning new concepts as
+        # needed on the fly
+        if cp_name_l in cp2conc_map:
+            cp_conc_ind_l = cp2conc_map[cp_name_l]
+        else:
+            cp_conc_ind_l = agent.vision.add_concept("pcls")
+            cp2conc_map[cp_name_l] = cp_conc_ind_l
+        if cp_name_r in cp2conc_map:
+            cp_conc_ind_r = cp2conc_map[cp_name_r]
+        else:
+            cp_conc_ind_r = agent.vision.add_concept("pcls")
+            cp2conc_map[cp_name_r] = cp_conc_ind_r
+
+        # Inferring contact point poses. Each contact point in a 3D part
+        # structure has different pose according to which contact point
+        # it is joining to.
         part_pose_l = part_poses_l[part_inst_l]
         part_pose_r = part_poses_r[part_inst_r]
         tmat_l = transformation_matrix(*part_pose_l)
         tmat_r = transformation_matrix(*part_pose_r)
 
-        # Infer contact point from the ground-truth object poses and manipulator
-        # movement
         if direction == "RToL":
             tmat_tgt_obj = tmat_l; tmat_src_obj_before = tmat_r
-            tgt_conc_ind = part_conc_ind_l; src_conc_ind = part_conc_ind_r
-            pcl_tgt = agent.lt_mem.exemplars.object_3d[part_conc_ind_l][0]
-            pcl_src = agent.lt_mem.exemplars.object_3d[part_conc_ind_r][0]
+            pcl_tgt = exemplars.object_3d[part_conc_ind_l][0]
+            pcl_src = exemplars.object_3d[part_conc_ind_r][0]
         else:
             tmat_tgt_obj = tmat_r; tmat_src_obj_before = tmat_l
-            tgt_conc_ind = part_conc_ind_r; src_conc_ind = part_conc_ind_l
-            pcl_tgt = agent.lt_mem.exemplars.object_3d[part_conc_ind_r][0]
-            pcl_src = agent.lt_mem.exemplars.object_3d[part_conc_ind_l][0]
+            pcl_tgt = exemplars.object_3d[part_conc_ind_r][0]
+            pcl_src = exemplars.object_3d[part_conc_ind_l][0]
         pcl_tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_tgt))
         pcl_src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pcl_src))
 
@@ -890,10 +960,14 @@ def analyze_demonstration(agent, demo_data):
         # obtained transformations to (arbitrarily) define a contact point
         # to be aligned when assembled. Define both position and rotation.
         pcl_tgt.transform(tmat_tgt_obj); pcl_src.transform(tmat_src_obj_after)
+
+        # Contact point poses are inferred to be weighted centroid of the
+        # associated two point clouds (position), whose orientation are determined
+        # by PCA in the 3D coordinate
         points_cat = np.concatenate([pcl_tgt.points, pcl_src.points])
 
         # Position of contact point: weighted centroid of points in both clouds,
-        # weighted by distances to nearest points in each other
+        # weighted by distances (gaussian kernel) to nearest points in each other
         pdists = pairwise_distances(pcl_tgt.points, pcl_src.points)
         min_dists_cat = np.concatenate([pdists.min(axis=1), pdists.min(axis=0)])
         weights = np.exp(-min_dists_cat / min_dists_cat.mean())
@@ -922,99 +996,146 @@ def analyze_demonstration(agent, demo_data):
             rmat2quat(tmat_src_obj_after[:3,:3].T @ cp_rmat),
             tuple((inv(tmat_src_obj_after) @ np.append(cp_position, 1))[:3].tolist())
         )
+        pose_cp_l = pose_cp_tgt if direction == "RToL" else pose_cp_src
+        pose_cp_r = pose_cp_src if direction == "RToL" else pose_cp_tgt
 
-        # Assigning new concept indices as needed
-        cp_l_conc_ind = agent.vision.add_concept("pcls")
-        cp_r_conc_ind = agent.vision.add_concept("pcls")
-        cp_tgt_conc_ind = cp_l_conc_ind if direction == "RToL" else cp_r_conc_ind
-        cp_src_conc_ind = cp_r_conc_ind if direction == "RToL" else cp_l_conc_ind
-
-        # For storing oracle cp identifier strings
-        part_supertype_l = re.findall(r"t_(.*)_\d+$", part_inst_l)[0]
-        part_supertype_r = re.findall(r"t_(.*)_\d+$", part_inst_r)[0]
-        oracle_cp_name_l = contact_l.split("/")[1]
-        oracle_cp_name_r = contact_r.split("/")[1]
-        if direction == "RToL":
-            oracle_tag_cp_tgt = f"{part_supertype_l}/{oracle_cp_name_l}"
-            oracle_tag_cp_src = f"{part_supertype_r}/{oracle_cp_name_r}"
-        else:
-            oracle_tag_cp_tgt = f"{part_supertype_r}/{oracle_cp_name_r}"
-            oracle_tag_cp_src = f"{part_supertype_l}/{oracle_cp_name_l}"
-
-        # Register contact point type and pose info
-        agent.lt_mem.exemplars.add_exs_3d(
-            tgt_conc_ind, None, None, None,
-            { cp_tgt_conc_ind: [(pose_cp_tgt, oracle_tag_cp_tgt)] }
+        # Register contact point type and pose info as needed. Also providing
+        # the oracle string name in this work, so that we can 'cheat' when
+        # we run 'collision checks' for planning
+        exemplars.add_exs_3d(
+            part_conc_ind_l, None, None, None,
+            { cp_conc_ind_l: ({ cp_conc_ind_r: pose_cp_l }, cp_name_l) }
         )
-        agent.lt_mem.exemplars.add_exs_3d(
-            src_conc_ind, None, None, None,
-            { cp_src_conc_ind: [(pose_cp_src, oracle_tag_cp_src)] }
+        exemplars.add_exs_3d(
+            part_conc_ind_r, None, None, None,
+            { cp_conc_ind_r: ({ cp_conc_ind_l: pose_cp_r } , cp_name_r) }
         )
 
-        # Add new subassembly tree by adding concept-annotated part nodes and
+        # Add new subassembly tree by adding concept-annotated nodes and
         # connecting them with contact-annotated edges
-        if obj_l in assembly_trees:
-            subassembly_l = assembly_trees.pop(obj_l)
-        else:
-            subassembly_l = nx.Graph()
-            subassembly_l.add_node(
-                obj_l, part_conc=part_conc_ind_l, part_handle=part_inst_l
-            )
-        if obj_r in assembly_trees:
-            subassembly_r = assembly_trees.pop(obj_r)
-        else:
-            subassembly_r = nx.Graph()
-            subassembly_r.add_node(
-                obj_r, part_conc=part_conc_ind_r, part_handle=part_inst_r
-            )
+        def flatten_paths(sa_graph):
+            # Recursive helper method for obtaining the map from individual
+            # atomic part name handle in the provided subassembly graph to
+            # their flattened paths
+            flattened_paths = {}
+            for n in sa_graph:
+                match sa_graph.nodes[n]["node_type"]:
+                    case "atomic":
+                        flattened_paths[n] = n
+                    case "sa":
+                        sa_node_paths = flatten_paths(assembly_trees[n])
+                        for hdl, path in sa_node_paths.items():
+                            flattened_paths[hdl] = f"{n}/{path}"
+            return flattened_paths
+        subassemblies = []; connect_nodes = []; part_paths = []
+        lr_bundle = zip(
+            [obj_l, obj_r], [part_conc_ind_l, part_conc_ind_r],
+            [part_inst_l, part_inst_r]
+        )
+        for obj, part_conc_ind, part_inst in lr_bundle:
+            if obj in part_labeling or obj in vision_2d_data:
+                # Atomic part if listed in part_labeling (for languageful
+                # player types) or vision_2d_data (fallback for languageless
+                # player types); create a new node
+                sa_graph = nx.Graph()
+                sa_graph.add_node(
+                    obj, node_type="atomic",
+                    conc=part_conc_ind, part_paths={ part_inst: part_inst }
+                )
+                subassemblies.append(sa_graph)
+                connect_nodes.append(obj)
+                part_paths.append(obj)
+            elif obj in sa_labeling:
+                # Meaningful subassembly if listed in sa_labeling; create
+                # a new node
+                sa_graph = nx.Graph()
+                sa_graph.add_node(
+                    obj, node_type="sa",
+                    conc=agent.lt_mem.lexicon.s2d[("n", sa_labeling[obj])][0][1],
+                    part_paths=flatten_paths(assembly_trees[obj])
+                )
+                subassemblies.append(sa_graph)
+                connect_nodes.append(obj)
+                part_paths.append(
+                    obj + "/" + sa_graph.nodes[obj]["part_paths"][part_inst]
+                )
+            else:
+                # Subassembly but not annotated as meaningful, pop from progress
+                assert obj in assembly_trees
+                sa_graph = assembly_trees.pop(obj)
+                all_paths = {
+                    hdl: (n, f"{n}/{path}") 
+                        if sa_graph.nodes[n]["node_type"] == "sa" else (n, n)
+                    for n in sa_graph
+                    for hdl, path in sa_graph.nodes[n]["part_paths"].items()
+                }
+                subassemblies.append(sa_graph)
+                connect_nodes.append(all_paths[part_inst][0])
+                part_paths.append(all_paths[part_inst][1])
 
-        assembly_trees[resulting_subassembly] = nx.union(subassembly_l, subassembly_r)
-        part_node_l = next(
-            n for n in subassembly_l.nodes
-            if subassembly_l.nodes[n]["part_handle"] in contact_l
-        )
-        part_node_r = next(
-            n for n in subassembly_r.nodes
-            if subassembly_r.nodes[n]["part_handle"] in contact_r
-        )
+        assembly_trees[resulting_subassembly] = nx.union(*subassemblies)
         assembly_trees[resulting_subassembly].add_edge(
-            part_node_l, part_node_r,
+            connect_nodes[0], connect_nodes[1],
             contact={
-                part_node_l: (cp_l_conc_ind, 0),
-                part_node_r: (cp_r_conc_ind, 0)
+                connect_nodes[0]: (part_paths[0], cp_conc_ind_l),
+                connect_nodes[1]: (part_paths[1], cp_conc_ind_r)
             }
         )
 
+    # Remaining assembly trees are those of meaningful substructures, process
+    # and remember them in the long-term memory
+    node_reindex = {
+        subassembly_name: { n: i for i, n in enumerate(tree.nodes) }
+        for subassembly_name, tree in assembly_trees.items()
+    }           # Assign arbitrary integer ordering to nodes in each tree
     for subassembly_name, tree in assembly_trees.items():
         # Create a new assembly graph, relabeling node names into case-neutral
         # indices
         neutral_tree = nx.Graph()
 
-        # Assign arbitrary integer ordering to atomic parts in subassemblies
-        node_reindex = list(tree.nodes)
-
         # Accordingly neutralize node and edge name & data
         for n, n_data in tree.nodes(data=True):
-            n_ind = node_reindex.index(n)
+            n_ind = node_reindex[subassembly_name][n]
             n_data_new = {
-                "node_type": "atomic_part",
-                "parts": {n_data["part_conc"]}
+                "node_type": n_data["node_type"],
+                "conc": n_data["conc"] if n_data["node_type"] == "atomic"
+                    else (n_data["conc"], 0)
+                    # This assumes all involved subassembly concepts are the
+                    # first entry in the list of all of its possible structures
             }
             neutral_tree.add_node(n_ind, **n_data_new)
         for n1, n2, e_data in tree.edges(data=True):
-            n1_ind, n2_ind = (node_reindex.index(n1), node_reindex.index(n2))
-            n1_conc = tree.nodes[n1]["part_conc"]
-            n2_conc = tree.nodes[n2]["part_conc"]
+            n1_ind, n2_ind = (
+                node_reindex[subassembly_name][n1],
+                node_reindex[subassembly_name][n2]
+            )
+            part_path_n1, cp_conc_ind_n1 = e_data["contact"][n1]
+            part_path_n2, cp_conc_ind_n2 = e_data["contact"][n2]
+            # Translating instance-based paths to lifted, node-based paths
+            part_path_n1 = [subassembly_name] + part_path_n1.split("/")
+            part_path_n2 = [subassembly_name] + part_path_n2.split("/")
+            part_path_n1 = tuple(
+                node_reindex[part_path_n1[i]][part_path_n1[i+1]]
+                for i in range(len(part_path_n1)-1)
+            )
+            part_path_n2 = tuple(
+                node_reindex[part_path_n2[i]][part_path_n2[i+1]]
+                for i in range(len(part_path_n2)-1)
+            )
             e_data_new = {
                 "contact": {
-                    n1_ind: { (n1_conc,): e_data["contact"][n1] },
-                    n2_ind: { (n2_conc,): e_data["contact"][n2] }
+                    n1_ind: (part_path_n1, cp_conc_ind_n1),
+                    n2_ind: (part_path_n2, cp_conc_ind_n2)
                 }
+                # An assumption under work here is that each part cannot
+                # have more than one instances of the same contact point
+                # type; i.e., each contact point within a part can be
+                # uniquely determined by contact point type concept
             }
             neutral_tree.add_edge(n1_ind, n2_ind, **e_data_new)
 
         # Parse subassembly concept type & index
-        sa_conc = agent.lt_mem.lexicon.s2d[("n", nl_labeling[subassembly_name])][0]
+        sa_conc = agent.lt_mem.lexicon.s2d[("n", sa_labeling[subassembly_name])][0]
         sa_conc = (sa_conc[0], int(sa_conc[1]))
 
         # Store the structure in KB
