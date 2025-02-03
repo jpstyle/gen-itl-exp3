@@ -674,13 +674,13 @@ def _plan_assembly(agent, build_target):
     }
     # Extracted mapping from string part names to agent's internal concept
     # denotations
-    if agent.cfg.exp.feedback_type in ["bool", "demo"]:
+    if agent.cfg.exp.player_type in ["bool", "demo"]:
         # While agent and user doesn't have shared vocab, agent has been 
         # injected with a codesheet of correspondence between part concept
         # and string identifier used in Unity
         part_names = agent.lt_mem.lexicon.codesheet
     else:
-        assert agent.cfg.exp.feedback_type in ["label", "full"]
+        assert agent.cfg.exp.player_type in ["label", "full"]
         part_names = {
             d[1]: s[0][1] for d, s in agent.lt_mem.lexicon.d2s.items()
             if d[0]=="pcls"
@@ -1178,13 +1178,15 @@ def _compress_chunk(compression_graph, chunk, name):
     from the specified collection
     """
     compression_graph.add_node(name)
+    edges_to_add = []
     for u, v in list(compression_graph.edges):
         if u in chunk:
             if u in compression_graph: compression_graph.remove_node(u)
-            if v not in chunk: compression_graph.add_edge(name, v)
+            if v not in chunk: edges_to_add.append((name, v))
         if v in chunk:
             if v in compression_graph: compression_graph.remove_node(v)
-            if u not in chunk: compression_graph.add_edge(u, name)
+            if u not in chunk: edges_to_add.append((u, name))
+    compression_graph.add_edges_from(edges_to_add)
 
 def _planning_subproblems(
     compression_sequence, connection_graph, current_progress
@@ -1244,8 +1246,6 @@ def _planning_subproblems(
             n: {n} for n in subproblem_graph if n not in chunks_assembled
         }
         for sa, sa_atomics in chunks_status.items():
-            if sa in subproblem_graph: continue    # Already included
-
             # Finding the set of nodes in compression graph covered by
             # this existing subassembly
             subsumed_nodes = [
@@ -1258,7 +1258,9 @@ def _planning_subproblems(
             _compress_chunk(subproblem_graph, subsumed_nodes, sa)
             chunks_assembled[sa] = sa_atomics
             for n in subsumed_nodes:
-                if n in chunks_assembled: chunks_assembled.pop(n)
+                if n in chunks_assembled and n != sa:
+                    # If n == sa, allow 'overwriting'
+                    chunks_assembled.pop(n)
 
         if len(subproblem_graph) > 1:
             # Meaningful joins are yet to be made out of this subproblem,
@@ -1635,6 +1637,7 @@ def _linearize_join_tree(
     # First stipulate any unified node-to-object mappings
     node2obj_map = {}
     for sa, sa_graph in exec_state["connection_graphs"].items():
+        if len(sa_graph) == 1: continue     # Dismiss singletons
         for obj in sa_graph.nodes:
             assert f"{sa}_{obj}" in node_unifications
             unified_node = node_unifications[f"{sa}_{obj}"]
@@ -1875,10 +1878,10 @@ def _execute_pick_up(agent, action_name, action_params):
         # Existing atomic object, provide the environment side name
         env_handle = target_info["env_handle"]
         estim_type = exec_state["recognitions"][target]
-        if agent.cfg.exp.feedback_type in ["bool", "demo"]:
+        if agent.cfg.exp.player_type in ["bool", "demo"]:
             estim_type = agent.lt_mem.lexicon.codesheet[estim_type]
         else:
-            assert agent.cfg.exp.feedback_type in ["label", "full"]
+            assert agent.cfg.exp.player_type in ["label", "full"]
             estim_type = agent.lt_mem.lexicon.d2s[("pcls", estim_type)][0][1]
         agent_action = [
             (action_name, {
@@ -1916,7 +1919,7 @@ def _execute_pick_up(agent, action_name, action_params):
         # Target concept, as recognized (estimation might be incorrect)
         target_conc = exec_state["recognitions"][target]
 
-        if agent.cfg.exp.feedback_type in ["bool", "demo"]:
+        if agent.cfg.exp.player_type in ["bool", "demo"]:
             # Language-less agents do not share vocabulary referring to parts
             # and thus need to report inability to proceed. Agent reports
             # it was not able to find a part needed for finishing the task,
@@ -1946,7 +1949,7 @@ def _execute_pick_up(agent, action_name, action_params):
         else:
             # Language-conversant agents can inquire the agent whether there
             # exists an instance of a part they need
-            assert agent.cfg.exp.feedback_type in ["label", "full"]
+            assert agent.cfg.exp.player_type in ["label", "full"]
 
             # NL symbol for the needed part
             target_sym = agent.lt_mem.lexicon.d2s[("pcls", target_conc)][0][1]
@@ -2216,7 +2219,7 @@ def handle_action_effect(agent, effect, actor):
         if actor == "Teacher":
             # Language-less agents would need to re-plan after an undone pick-up
             # action
-            assert agent.cfg.exp.feedback_type in ["bool", "demo"]
+            assert agent.cfg.exp.player_type in ["bool", "demo"]
             exec_state["replanning_needed"] = True
 
     if action_name.startswith("assemble"):
@@ -2374,7 +2377,7 @@ def handle_action_effect(agent, effect, actor):
         exec_state["connection_graphs"][prev_left] = graph_left
         exec_state["connection_graphs"][prev_right] = graph_right
 
-        if agent.cfg.exp.feedback_type in ["bool", "demo"]:
+        if agent.cfg.exp.player_type in ["bool", "demo"]:
             # Language-less agents would need to re-plan after an undone pick-up
             # action
             assert actor == "Teacher"

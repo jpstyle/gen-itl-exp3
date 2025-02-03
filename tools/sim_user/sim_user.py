@@ -54,7 +54,7 @@ class SimulatedTeacher:
         # Teacher's strategy on how to give feedback upon student's wrong answer
         # (provided the student has taken initiative for extended ITL interactions
         # by asking further questions after correct answer feedback)
-        self.feedback_type = cfg.exp.feedback_type
+        self.player_type = cfg.exp.player_type
 
         # Queue of actions to execute, if any demonstration is ongoing
         self.ongoing_demonstration = (None, [])
@@ -263,13 +263,13 @@ class SimulatedTeacher:
                         singleton_gr.add_node(target)
                         subassems[target] = singleton_gr
 
-                    if self.feedback_type in ["label", "full"]:
+                    if self.player_type in ["label", "full"]:
                         inst = re.findall(r"^t_(.*)_(\d+)$", target)
                         inst = (inst[0][0], int(inst[0][1])) if len(inst) == 1 else None
                         if inst in sampled_parts:
                             target_label = f"a {inst[0]}"
                         else:
-                            if self.feedback_type == "label":
+                            if self.player_type == "label":
                                 target_label = "the subassembly"
                             else:
                                 target_label = f"the {target}"
@@ -290,7 +290,7 @@ class SimulatedTeacher:
                     # of substructures --- except the final product "truck", which
                     # must be provided for all player types
                     dropped_sa = assem_st[side]
-                    if self.feedback_type == "full" or dropped_sa == "truck":
+                    if self.player_type == "full" or dropped_sa == "truck":
                         act_dscr = {
                             "utterance": f"This is a {dropped_sa}.",
                             "pointing": {
@@ -333,7 +333,7 @@ class SimulatedTeacher:
                     assem_st["left"] = subassembly if side == "left" else None
                     assem_st["right"] = None if side == "left" else subassembly
 
-                    if self.feedback_type in ["label", "full"]:
+                    if self.player_type in ["label", "full"]:
                         # Linguistic annotation (though this utterance doesn't provide
                         # any additional learning signals in our scope)
                         act_dscr = {
@@ -427,11 +427,11 @@ class SimulatedTeacher:
                             ("generate", { "utterance": "Stop.", "pointing": {} }),
                             (f"drop_{side}", { "parameters": () })
                         ]
-                        if self.feedback_type == "bool":
+                        if self.player_type == "bool":
                             # Minimal help; no additional learning signal than the fact
                             # that the undone pick-up action is invalid
                             self.ongoing_demonstration = ("frag", [])
-                        elif self.feedback_type == "demo":
+                        elif self.player_type == "demo":
                             # Language-less player type with assistance by demonstration;
                             # sample a next valid join and proceed to demonstrate
                             demo_segment = self._sample_demo_step()
@@ -439,7 +439,7 @@ class SimulatedTeacher:
                         else:
                             # Languageful player types; directly inquire the intent
                             # of the undone pick-up action
-                            assert self.feedback_type in ["label", "full"]
+                            assert self.player_type in ["label", "full"]
                             response += [
                                 ("generate", {
                                     "utterance": "What were you trying to join?",
@@ -526,11 +526,11 @@ class SimulatedTeacher:
                                 )
                             })
                         ]
-                        if self.feedback_type == "bool":
+                        if self.player_type == "bool":
                             # Minimal help; no additional learning signal than the fact
                             # that the undone pick-up action is invalid
                             self.ongoing_demonstration = ("frag", [])
-                        elif self.feedback_type == "demo":
+                        elif self.player_type == "demo":
                             # Language-less player type with assistance by demonstration;
                             # sample a next valid join and proceed to demonstrate
                             demo_segment = self._sample_demo_step()
@@ -538,7 +538,7 @@ class SimulatedTeacher:
                         else:
                             # Languageful player types; directly inquire the intent
                             # of the undone pick-up action
-                            assert self.feedback_type in ["label", "full"]
+                            assert self.player_type in ["label", "full"]
                             response += [
                                 ("generate", {
                                     "utterance": "What were you trying to join?",
@@ -579,7 +579,7 @@ class SimulatedTeacher:
                 # on the table (which is guaranteed by design)
 
                 # Player type may be 'bool' or 'demo'
-                assert self.feedback_type in ["bool", "demo"]
+                assert self.player_type in ["bool", "demo"]
 
                 # Whichever type it is, provide a partial demonstration, up to
                 # a next join valid in current progress

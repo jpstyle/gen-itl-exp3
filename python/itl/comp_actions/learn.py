@@ -770,7 +770,7 @@ def analyze_demonstration(agent, demo_data):
     # new visual concepts & neologisms; we assume here all neologisms are nouns
     # (corresponding to 'pcls')
     inst2conc_map = {}
-    if agent.cfg.exp.feedback_type in ["bool", "demo"]:
+    if agent.cfg.exp.player_type in ["bool", "demo"]:
         # No access to any NL labeling; first assign new concept indices for
         # part instances with vision_3d_data available (obtained from multi-
         # view inspection), as they are understood to have all distinct types.
@@ -792,7 +792,7 @@ def analyze_demonstration(agent, demo_data):
             agent.lt_mem.lexicon.codesheet[new_conc_ind] = type_code
     else:
         # Has access to NL labeling of part & subassembly instances, use them
-        assert agent.cfg.exp.feedback_type in ["label", "full"]
+        assert agent.cfg.exp.player_type in ["label", "full"]
         for part_inst, part_type_name in part_labeling.items():
             sym = ("n", part_type_name)
             if sym in agent.lt_mem.lexicon:

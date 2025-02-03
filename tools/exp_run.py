@@ -54,7 +54,7 @@ def main(cfg):
     # Experiment tag
     exp_tag = "_".join([
         cfg.exp.task.split("_")[-1],
-        cfg.exp.feedback_type,
+        cfg.exp.player_type,
         str(cfg.seed)
     ])
 
