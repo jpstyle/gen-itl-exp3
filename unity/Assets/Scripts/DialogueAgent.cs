@@ -342,9 +342,11 @@ public class DialogueAgent : Agent
                         FindObjectsByType<EnvEntity>(FindObjectsSortMode.None)
                         .Where(
                             ent => ent.gameObject.transform.parent is null
-                        );
-                    foreach (var ent in topEntities)
-                        gtMaskRequests.Enqueue(ent.gameObject.name);
+                        )
+                        .Select(ent => ent.gameObject.name)
+                        .ToList();
+                    topEntities.Sort();
+                    foreach (var entName in topEntities) gtMaskRequests.Enqueue(entName);
                 }
                 else
                 {
