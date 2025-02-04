@@ -1155,7 +1155,7 @@ def posthoc_episode_analysis(agent):
     labeling feedback from user.
     """
     if agent.cfg.exp.player_type not in ["bool", "demo"]:
-        # Only needed for languageless agents
+        # Only needed for languageless agents as of now
         return
 
     exec_state = agent.planner.execution_state      # Shortcut var

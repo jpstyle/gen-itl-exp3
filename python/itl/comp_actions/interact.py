@@ -705,7 +705,7 @@ def _plan_assembly(agent, build_target):
     }
 
     # Turns out if a structure consists of too many atomic parts (say, more
-    # than 6 or so), ASP planner performance is significantly affected. We
+    # than 8 or so), ASP planner performance is significantly affected. We
     # handle this by breaking each planning subproblem down to multiple
     # smaller ones... In principle, this may risk planning failure when
     # physical collision check is involved, depending on how the target

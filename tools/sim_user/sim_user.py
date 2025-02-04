@@ -44,6 +44,7 @@ class SimulatedTeacher:
     
     def __init__(self, cfg):
         self.cfg = cfg
+        self.next_seed = cfg.seed
 
         # History of ITL episode records
         self.episode_records = []
@@ -150,10 +151,15 @@ class SimulatedTeacher:
 
         # Leverage ASP to obtain all possible samples of valid part set subject to
         # a set of constraints
+        random.seed(self.next_seed)
         sampled_inits = self._sample_ASP(
             self.target_concept, self.domain_knowledge,
             constraints, all_subtypes, num_distractors
         )
+        self.next_seed = random.randint(1, 1000000)
+            # Set and record randomization seed at this point in order to ensure
+            # planning problems are kept constant across experiments sharindg the
+            # starting seed
 
         # Extract and store sampled part subtype info for the current scene
         sampled_parts = {}
