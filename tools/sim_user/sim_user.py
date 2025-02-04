@@ -572,11 +572,19 @@ class SimulatedTeacher:
                     # No interruption needs to be made, keep observing...
                     response.append(("generate", { "utterance": "# Observing", "pointing": {} }))
 
-            elif utt == "I cannot find a part I need on the table.":
-                # Agent has failed to ground an instance of some part type;
-                # however, due to lack of shared vocabulary, agent was not
-                # able to directly query whether an instance of the type exists
-                # on the table (which is guaranteed by design)
+            elif utt == "I cannot find a part I need on the table." or \
+                utt.startswith("I couldn't plan further"):
+                # Two possible cases that need user feedback by partial demo:
+                #    1) Agent has failed to ground an instance of some part
+                #       type; however, due to lack of shared vocabulary, agent
+                #       was not able to directly query whether an instance of
+                #       the type exists on the table (which is guaranteed by
+                #       design).
+                #    2) Agent has failed to plan until the end product due to
+                #       lack of accurate part type info on some atomic parts
+                #       that are used and included in some subassembly. This
+                #       happens because user feedback by demo doesn't provide
+                #       immediately available part type info.
 
                 # Player type may be 'bool' or 'demo'
                 assert self.player_type in ["bool", "demo"]
