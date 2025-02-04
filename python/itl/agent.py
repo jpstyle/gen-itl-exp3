@@ -63,8 +63,8 @@ class ITLAgent:
         """
         Single agent activity loop, called with inputs of visual scene, natural
         language utterances from user and affiliated gestures (demonstrative
-        references by pointing in our case). new_vis flag indicates whether
-        the visual scene input is new.
+        references by pointing in our case). new_env flag indicates whether
+        the agent is situated in a new environment
         """
         self._vis_inp(usr_in=v_usr_in, new_env=new_env)
         self._lang_inp(usr_in=l_usr_in, pointing=pointing, speaker=speaker)
@@ -530,9 +530,16 @@ class ITLAgent:
                 todo_type, todo_args = self.planner.agenda.popleft()
 
                 # In pause mode, ignore any `execute_command` items, as well as
-                # any simple report "Done" (since it won't ever be)
+                # any success/failure report and post-hoc analysis (since task won't
+                # ever progress)
                 if self.execution_paused:
                     if todo_type == "execute_command":
+                        unresolved_items.append((todo_type, todo_args))
+                        continue
+                    if todo_type == "posthoc_episode_analysis":
+                        unresolved_items.append((todo_type, todo_args))
+                        continue
+                    if todo_type == "report_planning_failure":
                         unresolved_items.append((todo_type, todo_args))
                         continue
                     if todo_type == "utter_simple" and todo_args[0] == "Done.":

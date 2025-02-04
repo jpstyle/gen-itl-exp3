@@ -98,6 +98,16 @@ library = {
         }
     ],
 
+    # After task execution is finished for an episode, run post-hoc analysis of
+    # the final environment state to extract any learning signals
+    "posthoc_episode_analysis": [
+        # Called right before report of task completion in each episode
+        {
+            "action_method": Val(referrable=["comp_actions", "posthoc_episode_analysis"]),
+            "action_args_getter": lambda x: ()
+        }
+    ],
+
     # Push a simple utterance (that doesn't need a specific logical form associated)
     # to generation buffer along with sentence mood
     "utter_simple": [
@@ -111,5 +121,22 @@ library = {
             "action_method": Val(referrable=["lang", "generate"]),
             "action_args_getter": lambda x: ()
         }
-    ]
+    ],
+
+    # Agent wasn't able to come up with a complete plan that ends up with
+    # the desired end product due to uncertainty on types of parts used in
+    # some subassembly. Report that it couldn't plan further and ask for help.
+    # Expected to be called by langaugeless agents only
+    "report_planning_failure": [
+        # Called right before report of task completion in each episode
+        {
+            "action_method": Val(referrable=["comp_actions", "report_planning_failure"]),
+            "action_args_getter": lambda x: ()
+        },
+        # Generate the prepared answer
+        {
+            "action_method": Val(referrable=["lang", "generate"]),
+            "action_args_getter": lambda x: ()
+        }
+    ],
 }

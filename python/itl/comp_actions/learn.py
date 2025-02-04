@@ -1142,6 +1142,35 @@ def analyze_demonstration(agent, demo_data):
         agent.lt_mem.kb.add_structure(sa_conc, neutral_tree)
 
 
+def posthoc_episode_analysis(agent):
+    """
+    After the task for the current episode is fulfilled, compare the final
+    estimated environemnt state---namely estimated part types of each object
+    used in the finished assembly---against agent's current knowledge, then
+    resolve any mismatch by updating knowledge state. In our scope, primary
+    learning signals to be extracted are positive/negative exemplars. Note
+    that this procedure is only run by language-less agents which have to
+    rely on agent demonstration upon planning failure, whereas languageful
+    agents can immediately update exemplar base when they directly receive
+    labeling feedback from user.
+    """
+    if agent.cfg.exp.player_type not in ["bool", "demo"]:
+        # Only needed for languageless agents
+        return
+
+    exec_state = agent.planner.execution_state      # Shortcut var
+    agent.planner.execution_state = {}              # Resetting on completion
+
+    # Obtain agent's final estimate on how each atomic part in the completed
+    # subassembly is contributing to the finished structure, by running the
+    # goal selection ASP program for the last time. Namely, obtain the
+    # node unification options for each object, and 'determine' their types
+    # among possible options with few-shot classifiers. Update the exemplar
+    # base accordingly.
+
+    return
+
+
 def _add_scene_and_exemplar_2d(pointer, scene_img, mask, f_vec, ex_mem):
     """
     Helper method factored out for adding a scene, object and/or concept exemplar

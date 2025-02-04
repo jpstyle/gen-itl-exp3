@@ -50,6 +50,8 @@ def main(cfg):
     # Set seed
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
+    # Note: Make sure to control the environment variable PYTHONHASHSEED
+    # (**before** starting the script) for complete reproducibility!
 
     # Experiment tag
     exp_tag = "_".join([

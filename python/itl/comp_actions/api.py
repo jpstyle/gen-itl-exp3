@@ -22,6 +22,8 @@ class CompositeActions:
         return attempt_command(self.agent, utt_pointer)
     def execute_command(self, action_spec):
         return execute_command(self.agent, action_spec)
+    def report_planning_failure(self):
+        return report_planning_failure(self.agent)
     def handle_action_effect(self, effect, actor):
         return handle_action_effect(self.agent, effect, actor)
 
@@ -40,3 +42,5 @@ class CompositeActions:
         return report_neologism(self.agent, neologism)
     def analyze_demonstration(self, demo):
         return analyze_demonstration(self.agent, demo)
+    def posthoc_episode_analysis(self):
+        return posthoc_episode_analysis(self.agent)

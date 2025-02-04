@@ -6,6 +6,8 @@ import os
 import re
 import random
 import logging
+from functools import reduce
+from operator import mul
 from itertools import combinations, product, groupby
 from collections import defaultdict, deque
 
@@ -19,7 +21,7 @@ from clingo import Control, SymbolType, Number, Function
 from ..vision.utils import (
     xyzw2wxyz, flip_position_y, flip_quaternion_y, rmat2quat, transformation_matrix
 )
-from ..lpmln import Literal, Rule
+from ..lpmln import Literal
 from ..lpmln.utils import wrap_args
 
 
@@ -368,16 +370,20 @@ def execute_command(agent, action_spec):
         # Finally, re-plan
         build_action, build_target = exec_state["plan_goal"]
         build_action = agent.lt_mem.lexicon.s2d[("va", build_action)][0][1]
-        action_sequence, recognitions = _plan_assembly(agent, build_target)
+        action_sequence, recognitions, plan_complete = _plan_assembly(agent, build_target)
 
         # Record how the agent decided to recognize each (non-)object
         exec_state["recognitions"] = recognitions
 
-        # Enqueue appropriate agenda items and finish
         agent.planner.agenda = deque(
             ("execute_command", action_step) for action_step in action_sequence
         )       # Whatever steps remaining, replace
-        agent.planner.agenda.append(("utter_simple", ("Done.", { "mood": "." })))
+        if plan_complete:
+            # Enqueue appropriate agenda items and finish
+            agent.planner.agenda.append(("posthoc_episode_analysis", ()))
+            agent.planner.agenda.append(("utter_simple", ("Done.", { "mood": "." })))
+        else:
+            agent.planner.agenda.append(("report_planning_failure", ()))
 
     else:
         # Currently considered commands: some long-term commands that requiring
@@ -391,6 +397,8 @@ def execute_command(agent, action_spec):
         action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
         match action_name:
             case "build":
+                action_params = list(action_params.values())[0][0].split("_")
+                action_params = (action_params[0], int(action_params[1]))
                 return _execute_build(agent, action_params)
 
             case "pick_up_left" | "pick_up_right":
@@ -418,13 +426,9 @@ def _execute_build(agent, action_params):
         3) Solving the compiled ASP program with clingo, adding the obtained
             sequence of atomic actions to agenda
     """
-    # Target structure
-    build_target = list(action_params.values())[0][0].split("_")
-    build_target = (build_target[0], int(build_target[1]))
-
     # Initialize plan execution state tracking dict
     agent.planner.execution_state = {
-        "plan_goal": ("build", build_target),
+        "plan_goal": ("build", action_params),
         "manipulator_states": [(None, None, None), (None, None, None)],
             # Resp. left & right held object, manipulator pose, component masks
         "connection_graphs": {},
@@ -435,7 +439,9 @@ def _execute_build(agent, action_params):
     }
 
     # Plan towards building valid target structure
-    action_sequence, recognitions = _plan_assembly(agent, build_target)
+    action_sequence, recognitions, plan_complete = _plan_assembly(
+        agent, action_params
+    )
 
     # Record how the agent decided to recognize each (non-)object
     agent.planner.execution_state["recognitions"] = recognitions
@@ -443,8 +449,12 @@ def _execute_build(agent, action_params):
     # Enqueue appropriate agenda items and finish
     agent.planner.agenda = deque(
         ("execute_command", action_step) for action_step in action_sequence
-    )
-    agent.planner.agenda.append(("utter_simple", ("Done.", { "mood": "." })))
+    )       # Whatever steps remaining, replace
+    if plan_complete:
+        agent.planner.agenda.append(("posthoc_episode_analysis", ()))
+        agent.planner.agenda.append(("utter_simple", ("Done.", { "mood": "." })))
+    else:
+        agent.planner.agenda.append(("report_planning_failure"), ())
 
 def _plan_assembly(agent, build_target):
     """
@@ -705,6 +715,18 @@ def _plan_assembly(agent, build_target):
     connection_graph = nx.Graph()
     for u, v in connect_edges: connection_graph.add_edge(u, v)
 
+    # At this point, check if the task is already finished (if so, presumably
+    # by user through demonstration), in which case no more planning is
+    # needed. Check this by seeing if there's only one existing subassembly,
+    # and the number of its constituent atomics are equal to the size of
+    # the connection graph.
+    if len(exec_state["connection_graphs"]) == 1:
+        sole_sa = list(exec_state["connection_graphs"].values())[0]
+        if len(sole_sa) == len(connection_graph):
+            # Can return with empty action sequence, empty recognitions and
+            # True `plan_complete` flag
+            return [], {}, True
+
     # Sample a 'compression sequence', i.e. a sequence of collection of nodes
     # that altogether make up a meaningful substructure of the target structure.
     # The sequential sampling is achieved by iteratively 'compressing' valid
@@ -728,6 +750,8 @@ def _plan_assembly(agent, build_target):
         selected = random.sample(compressible_nodes, 1)[0]
         compression_sequence.append((selected, sa_nodes.pop(selected)))
 
+    # Tracking numbers of calls to ASP planner and those to collision checker
+    total_planning_attempts = total_query_count = 0
     # Node unification result may not always be unique, and some objects
     # in existing subassemblies may be potentially unifiable to more
     # than one nodes in connection graph. Some unification decisions
@@ -736,66 +760,134 @@ def _plan_assembly(agent, build_target):
     # try divide-and-conquer solving of the planning problem based on
     # corresponding premises.
     existing_objs = list(node_unifications)
-    unification_scenarios = product(*[
-        node_unifications[ex_obj] for ex_obj in existing_objs
-    ])
     valid_scenarios = []
-    # Select valid scenario; all objects must be unified with different
-    # nodes, and resulting subassemblies must be all connected
-    for scenario in unification_scenarios:
-        if len(set(scenario)) != len(scenario): continue
-        unification_choice = {
-            existing_objs[i]: node for i, node in enumerate(scenario)
-            if re.match(r"(s\d+)_", existing_objs[i])   # Dismiss singletons
-        }
-        sa_components = [
-            connection_graph.subgraph(n[1] for n in v)
-            for _, v in groupby(
-                sorted(unification_choice.items()),
-                key=lambda x: re.findall(r"(s\d+)_", x[0])[0]
-            )
-        ]
-        sa_components = [
-            list(nx.connected_components(sg))for sg in sa_components
-        ]
-        if all(len(sa_comps)==1 for sa_comps in sa_components):
-            valid_scenarios.append(unification_choice)
-
-    total_planning_attempts = total_query_count = 0
-    for unification_choice in valid_scenarios:
-        # Try solving the planning problem with the unification premise
-        # encoded in `unification_choice`
-        join_tree, planning_attempts, query_count = _divide_and_conquer(
-            compression_sequence, connection_graph,
-            atomic_node_concs, connect_edges, part_names, cp_names,
-            (exec_state["connection_graphs"], unification_choice),
-            exec_state["join_validities"],
-            agent.cfg.paths.assets_dir, agent.cfg.seed
-        )
-        total_planning_attempts += planning_attempts
-        total_query_count += query_count
-        if join_tree is not None:
-            break       # Working solution found
+    # Sometimes, if there's too much uncertainty on types of parts, the
+    # number of unification scenarios to consider can be simply too large.
+    # It is just not worth it to examine every single case, most of which
+    # may not even be significantly distinct. Since we are in an interactive
+    # task setting, we will just give up and cry for help so that user can
+    # step in to provide appropriate feedback.
+    num_all_scenarios = reduce(mul, [
+        len(node_unifications[ex_obj]) for ex_obj in existing_objs
+    ], 1)
+    if num_all_scenarios > 1000:
+        planning_forfeited = True
     else:
-        # All episode is guaranteed to be solvable, shouldn't reach here
-        raise ValueError()
+        planning_forfeited = False      # Start optimistic...
 
-    log_msg = "Working plan found after "
+        # Select valid scenario; all objects must be unified with different
+        # nodes, and resulting subassemblies must be all connected
+        unification_scenarios = product(*[
+            node_unifications[ex_obj] for ex_obj in existing_objs
+        ])
+        for scenario in unification_scenarios:
+            if len(set(scenario)) != len(scenario): continue
+            unification_choice = {
+                existing_objs[i]: node for i, node in enumerate(scenario)
+                if re.match(r"(s\d+)_", existing_objs[i])   # Dismiss singletons
+            }
+            sa_components = [
+                connection_graph.subgraph(n[1] for n in v)
+                for _, v in groupby(
+                    sorted(unification_choice.items()),
+                    key=lambda x: re.findall(r"(s\d+)_", x[0])[0]
+                )
+            ]
+            sa_components = [
+                list(nx.connected_components(sg)) for sg in sa_components
+            ]
+            if all(len(sa_comps)==1 for sa_comps in sa_components):
+                valid_scenarios.append(unification_choice)
+
+        valid_join_trees = []
+        for unification_choice in valid_scenarios:
+            if total_planning_attempts >= 100:
+                # Tolerate up to 100 total planning attempts; if couldn't
+                # find a solution after that forfeit planning altogether
+                planning_forfeited = True
+                break
+
+            # Try solving the planning problem with the unification premise
+            # encoded in `unification_choice`
+            join_tree, planning_attempts, query_count = _divide_and_conquer(
+                compression_sequence, connection_graph,
+                atomic_node_concs, connect_edges, part_names, cp_names,
+                (exec_state["connection_graphs"], unification_choice),
+                exec_state["join_validities"],
+                agent.cfg.paths.assets_dir, agent.cfg.seed
+            )
+            total_planning_attempts += planning_attempts
+            total_query_count += query_count
+            if join_tree is not None:
+                valid_join_trees.append((join_tree, unification_choice))
+
+    if planning_forfeited:
+        # Search space too wide, couldn't finish planning within reasonable
+        # time frame.
+        log_msg = "Forfeited planning after "
+        action_sequence = []
+        node2obj_map = {}
+        plan_complete = False
+    else:
+        # Inspect the unification premises to see if node unification options
+        # are unique or not
+        collected_unification_choices = defaultdict(set)
+        for _, unification_choice in valid_join_trees:
+            for obj, n in unification_choice.items():
+                collected_unification_choices[obj].add(n)
+
+        # Inspect the join tree(s) to see if any of them are complete and lead
+        # to the final product, not involving any atomic parts with type unknown
+        safe_join_trees = []
+        for join_tree, _ in valid_join_trees:
+            safe_join_tree = join_tree.copy()
+            for obj, nodes in collected_unification_choices.items():
+                # Filter out any nodes and edges that involve 'unsafe' nodes
+                # with more than one unification possibilities
+                if len(nodes) == 1: continue
+                joins = list(safe_join_tree.edges(data="join_by"))
+                for u, v, join_by in joins:
+                    if join_by not in nodes: continue       # Safe join
+                    if v not in safe_join_tree: continue    # Already removed
+                    # Remove the receiving end node and all of its descendants
+                    # since including them in the plan is risky
+                    safe_join_tree.remove_nodes_from(
+                        {v} | nx.descendants(safe_join_tree, v)
+                    )
+
+            plan_complete = len(safe_join_tree) == len(join_tree)
+            safe_join_trees.append((safe_join_tree, plan_complete))
+
+        # Select the largest join tree; if a tree is complete, its size will be
+        # one of the biggest ones, and it will be naturally selected
+        best_join_tree, plan_complete = sorted(
+            safe_join_trees, reverse=True, key=lambda x: len(x[0].edges)
+        )[0]
+
+        safe_unification_choice = {
+            n: list(objs)[0] for n, objs in collected_unification_choices.items()
+            if len(objs) == 1
+        }
+        action_sequence, node2obj_map = _linearize_join_tree(
+            copy.deepcopy(best_join_tree), exec_state, connection_graph,
+            connect_edges, atomic_node_concs, safe_unification_choice,
+            part_candidates, (pick_up_actions, drop_actions, assemble_actions)
+        )       # The valid `unification_choice` obtained above is passed as well
+
+        plan_dscr = "Full" if plan_complete else "Partial"
+        log_msg = f"{plan_dscr} plan found after "
+
     log_msg += f"{total_planning_attempts} (re)planning attempts "
     log_msg += f"({total_query_count} calls total)"
     logger.info(log_msg)
 
-    action_sequence, node2obj_map = _linearize_join_tree(
-        copy.deepcopy(join_tree), exec_state, connection_graph,
-        connect_edges, atomic_node_concs, unification_choice, part_candidates,
-        (pick_up_actions, drop_actions, assemble_actions)
-    )       # The valid `unification_choice` obtained above is passed as well
-
-    recognitions = exec_state["recognitions"] | {
+    recognitions = {
         oi: conc for oi, conc in node2obj_map.values()
-    }
+        if oi not in node_unifications or       # Not unified in the first place
+            oi in safe_unification_choice       # Unification is safe
+    } | exec_state["recognitions"]              # Prioritize existing ones
 
-    return action_sequence, recognitions
+    return action_sequence, recognitions, plan_complete
 
 def _divide_and_conquer(
     compression_sequence, connection_graph,
@@ -1639,7 +1731,7 @@ def _linearize_join_tree(
     for sa, sa_graph in exec_state["connection_graphs"].items():
         if len(sa_graph) == 1: continue     # Dismiss singletons
         for obj in sa_graph.nodes:
-            assert f"{sa}_{obj}" in node_unifications
+            if f"{sa}_{obj}" not in node_unifications: continue
             unified_node = node_unifications[f"{sa}_{obj}"]
             conc_n = atomic_node_concs[unified_node]
             node2obj_map[unified_node] = (obj, conc_n)
@@ -1690,7 +1782,7 @@ def _linearize_join_tree(
 
     sa_ind = 0; nonobj_ind = 0
     sa_name_mapping = {}
-    while len(join_tree) != 1:
+    while len(list(nx.isolates(join_tree))) != len(join_tree):
         # List of all next-to-terminal nodes, which should have only two
         # ancestors, representing currently available joins
         available_joins = [
@@ -2138,6 +2230,71 @@ def _execute_assemble(agent, action_name, action_params):
     agent.planner.agenda.appendleft(("execute_command", (None, None)))
 
     return agent_action
+
+def report_planning_failure(agent):
+    """
+    Agent wasn't able to plan till the end product because some of the part
+    instances (which user had used in partial demo) had unknown types and
+    thus couldn't be deterministically unified with a assembly template node.
+    Prepare a request to user for next valid partial demonstration and append
+    to utterance generation queue.
+    """
+    exec_state = agent.planner.execution_state      # Shortcut var
+
+    # Fetch current build target
+    action_name, action_target = exec_state["plan_goal"]
+    assert action_name == "build"       # Only task of interest in our scope
+    action_conc = agent.lt_mem.lexicon.s2d[("va", action_name)][0][1]
+    target_name = agent.lt_mem.lexicon.d2s[action_target][0][1]
+
+    # NL surface forms and corresponding logical forms
+    surface_form_0 = f"I couldn't plan further to build a {target_name}."
+    surface_form_1 = f"# to-infinitive phrase ('to build a {target_name}')"
+    gq_0 = gq_1 = None; bvars_0 = bvars_1 = set(); ante_0 = ante_1 = []
+    cons_0 = [
+        ("sp", "unable", [("e", 0), "x0", ("e", 1)]),
+        ("sp", "pronoun1", ["x0"]),
+    ]
+    # Note: Tuple argument in form of ("e", integer) refers to another clause
+    # in generation buffer specified by the integer offset; e.g., ("e", 1) would
+    # refer to the next clause after this one. Notation's a bit janky, but this
+    # will do for now.
+    cons_1 = [
+        ("va", "build", [("e", 0), "x0", "x1"]),
+        ("n", target_name, ["x1"])
+    ]
+    logical_form_0 = (gq_0, bvars_0, ante_0, cons_0)
+    logical_form_1 = (gq_1, bvars_1, ante_1, cons_1)
+
+    # Referents & predicates info
+    referents_0 = { 
+        "e": { "mood": "." },        # Indicative
+        "x0": { "entity": "_self", "rf_info": {} }
+    }
+    referents_1 = {
+        "e": { "mood": "~" },       # Infinitive
+        "x0": { "entity": None, "rf_info": {} },
+        "x1": { "entity": None, "rf_info": { "is_pred": True } }
+    }
+    predicates_0 = {
+        "pc0": (("sp", "unable"), "sp_unable"),
+        "pc1": (("sp", "pronoun1"), "sp_pronoun1")
+    }
+    predicates_1 = {
+        "pc0": (("va", "build"), f"arel_{action_conc}"),
+        "pc1": (("n", target_name), f"{action_target[0]}_{action_target[1]}")
+    }
+
+    # Append to & flush generation buffer
+    record_0 = (logical_form_0, surface_form_0, referents_0, predicates_0, {})
+    record_1 = (logical_form_1, surface_form_1, referents_1, predicates_1, {})
+    agent.lang.dialogue.to_generate += [record_0, record_1]
+    
+    # Enter pause mode
+    agent.execution_paused = True
+    # Append the original goal at the end of the agenda in order to keep
+    # current episode active
+    agent.planner.agenda.append(("execute_command", (action_conc, action_target)))
 
 def handle_action_effect(agent, effect, actor):
     """
