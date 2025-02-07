@@ -37,28 +37,44 @@ fits_signature(D,N,NS,c(NS,SG)) :-
 
 % Handling additional constraints due to already assembled parts. Atomic
 % part type of existing object may or may not be specified, represented
-% by arity of ext_node predicate (ext_node/2 or ext_node/1).
-1{ must_unify(X,N) : node_atomic(N,P) }1 :- ext_node(X,P).
+% by arity of ext_node predicate (ext_node/2 vs. ext_node/1). Similarly,
+% contact sites between two joined existing parts may or may not be known
+% (ext_edge/4 vs. ext_edge/2).
+
+% If an existing object with known part type has exactly one atomic node with
+% the matching type, unify
+must_unify(X,N) :- ext_node(X,P), 1{ node_atomic(_,P) }1, node_atomic(N,P).
+% If a neighbor of a uniquely unified object connects with another by known
+% contact site, unify (assumption here is that contact sites of each atomic part
+% are all uniquely distinguishable)
+must_unify(X1,N1) :- must_unify(X2,N2), ext_edge(X1,X2,CP1,CP2),
+    to_connect(N1,N2,CP1,CP2).
+% If a neighbor of a uniquely unified object has known type, and there exist
+% exactly one node with matching type in the neighborhood of the uniquely unified
+% node, unify
+must_unify(X1,N1) :- must_unify(X2,N2), ext_node(X1,P1), ext_edge(X1,X2),
+    1{ node_atomic(N,P1) : to_connect(N,N2,_,_) }1,
+    node_atomic(N1,P1), to_connect(N1,N2,_,_).
+% If a neighbor of a uniquely unified object has known type, and there exist
+% more than one nodes with matching type in the neighborhood of the uniquely
+% unified node, *MAY* unify with one of them
+may_unify(X1,N1) :- must_unify(X2,N2), ext_node(X1,P1), ext_edge(X1,X2),
+    2{ node_atomic(N,P1) : to_connect(N,N2,_,_) },
+    node_atomic(N1,P1), to_connect(N1,N2,_,_).
+% If one side of existing object connection uniquely unifies to an atomic node
+% while the other's type is not specified, the latter *MAY* be unified with one
+% of other atomic nodes connected to the unified node
+may_unify(X1,N1) :- must_unify(X2,N2), ext_node(X1), ext_edge(X1,X2),
+    to_connect(N1,N2,_,_).
+% Different objects cannot be forced to unify with the same node
 :- must_unify(X1,N1), must_unify(X2,N2), X1 != X2, N1 = N2.
+% Connections between uniquely unified objects enforce node connections
 :- must_unify(X1,N1), must_unify(X2,N2), ext_edge(X1,X2),
     not to_connect(N1,N2,_,_).
-% If one side of existing object connection unifies to an atomic node with
-% known type while the other's type is not specified, the latter *MAY* be
-% unified with one of other atomic nodes connected to the unified node, as
-% long as the nodes are not already unified with objects with known types
-may_unify(X1,N1) :- ext_node(X1), ext_edge(X1,X2), must_unify(X2,N2),
-    to_connect(N1,N2,_,_), not must_unify(_,N1).
-% If both sides of existing object connection have their types unspecified,
-% they *MAY* be freely unified to some connected nodes, as long as the nodes
-% are not already unified with objects with known types
-may_unify(X1,N1) :- ext_node(X1), ext_node(X2), ext_edge(X1,X2),
-    to_connect(N1,N2,_,_), not must_unify(_,N1).
-% Even unknown-type existing objects should be unified with at least one of
-% the nodes
-:- ext_node(X), not may_unify(X,_).
 
 % Edge symmetricity
 to_connect(N2,N1,CP2,CP1) :- to_connect(N1,N2,CP1,CP2).
+ext_edge(X2,X1,CP2,CP1) :- ext_edge(X1,X2,CP1,CP2).
 ext_edge(X2,X1) :- ext_edge(X1,X2).
 
 % Compute final compatibility score by taking average across all atomic nodes
@@ -66,5 +82,6 @@ total_score(TS) :- TS = #sum { PR,O : is_likely(O,P,PR), use_as(O,P) }.
 avg_score(TS/NN) :-
     total_score(TS), NN = #count { N : node_atomic(N,_) }, NN != 0.
 
-% Maximize final compatibility score
-#maximize { AS : avg_score(AS) }.
+#program check(c).
+#external query(c).
+:- avg_score(AS), query(c), AS <= c.

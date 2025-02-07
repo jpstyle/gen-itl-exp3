@@ -236,12 +236,17 @@ class SimulatedTeacher:
                         # message "OK"
                         response.append((None, None))
                         continue
-                    else:
+                    elif demo_type == "frag":
                         # Tell the agent to resume its task execution
-                        assert demo_type == "frag"
                         response.append(
                             ("generate", { "utterance": "Continue.", "pointing": {} })
                         )
+                        self.ongoing_demonstration = (None, [])     # Demo over
+                        continue
+                    else:
+                        # No-op; agent has presumably now exited pause mode
+                        assert demo_type is None
+                        response.append((None, None))
                         continue
 
                 # Keep popping and executing plan actions until plan is empty
@@ -517,7 +522,7 @@ class SimulatedTeacher:
                     if join_invalid:
                         # Interrupt agent and undo the last join (by disassembling
                         # the product just assembled, at the exact same part pair)
-                        if tgt_side == "left":
+                        if tgt_side == "right":
                             takeaway_parts = list(graph_left)
                         else:
                             takeaway_parts = list(graph_right)
@@ -1378,7 +1383,9 @@ class SimulatedTeacher:
         elif assem_st["left"] is not None and assem_st["right"] is not None:
             # Both of agent's hands are currently occupied, and the next
             # join to demonstrate can be achieved immediately
-            print(0)
+            join_res = next_join[0]
+            obj_left = assem_st["left"]
+            obj_right = assem_st["right"]
 
         else:
             # Either of agent's hands is empty and need to pick up the other

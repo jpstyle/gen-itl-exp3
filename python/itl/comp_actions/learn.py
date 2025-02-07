@@ -3,6 +3,7 @@ Implements learning-related composite actions; by learning, we are primarily
 referring to belief updates that modify long-term memory
 """
 import re
+import copy
 import math
 import torch
 from itertools import permutations
@@ -14,7 +15,9 @@ import networkx as nx
 from numpy.linalg import norm, inv
 from sklearn.metrics import pairwise_distances
 from sklearn.decomposition import PCA
+from clingo import SymbolType
 
+from .interact import _goal_selection
 from ..vision.utils import (
     blur_and_grayscale, visual_prompt_by_mask, rmat2quat, xyzw2wxyz,
     flip_position_y, flip_quaternion_y, transformation_matrix
@@ -1159,17 +1162,130 @@ def posthoc_episode_analysis(agent):
         return
 
     exec_state = agent.planner.execution_state      # Shortcut var
-    agent.planner.execution_state = {}              # Resetting on completion
 
     # Obtain agent's final estimate on how each atomic part in the completed
     # subassembly is contributing to the finished structure, by running the
     # goal selection ASP program for the last time. Namely, obtain the
     # node unification options for each object, and 'determine' their types
-    # among possible options with few-shot classifiers. Update the exemplar
-    # base accordingly.
+    # among possible options with predicted confidence values obtained from
+    # few-shot classifiers. Update the exemplar base accordingly.
+    build_target = agent.planner.execution_state["plan_goal"][1]
+    optimal_model = _goal_selection(agent, build_target)
 
-    return
+    # Utiltiy method for serializing clingo function arguments into flat
+    # string representations
+    serialize_node = lambda n: f"n_{n.number}" if n.type == SymbolType.Number \
+        else f"{serialize_node(n.arguments[0])}_{n.arguments[1]}"
 
+    # Compile the optimal solution into appropriate data structures
+    atomic_node_concs = {}
+    connection_graph = nx.Graph()
+    node_unifications = defaultdict(set)
+    for atm in optimal_model:
+        match atm.name:
+            case "node_atomic":
+                # Collect atomic nodes and their designated part types
+                node_rn = serialize_node(atm.arguments[0])
+                conc_ind = atm.arguments[1].number
+                atomic_node_concs[node_rn] = conc_ind
+
+            case "to_connect":
+                # Derived assembly connection to make between nodes
+                node_u_rn = serialize_node(atm.arguments[0])
+                node_v_rn = serialize_node(atm.arguments[1])
+                connection_graph.add_edge(node_u_rn, node_v_rn)
+
+            case "must_unify" | "may_unify":
+                # Unification between objects already used as subassembly
+                # component in environment vs. matching nodes in hierarchy
+                ex_obj = atm.arguments[0].name
+                node_rn = serialize_node(atm.arguments[1])
+                node_unifications[ex_obj].add(node_rn)
+
+    # As done in `.interact._plan_assembly` procedure, we could try to further
+    # narrow down possible unification choices for the unbounded nodes
+    uniquely_unified = {
+        re.findall(r"(s\d+)_(o\d+)", ex_obj)[0]: list(nodes)[0]
+        for ex_obj, nodes in node_unifications.items()
+        if len(nodes) == 1 and re.match(r"(s\d+)_(o\d+)", ex_obj)
+            # Ignore any singletons, which are in `oXX_oXX` form
+    }
+    conn_graph_match = copy.deepcopy(connection_graph)
+    for n in conn_graph_match:
+        if n in uniquely_unified.values():
+            conn_graph_match.nodes[n]["unif"] = n
+    final_sa, final_graph = next(
+        (sa, sa_graph)
+        for sa, sa_graph in exec_state["connection_graphs"].items()
+        if len(sa_graph) > 1
+    )
+    sa_graph_match = final_graph.to_undirected()
+    for ex_obj in sa_graph_match:
+        if (final_sa, ex_obj) in uniquely_unified:
+            unified_node = uniquely_unified[(final_sa, ex_obj)]
+            sa_graph_match.nodes[ex_obj]["unif"] = unified_node
+    matcher = nx.isomorphism.ISMAGS(
+        conn_graph_match, sa_graph_match,
+        node_match=nx.isomorphism.categorical_node_match("unif", "*")
+    )
+    for ism in matcher.find_isomorphisms(symmetry=False):
+        # Discard the matching if any existing object with known type
+        # doesn't typecheck
+        if any(
+            ex_obj in exec_state["recognitions"] and \
+                exec_state["recognitions"][ex_obj] != atomic_node_concs[n]
+            for n, ex_obj in ism.items()
+        ): continue
+        for n, ex_obj in ism.items():
+            node_unifications[f"{final_sa}_{ex_obj}"].add(n)
+
+    # Collect possible atomic part types for each existing object
+    obj_possible_concs = defaultdict(set)
+    for oi, nodes in node_unifications.items():
+        oi = re.findall(r"s\d+_(o\d+)", oi)[0]
+        obj_possible_concs[oi] |= {atomic_node_concs[n] for n in nodes}
+
+    # Examine each possibility for each object and commit to the best one
+    # based on existing few-shot classifier for each candidate concept.
+    pr_thres = 0.9                  # Threshold for adding positive exemplars
+    exemplars = {}; pointers = defaultdict(list)
+    for oi, concs in obj_possible_concs.items():
+        # Fortunately we have all the probability values pre-computed!
+        vis_preds = {
+            c: agent.vision.scene[oi]["pred_cls"][c].item()
+            for c in concs
+        }
+        best_conc, pred_prob = sorted(
+            vis_preds.items(), reverse=True, key=lambda x: x[1]
+        )[0]
+
+        # Add to the list of positive exemplars if the predicted probability
+        # for the best type concept is lower than the threshold
+        if pred_prob < pr_thres:
+            exemplars[oi] = {
+                "scene_id": None,
+                "mask": agent.vision.scene[oi]["pred_mask"],
+                "f_vec": agent.vision.scene[oi]["vis_emb"]
+            }
+            pointers[("pcls", best_conc, "pos")].append(oi)
+
+    # Get the very first scene image before any sort of manipulation took
+    # place
+    scene_img = next(
+        vis_inp for vis_inp in agent.vision.latest_inputs
+        if vis_inp is not None
+    )
+    # Reformat `exemplars` and `pointers`
+    obj_ordering = list(exemplars)
+    exemplars = [exemplars[oi] for oi in obj_ordering]
+    pointers = {
+        conc_dscr: [(True, obj_ordering.index(oi)) for oi in objs]
+        for conc_dscr, objs in pointers.items()
+    }
+    # Exemplar base update in batch
+    agent.lt_mem.exemplars.add_exs_2d(
+        scene_img=scene_img, exemplars=exemplars, pointers=pointers
+    )
 
 def _add_scene_and_exemplar_2d(pointer, scene_img, mask, f_vec, ex_mem):
     """
