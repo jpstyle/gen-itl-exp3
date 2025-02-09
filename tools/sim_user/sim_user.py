@@ -102,6 +102,12 @@ class SimulatedTeacher:
                 "left": None, "right": None, "subassemblies": {},
                 "joins_remaining": {frozenset(join) for join in VALID_JOINS},
                 "aliases": {}
+            },
+            "metrics": {
+                "num_grounding_failure": 0,
+                "num_invalid_pickup": 0,
+                "num_invalid_join": 0,
+                "num_planning_forfeiture": 0
             }
         }
         self.target_task = target_task
@@ -459,6 +465,7 @@ class SimulatedTeacher:
                             ]
                         
                         interrupted = True
+                        self.current_episode_record["metrics"]["num_invalid_pickup"] += 1
 
                 if utt.startswith("# Effect: drop"):
                     # Effect of drop action; no args, just update hand states
@@ -557,6 +564,7 @@ class SimulatedTeacher:
                                 })
                             ]
                         interrupted = True
+                        self.current_episode_record["metrics"]["num_invalid_join"] += 1
                     else:
                         # If join not invalid, update ongoing execution state
                         assert len(valid_pairs_achieved) == 1
@@ -614,6 +622,13 @@ class SimulatedTeacher:
                     }
                 ))
 
+                if utt == "I cannot find a part I need on the table.":
+                    metric = "num_grounding_failure"
+                else:
+                    assert utt.startswith("I couldn't plan further")
+                    metric = "num_planning_forfeiture"
+                self.current_episode_record["metrics"][metric] += 1
+
             elif utt.startswith("Is there a "):
                 # Agent has failed to ground an instance of some part type, which
                 # is guaranteed to exist on tabletop by design
@@ -653,6 +668,7 @@ class SimulatedTeacher:
                             # `False`: Pass by string name instead of seg mask
                     }
                 ))
+                self.current_episode_record["metrics"]["num_grounding_failure"] += 1
 
             elif utt.startswith("I was trying to "):
                 # Agent reported its originally intended join of two part instances

@@ -459,7 +459,11 @@ def _execute_build(agent, action_params):
         "recognitions": {},
         "join_validities": (set(), set()),
         "replanning_needed": False,
-        "action_history": []
+        "action_history": [],
+        "metrics": {
+            "num_planning_attempts": 0,
+            "num_collision_queries": 0
+        }
     }
 
     # Plan towards building valid target structure
@@ -800,6 +804,8 @@ def _plan_assembly(agent, build_target):
         plan_dscr = "Full" if plan_complete else "Partial"
         log_msg = f"{plan_dscr} plan found after "
 
+    exec_state["metrics"]["num_planning_attempts"] += total_planning_attempts
+    exec_state["metrics"]["num_collision_queries"] += total_query_count
     log_msg += f"{total_planning_attempts} (re)planning attempts "
     log_msg += f"({total_query_count} calls total)"
     logger.info(log_msg)

@@ -26,7 +26,6 @@ from collections import defaultdict
 from itertools import product, groupby
 
 import hydra
-import torch
 import numpy as np
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter
@@ -71,7 +70,7 @@ def main(cfg):
 
     # Tensorboard writer to log learning progress
     writer = SummaryWriter(f"{cfg.paths.outputs_dir}/tensorboard_logs")
-    mistakes = defaultdict(lambda: [(0,0)])         # Accumulating regrets
+    metrics = []
 
     # Set up student & teacher
     student = ITLAgent(cfg)
@@ -98,7 +97,7 @@ def main(cfg):
     # Start communication with Unity
     env = UnityEnvironment(
         # Uncomment next line when running with Unity linux build
-        # f"{cfg.paths.build_dir}/truck_domain.x86_64",
+        f"{cfg.paths.build_dir}/truck_domain.x86_64",
         side_channels=[student_channel, teacher_channel, env_par_channel],
         timeout_wait=600, seed=cfg.seed
     )
@@ -171,8 +170,8 @@ def main(cfg):
         else:
             raise ValueError        # Shouldn't happen
 
-    for i in range(cfg.exp.num_episodes):
-        logger.info(f"Sys> Episode {i+1})")
+    for ep_i in range(cfg.exp.num_episodes):
+        logger.info(f"Sys> Episode {ep_i+1})")
 
         # Obtain random initialization of each episode
         sampled_inits = teacher.setup_episode(target_task, all_subtypes)
@@ -211,8 +210,6 @@ def main(cfg):
         # Let the settings take effect and begin the episode
         env.reset()
         new_env = True
-
-        # Clean teacher's incoming message buffer in order to remove any
 
         while True:
             # Keep running until either student or teacher terminates episode
@@ -278,13 +275,13 @@ def main(cfg):
                                 # with each object
                                 aliases = teacher.current_episode_record["assembly_state"]["aliases"]
                                     # Provide teacher with access to the object correspondence as well
-                                for i, crange in enumerate(dem_refs):
+                                for oi, crange in enumerate(dem_refs):
                                     name_with_type = utterance[crange[0]:crange[1]].split("/")
                                     env_handle, type_code = name_with_type
-                                    student.vision.scene[f"o{i}"].update({
+                                    student.vision.scene[f"o{oi}"].update({
                                         "env_handle": env_handle, "type_code": type_code
                                     })
-                                    aliases[f"o{i}"] = env_handle
+                                    aliases[f"o{oi}"] = env_handle
                             else:
                                 # General case where message from Teacher or Student-side
                                 # action effect feedback from Unity environment has arrived
@@ -406,67 +403,42 @@ def main(cfg):
                 new_env = False
                 env.step()
 
-        # for gt_conc, ep_log in teacher.current_episode_record.items():
-        #     ans_conc = ep_log["answer"]
-
-        #     # Update metrics
-        #     regrets_conc, total_conc = mistakes[gt_conc][-1]
-        #     regrets_all, total_all = mistakes["__all__"][-1]
-
-        #     new_regrets_conc = regrets_conc+1 if gt_conc != ans_conc else regrets_conc
-        #     new_total_conc = total_conc+1
-        #     new_regrets_all = regrets_all+1 if gt_conc != ans_conc else regrets_all
-        #     new_total_all = total_all+1
-
-        #     # Log progress to tensorboard
-        #     writer.add_scalar(
-        #         f"Cumul. regret: {gt_conc}", new_regrets_conc, global_step=new_total_conc
-        #     )
-        #     writer.add_scalar(
-        #         f"Cumul. regret: *All concepts*", new_regrets_all, global_step=new_total_all
-        #     )
-        #     mistakes[gt_conc].append((new_regrets_conc, new_total_conc))
-        #     mistakes["__all__"].append((new_regrets_all, new_total_all))
-
-        # # If not test mode (i.e., training mode), save current agent model checkpoint
-        # # to output dir every 25 episodes
-        # if not cfg.agent.test_mode and (i+1) % cfg.exp.checkpoint_interval == 0:
-        #     student.save_model(f"{ckpt_path}/{exp_tag}_{i+1}.ckpt")
+        # Collect metrics for the episode
+        ep_metric = {}
+        for metric, val in teacher.current_episode_record["metrics"].items():
+            ep_metric[metric] = val
+        for metric, val in student.planner.execution_state["metrics"].items():
+            ep_metric[metric] = val
+        ep_metric["episode_length"] = len(
+            student.planner.execution_state["action_history"]
+        )
+        metrics.append(ep_metric)
+        # Log progress to tensorboard
+        for metric, val in ep_metric.items():
+            writer.add_scalar(metric, val, global_step=ep_i)
 
     # Close Unity environment & tensorboard writer
     env.close()
     writer.close()
 
-    if cfg.agent.test_mode:
-        # If test mode, save exam records to output dir for later summary
-        out_csv_fname = cfg.exp.agent_model_path.split("/")[-1].replace(".ckpt",".csv")
-        out_csv_fname = f"outputs_{out_csv_fname}"
+    # Otherwise (i.e., learning enabled), save cumulative regret curves to output dir
+    out_csv_fname = f"cumulReg_{exp_tag}.csv"
 
-        with open(os.path.join(results_path, out_csv_fname), "w") as out_csv:
-            out_csv.write("episode,ground_truth,answer\n")
+    with open(os.path.join(results_path, out_csv_fname), "w") as out_csv:
+        metric_types = [
+            "num_grounding_failure", "num_invalid_pickup",
+            "num_invalid_join", "num_planning_forfeiture",
+            "num_planning_attempts", "num_collision_queries",
+            "episode_length"
+        ]
+        out_csv.write("episode" + ",".join(metric_types) + "\n")
+        for ep_i, ep_metric in enumerate(metrics):
+            # Skip the very first full demo training episode
+            if ep_i == 0: continue
 
-            for i, record in enumerate(teacher.episode_records):
-                for gt_conc, ep_log in record.items():
-                    ans_conc = ep_log["answer"]
-                    out_csv.write(f"{i+1},{gt_conc},{ans_conc}\n")
-
-    else:
-        # Otherwise (i.e., learning enabled), save cumulative regret curves to output dir
-        out_csv_fname = f"cumulReg_{exp_tag}.csv"
-
-        with open(os.path.join(results_path, out_csv_fname), "w") as out_csv:
-            out_csv.write("episode,cumulative_regret,reason_type\n")
-
-            training_log = zip(mistakes["__all__"], [{}] + teacher.episode_records)
-            for (regrets, total), ep_rec in training_log:
-                ep_log = list(ep_rec.values())[0] if len(ep_rec) > 0 else {}
-                if "reason" in ep_log:
-                    reason_type = ep_log["reason"]
-                else:
-                    reason_type = "na"
-
-                out_csv.write(f"{total},{regrets},{reason_type}\n")
-
+            metric_values = [str(ep_metric[m_type]) for m_type in metric_types]
+            metric_values = ",".join(metric_values)
+            out_csv.write(f"{ep_i},{metric_values}\n")
 
 if __name__ == "__main__":
     main()
