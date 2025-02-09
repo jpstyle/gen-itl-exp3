@@ -55,6 +55,7 @@ class ITLAgent:
 
         self.observed_demo = None
         self.execution_paused = False
+        self.interrupted = False
 
     def loop(
             self, v_usr_in=None, l_usr_in=None,
@@ -177,6 +178,7 @@ class ITLAgent:
                     # Enter pause mode; ignore any `execute_command` items
                     # in agenda
                     self.execution_paused = True
+                    self.interrupted = True     # Also log interruption
                 if utt == "Continue." and self.execution_paused:
                     # Exit pause mode
                     self.execution_paused = False

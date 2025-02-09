@@ -26,6 +26,7 @@ from collections import defaultdict
 from itertools import product, groupby
 
 import hydra
+import torch
 import numpy as np
 from omegaconf import OmegaConf
 from torch.utils.tensorboard import SummaryWriter

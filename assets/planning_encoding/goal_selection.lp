@@ -18,7 +18,7 @@ node_sa_template(n(N,NS),S2,I2) :-
 % Usage should not exceed demand
 part_demand(P,DM) :- atomic(P), DM = #count { N : node_atomic(N,P) }.
 part_usage(P,PU) :- atomic(P), PU = #count { O : use_as(O,P) }.
-:- part_demand(P,DM), part_usage(P, PU), PU > DM.
+:- part_demand(P,DM), part_usage(P,PU), PU > DM.
 
 % Do not allow any idle objects when they can be employed
 unmet_demand(P,DM-PU) :- part_demand(P,DM), part_usage(P, PU).
@@ -68,6 +68,9 @@ may_unify(X1,N1) :- must_unify(X2,N2), ext_node(X1), ext_edge(X1,X2),
     to_connect(N1,N2,_,_).
 % Different objects cannot be forced to unify with the same node
 :- must_unify(X1,N1), must_unify(X2,N2), X1 != X2, N1 = N2.
+% Again, usage should not exceed demand (existing obj. ver.)
+ext_usage(P,XU) :- atomic(P), XU = #count { X : must_unify(X,N), ext_node(N,P) }.
+:- part_demand(P,DM), ext_usage(P,XU), XU > DM.
 % Connections between uniquely unified objects enforce node connections
 :- must_unify(X1,N1), must_unify(X2,N2), ext_edge(X1,X2),
     not to_connect(N1,N2,_,_).

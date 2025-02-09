@@ -1324,7 +1324,7 @@ class SimulatedTeacher:
         # Singleton compression sequence containing all nodes
         compression_sequence = [("truck", all_nodes)]
         # Now run the procedure, just the join tree is needed
-        join_tree, _, _ = _divide_and_conquer(
+        join_tree, _, _, _ = _divide_and_conquer(
             compression_sequence, connection_graph,
             atomic_node_concs, contacts, part_names, cp_names,
             (connection_status, node_unifications), (set(), set()),
