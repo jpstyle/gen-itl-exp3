@@ -5,8 +5,8 @@ referring to belief updates that modify long-term memory
 import re
 import math
 import torch
-from itertools import permutations
-from collections import defaultdict
+from itertools import permutations, product
+from collections import defaultdict, Counter
 
 import open3d as o3d
 import numpy as np
@@ -15,6 +15,10 @@ from numpy.linalg import norm, inv
 from sklearn.metrics import pairwise_distances
 from sklearn.decomposition import PCA
 
+from .interact import (
+    _goal_selection, _tabulate_goal_selection_result,
+    _match_existing_subassemblies
+)
 from ..vision.utils import (
     blur_and_grayscale, visual_prompt_by_mask, rmat2quat, xyzw2wxyz,
     flip_position_y, flip_quaternion_y, transformation_matrix
@@ -24,7 +28,7 @@ from ..lpmln.utils import flatten_ante_cons, wrap_args
 
 
 EPS = 1e-10                 # Value used for numerical stabilization
-SR_THRES = 0.9              # Mismatch surprisal threshold
+SR_THRES = 0.8              # Mismatch surprisal threshold
 U_IN_PR = 0.99              # How much the agent values information provided by the user
 
 # Connectivity graph that represents pairs of 3D inspection images to be cross-referenced
@@ -1159,17 +1163,181 @@ def posthoc_episode_analysis(agent):
         return
 
     exec_state = agent.planner.execution_state      # Shortcut var
-    agent.planner.execution_state = {}              # Resetting on completion
 
     # Obtain agent's final estimate on how each atomic part in the completed
     # subassembly is contributing to the finished structure, by running the
     # goal selection ASP program for the last time. Namely, obtain the
     # node unification options for each object, and 'determine' their types
-    # among possible options with few-shot classifiers. Update the exemplar
-    # base accordingly.
+    # among possible options with predicted confidence values obtained from
+    # few-shot classifiers. Update the exemplar base accordingly.
+    build_target = agent.planner.execution_state["plan_goal"][1]
+    best_model = _goal_selection(agent, build_target)
+    tabulated_results = _tabulate_goal_selection_result(best_model)
+    connection_graph, node_unifications, atomic_node_concs = \
+        tabulated_results[3:]
 
-    return
+    # As done in `.interact._plan_assembly` procedure, we could try to further
+    # narrow down possible unification choices for the unbounded nodes
+    final_sa = next(
+        sa for sa, sa_graph in exec_state["connection_graphs"].items()
+        if len(sa_graph) > 1
+    )
+    possible_mappings = _match_existing_subassemblies(
+        connection_graph, node_unifications, atomic_node_concs, exec_state
+    )
+    for ism in possible_mappings[final_sa]:
+        for n, ex_obj in ism.items():
+            node_unifications[f"{final_sa}_{ex_obj}"].add(n)
 
+    # Collect possible atomic part types for each existing object
+    obj_possible_concs = defaultdict(set)
+    for oi, nodes in node_unifications.items():
+        oi = re.findall(r"s\d+_(o\d+)", oi)[0]
+        obj_possible_concs[oi] |= {atomic_node_concs[n] for n in nodes}
+
+    # Part type selection must comply with the total atomic part type counts
+    # for the selected target structure
+    required_type_counts = Counter(atomic_node_concs.values())
+
+    # Algorithm for enumerating every such category commitment, because
+    # naively testing every cartesian product may take exponentiallt long
+    # (Props to ChatGPT for saving my time)
+
+    # Start with objects with smaller numbers of type choices in order
+    # to minimize branching factor
+    objs_sorted = sorted(
+        obj_possible_concs, key=lambda obj: len(obj_possible_concs[obj])
+    )
+    # Object assignment and type counts
+    assignment = {}; type_counts = defaultdict(int)
+    def recursive_assign(idx):
+        if idx == len(obj_possible_concs):
+            # All objects are assigned a type, yield only if assignment
+            # satisfies the required type counts
+            if type_counts == required_type_counts:
+                yield assignment.copy()
+            return
+        
+        # Forward check: for each type, count how many of the remaining
+        # objects can cover that type
+        remaining_objs = objs_sorted[idx:]
+        for c, req_cnt in required_type_counts.items():
+            needed = req_cnt - type_counts[c]
+            if needed < 0:
+                # Already exceeded the required count for the type, return
+                return
+            # Counting remaining objects that can cover the type
+            available_objs = [
+                obj for obj in remaining_objs
+                if c in obj_possible_concs[obj]
+            ]
+            if len(available_objs) < needed:
+                # The remainder of the assignment can never satisfy the
+                # requirement further on
+                return
+
+        # Choosing next object to allocate
+        obj = objs_sorted[idx]
+        for c in obj_possible_concs[obj]:
+            if type_counts[c] < required_type_counts[c]:
+                # Update assignment & type counts for the choice accordingly
+                assignment[obj] = c
+                type_counts[c] += 1
+
+                # Recurse for the remaining ones
+                yield from recursive_assign(idx + 1)
+
+                # Backtrack after done
+                del assignment[obj]
+                type_counts[c] -= 1
+
+    # Examine each possibility for each object and commit to the best one
+    # based on existing few-shot classifier for each candidate concept,
+    # while accounting for any pairwise negative label info
+    scenarios_scored = []
+    for scn in recursive_assign(0):
+        # All pairwise negative label info should be observed
+        if any(
+            scn[objs[0]] == -labels[0] and scn[objs[1]] == -labels[1]
+            for objs, labels in exec_state["recognitions"].items()
+            if isinstance(objs, tuple)
+        ): continue
+
+        prob_score = sum(
+            agent.vision.scene[oi]["pred_cls"][c] for oi, c in scn.items()
+        )
+        scenarios_scored.append((scn, prob_score.item()))
+
+    # Select the best allocation of objects to nodes by score sum    
+    final_recognitions = sorted(
+        scenarios_scored, reverse=True, key=lambda x: x[1]
+    )[0][0]
+
+    pr_thres = 0.8                  # Threshold for adding exemplars
+    exemplars = {}; pointers = defaultdict(set)
+    for oi, best_conc in final_recognitions.items():
+        # Add to the list of positive exemplars if the predicted probability
+        # for the best type concept is lower than the threshold
+        pred_prob = agent.vision.scene[oi]["pred_cls"][best_conc].item()
+        if pred_prob < pr_thres:
+            exemplars[oi] = {
+                "scene_id": None,
+                "mask": agent.vision.scene[oi]["pred_mask"],
+                "f_vec": agent.vision.scene[oi]["vis_emb"]
+            }
+            pointers[("pcls", best_conc, "pos")].add(oi)
+
+    # Extract any inferrable negative exemplars from pairwise negative
+    # label info
+    for objs, labels in exec_state["recognitions"].items():
+        if isinstance(objs, str): continue
+        assert isinstance(objs, tuple)
+        obj1, obj2 = objs
+        label1, label2 = -labels[0], -labels[1]
+
+        obj1_is_label1 = final_recognitions[obj1] == label1
+        obj2_is_label2 = final_recognitions[obj2] == label2
+        assert not (obj1_is_label1 and obj2_is_label2)
+        if obj1_is_label1:
+            # obj1 is label1, so obj2 shouldn't be label2
+            pred_prob = agent.vision.scene[obj2]["pred_cls"][label2].item()
+            if pred_prob > 1 - pr_thres:
+                exemplars[obj2] = {
+                    "scene_id": None,
+                    "mask": agent.vision.scene[obj2]["pred_mask"],
+                    "f_vec": agent.vision.scene[obj2]["vis_emb"]
+                }
+                pointers[("pcls", label2, "neg")].add(obj2)
+        if obj2_is_label2:
+            # obj2 is label2, so obj1 shouldn't be label1
+            pred_prob = agent.vision.scene[obj1]["pred_cls"][label1].item()
+            if pred_prob > 1 - pr_thres:
+                exemplars[obj1] = {
+                    "scene_id": None,
+                    "mask": agent.vision.scene[obj1]["pred_mask"],
+                    "f_vec": agent.vision.scene[obj1]["vis_emb"]
+                }
+                pointers[("pcls", label1, "neg")].add(obj1)
+
+    # Get the very first scene image before any sort of manipulation took
+    # place
+    scene_img = next(
+        vis_inp for vis_inp in agent.vision.latest_inputs
+        if vis_inp is not None
+    )
+    # Reformat `exemplars` and `pointers`
+    obj_ordering = list(exemplars)
+    exemplars = [exemplars[oi] for oi in obj_ordering]
+    pointers = {
+        conc_dscr: [(True, obj_ordering.index(oi)) for oi in objs]
+        for conc_dscr, objs in pointers.items()
+        if len(objs) > 0
+    }
+
+    # Exemplar base update in batch
+    agent.lt_mem.exemplars.add_exs_2d(
+        scene_img=scene_img, exemplars=exemplars, pointers=pointers
+    )
 
 def _add_scene_and_exemplar_2d(pointer, scene_img, mask, f_vec, ex_mem):
     """
