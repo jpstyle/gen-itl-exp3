@@ -36,7 +36,7 @@ public class TeacherAgent : DialogueAgent
     [SerializeField]
     private List<Material> colors;
 
-    private int _randomSeed = -1;
+    private int _randomSeed = 42;
     
     // Store workplace partition info for initializing part poses
     private readonly List<Vector3> _partPartitionPositions = new()
@@ -70,7 +70,7 @@ public class TeacherAgent : DialogueAgent
     private void EnvironmentReset()
     {
         // Set randomization seed for the current episode
-        if (_randomSeed != -1) Random.InitState(_randomSeed);
+        Random.InitState(_randomSeed);
 
         // Fetch environment parameters received from python backend
         var envParams = Academy.Instance.EnvironmentParameters;
