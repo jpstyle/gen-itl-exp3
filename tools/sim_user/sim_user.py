@@ -5,6 +5,7 @@ Simulated user which takes part in dialogue with rule-based pattern matching
 import re
 import copy
 import random
+import logging
 from collections import defaultdict
 from itertools import product, combinations, groupby
 
@@ -14,6 +15,8 @@ from clingo import Control, Function
 
 from python.itl.comp_actions.interact import _divide_and_conquer
 
+
+logger = logging.getLogger(__name__)
 
 MATCH_THRES = 0.9
 VALID_JOINS = {
@@ -104,10 +107,11 @@ class SimulatedTeacher:
                 "aliases": {}
             },
             "metrics": {
-                "num_grounding_failure": 0,
+                "num_search_failure": 0,
                 "num_invalid_pickup": 0,
                 "num_invalid_join": 0,
-                "num_planning_forfeiture": 0
+                "num_planning_forfeiture": 0,
+                "num_episode_discarded": 0
             }
         }
         self.target_task = target_task
@@ -202,6 +206,7 @@ class SimulatedTeacher:
         assem_st = self.current_episode_record["assembly_state"]
         subassems = assem_st["subassemblies"]
         sampled_parts = self.current_episode_record["sampled_parts"]
+        ep_metrics = self.current_episode_record["metrics"]
 
         for utt, dem_refs in agent_reactions:
             if re.match(r"I don't know what '(.*)' means\.$", utt):
@@ -452,7 +457,13 @@ class SimulatedTeacher:
                             # Language-less player type with assistance by demonstration;
                             # sample a next valid join and proceed to demonstrate
                             demo_segment = self._sample_demo_step()
-                            self.ongoing_demonstration = ("frag", demo_segment)
+                            if demo_segment is None:
+                                # Terminate episode; see what return value of None means
+                                # in _sample_demo_step().
+                                ep_metrics["num_episode_discarded"] += 1
+                                return []
+                            else:
+                                self.ongoing_demonstration = ("frag", demo_segment)
                         else:
                             # Languageful player types; directly inquire the intent
                             # of the undone pick-up action
@@ -465,7 +476,7 @@ class SimulatedTeacher:
                             ]
                         
                         interrupted = True
-                        self.current_episode_record["metrics"]["num_invalid_pickup"] += 1
+                        ep_metrics["num_invalid_pickup"] += 1
 
                 if utt.startswith("# Effect: drop"):
                     # Effect of drop action; no args, just update hand states
@@ -552,7 +563,13 @@ class SimulatedTeacher:
                             # Language-less player type with assistance by demonstration;
                             # sample a next valid join and proceed to demonstrate
                             demo_segment = self._sample_demo_step()
-                            self.ongoing_demonstration = ("frag", demo_segment)
+                            if demo_segment is None:
+                                # Terminate episode; see what return value of None means
+                                # in _sample_demo_step().
+                                ep_metrics["num_episode_discarded"] += 1
+                                return []
+                            else:
+                                self.ongoing_demonstration = ("frag", demo_segment)
                         else:
                             # Languageful player types; directly inquire the intent
                             # of the undone pick-up action
@@ -564,7 +581,7 @@ class SimulatedTeacher:
                                 })
                             ]
                         interrupted = True
-                        self.current_episode_record["metrics"]["num_invalid_join"] += 1
+                        ep_metrics["num_invalid_join"] += 1
                     else:
                         # If join not invalid, update ongoing execution state
                         assert len(valid_pairs_achieved) == 1
@@ -611,7 +628,13 @@ class SimulatedTeacher:
                 # Whichever type it is, provide a partial demonstration, up to
                 # a next join valid in current progress
                 demo_segment = self._sample_demo_step()
-                self.ongoing_demonstration = ("frag", demo_segment)
+                if demo_segment is None:
+                    # Terminate episode; see what return value of None means
+                    # in _sample_demo_step().
+                    ep_metrics["num_episode_discarded"] += 1
+                    return []
+                else:
+                    self.ongoing_demonstration = ("frag", demo_segment)
 
                 # Notify agent that user will demonstrate a valid join
                 response.append((
@@ -623,11 +646,11 @@ class SimulatedTeacher:
                 ))
 
                 if utt == "I cannot find a part I need on the table.":
-                    metric = "num_grounding_failure"
+                    metric = "num_search_failure"
                 else:
                     assert utt.startswith("I couldn't plan further")
                     metric = "num_planning_forfeiture"
-                self.current_episode_record["metrics"][metric] += 1
+                ep_metrics[metric] += 1
 
             elif utt.startswith("Is there a "):
                 # Agent has failed to ground an instance of some part type, which
@@ -668,7 +691,7 @@ class SimulatedTeacher:
                             # `False`: Pass by string name instead of seg mask
                     }
                 ))
-                self.current_episode_record["metrics"]["num_grounding_failure"] += 1
+                ep_metrics["num_search_failure"] += 1
 
             elif utt.startswith("I was trying to "):
                 # Agent reported its originally intended join of two part instances
@@ -1317,6 +1340,10 @@ class SimulatedTeacher:
                 node_unifications[f"{sa}_{u}"] = u
                 node_unifications[f"{sa}_{v}"] = v
             connection_status[sa] = sa_graph
+
+        if len(remaining_joins) == 0:
+            return []           # Task already finished
+
         for (type1, cp1), (type2, cp2) in remaining_joins:
             # Remaining joins to make; randomly select remaining parts where
             # there are more than one ways/orders to sample them (wheels and
@@ -1346,6 +1373,18 @@ class SimulatedTeacher:
             (connection_status, node_unifications), (set(), set()),
             self.cfg.paths.assets_dir, self.cfg.seed
         )
+        if join_tree is None:
+            # If no valid join tree is identified despite the teacher's full
+            # domain knowledge, this implies agent somehow 'trapped itself'
+            # into hard-to-recover deadend (due to collision constraint)
+            # stemming from misclassification of an atomic part included in
+            # an existing subassembly. We could consider backtracking and 
+            # disassembling until full assembly is feasible again, but it's
+            # gonna induce some headache... Let's just discard this episode
+            # altogether and mark this episode as botched, for such occasions
+            # happen quite rarely, which is fortunate for us.
+            logger.info("Irreconcilable dead end reached, abort episode")
+            return None
 
         # Integer index for the resultant subassembly, obtained from list of
         # any existing subassemblies; ensure the newly assigned index doesn't

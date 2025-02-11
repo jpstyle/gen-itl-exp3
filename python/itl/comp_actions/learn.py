@@ -5,7 +5,7 @@ referring to belief updates that modify long-term memory
 import re
 import math
 import torch
-from itertools import permutations, product
+from itertools import permutations
 from collections import defaultdict, Counter
 
 import open3d as o3d
@@ -1152,17 +1152,30 @@ def posthoc_episode_analysis(agent):
     estimated environemnt state---namely estimated part types of each object
     used in the finished assembly---against agent's current knowledge, then
     resolve any mismatch by updating knowledge state. In our scope, primary
-    learning signals to be extracted are positive/negative exemplars. Note
-    that this procedure is only run by language-less agents which have to
-    rely on agent demonstration upon planning failure, whereas languageful
-    agents can immediately update exemplar base when they directly receive
-    labeling feedback from user.
+    learning signals to be extracted are positive/negative exemplars.
     """
-    if agent.cfg.exp.player_type not in ["bool", "demo"]:
-        # Only needed for languageless agents as of now
-        return
-
     exec_state = agent.planner.execution_state      # Shortcut var
+
+    # Purge agent's current committed recognitions before final state
+    # estimation, leaving only label info from teacher
+
+    # Direct positive labels (languageful agents) and pairwise
+    # negative labels (languageless agents)
+    resolved_record = agent.lang.dialogue.export_resolved_record()
+    labeling_feedback = [
+        (lit.args[0][0], int(lit.name.strip("pcls_")))
+        for spk, turn_clauses in resolved_record
+        for ((_, _, _, cons), _, clause_info) in turn_clauses
+        if cons is not None
+        for lit in cons
+        if spk == "Teacher" and clause_info["mood"] == "." \
+            and lit.name.startswith("pcls")
+    ]
+    exec_state["recognitions"] = dict(labeling_feedback) | {
+        objs: labels
+        for objs, labels in exec_state["recognitions"].items()
+        if isinstance(objs, tuple)
+    }
 
     # Obtain agent's final estimate on how each atomic part in the completed
     # subassembly is contributing to the finished structure, by running the

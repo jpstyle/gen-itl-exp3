@@ -21,6 +21,9 @@ class ActionPlannerModule:
         # of some plan consisting of multiple to-dos
         self.execution_state = {}
 
+    def refresh(self):
+        self.__init__()
+
     def obtain_plan(self, todo):
         """
         Obtain appropriate plan from plan library (maybe this could be extended later

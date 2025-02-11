@@ -9,7 +9,7 @@ import logging
 from operator import mul
 from functools import reduce
 from itertools import combinations, product, groupby
-from collections import defaultdict, deque, Counter
+from collections import defaultdict, deque
 
 import copy
 import yaml
@@ -21,18 +21,11 @@ from clingo import Control, SymbolType, Number, Function
 from ..vision.utils import (
     xyzw2wxyz, flip_position_y, flip_quaternion_y, rmat2quat, transformation_matrix
 )
-from ..lpmln import Literal, Rule
+from ..lpmln import Literal
 from ..lpmln.utils import wrap_args
 
 
 logger = logging.getLogger(__name__)
-
-# As it is simply impossible to enumerate 'every possible continuous value',
-# we consider a discretized likelihood threshold as counterfactual alternative.
-# The value represents an alternative visual observation that results in evidence
-# that is 'reasonably' stronger that the corresponding literal actually being true.
-# (cf. ..symbolic_reasoning.attribute)
-HIGH = 0.85
 
 # Recursive helper method for checking whether rule cons/ante uses a reserved (pred
 # type *) predicate 
@@ -513,20 +506,24 @@ def _plan_assembly(agent, build_target):
         # with the demonstrated join, it might mean two things, either currently
         # committed part recognition for the joined parts are incorrect, or
         # agent doesn't know a valid structure that can comply with the 
-        # recognitions. In any case, uncommit the recognitions involved in the
-        # latest join demo'ed by teacher (since agent wouldn't have made such
-        # joins without being interrupted by teacher). Forfeit planning for the
-        # current round.
-        latest_join_by_teacher = [
-            action_params
-            for _, action_params, actor in exec_state["action_history"]
+        # recognitions. In any case, forfeit planning for the current round.
+        # Also, if teacher's latest demo action is an assemble~ type action,
+        # uncommit the recognitions involved in the the latest join since
+        # agent wouldn't have made such joins without being interrupted by
+        # teacher.
+        latest_teacher_action = [
+            (action_type, action_params)
+            for action_type, action_params, actor in exec_state["action_history"]
             if actor == "Teacher"
         ][-1]
-        _, atomic_left, _, _, atomic_right, _, _ = latest_join_by_teacher
-        if atomic_left in exec_state["recognitions"]:
-            del exec_state["recognitions"][atomic_left]
-        if atomic_right in exec_state["recognitions"]:
-            del exec_state["recognitions"][atomic_right]
+        action_type, action_params = latest_teacher_action
+        action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
+        if action_name.startswith("assemble"):
+            _, atomic_left, _, _, atomic_right, _, _ = action_params
+            if atomic_left in exec_state["recognitions"]:
+                del exec_state["recognitions"][atomic_left]
+            if atomic_right in exec_state["recognitions"]:
+                del exec_state["recognitions"][atomic_right]
         planning_forfeited = True
     else:
         # Compile the optimal solution into appropriate data structures
@@ -810,6 +807,8 @@ def _plan_assembly(agent, build_target):
     log_msg += f"({total_query_count} calls total)"
     logger.info(log_msg)
 
+    # 'Commit' to a set of part type recognitions, i.e., decisions as to of which
+    # type to consider each object as an instance
     recognitions = {
         oi: conc for oi, conc in node2obj_map.values()
         if oi not in node_unifications or       # Not unified in the first place
@@ -951,21 +950,6 @@ def _goal_selection(agent, build_target):
                     )
                 )
             ext_info.add(ext_edge_lit)
-    # Extra integrity constraints by pairwise negative label info
-    ext_constraints = []
-    for objs, labels in exec_state["recognitions"].items():
-        if isinstance(objs, str): continue
-        assert isinstance(objs, tuple)
-        obj1, obj2 = objs
-        label1, label2 = -labels[0], -labels[1]
-        # It shouldn't be the case that obj1 is an instance of label1
-        # and obj2 of label2 at the same time
-        ext_constraints.append(Rule(
-            body=[
-                Literal("use_as", wrap_args(obj1, label1)),
-                Literal("use_as", wrap_args(obj2, label2))
-            ]
-        ))
 
     # Encode assembly target info into ASP fact literal
     target_lit = Literal("build_target", wrap_args(build_target[1]))
@@ -990,14 +974,13 @@ def _goal_selection(agent, build_target):
         key=lambda x: x.name
     )
     facts_prg = "".join(str(lit) + ".\n" for lit in all_lits)
-    facts_prg += "\n".join(str(rule) for rule in ext_constraints)
     commit_ctl.add("facts", [], facts_prg)
 
     # Optimize with clingo; using the incremental multi-shot optimization
     # procedure unlocked in clingo 4, as built-in optimization seems to
     # not work for some reason...
     commit_ctl.ground([("base", []), ("facts", [])])
-    best_model = None; best_score = 0
+    best_model = None; best_score = -1
     while True:
         commit_ctl.ground([("check", [Number(best_score)])])
         commit_ctl.assign_external(
@@ -1005,8 +988,11 @@ def _goal_selection(agent, build_target):
         )
 
         model = None
-        with commit_ctl.solve(yield_=True) as solve_gen:
-            for m in solve_gen:
+        with commit_ctl.solve(yield_=True, async_=True) as solve_gen:
+            solve_gen.resume()
+            _ = solve_gen.wait(5)   # Don't spend more than 5 secs
+            m = solve_gen.model()
+            if m is not None:
                 model = m.symbols(atoms=True)
         
         if model is None:
@@ -1021,8 +1007,10 @@ def _goal_selection(agent, build_target):
             best_model = model
             best_score = next(
                 atm.arguments[0].number
-                for atm in model if atm.name=="avg_score"
+                for atm in best_model if atm.name=="avg_score"
             )
+            if best_score >= 16:
+                break           # Score good enough
 
     return best_model
 
@@ -2110,6 +2098,16 @@ def _linearize_join_tree(
                 conc_n = atomic_node_concs[n]
                 if len(part_candidates[conc_n]) > 0:
                     o = part_candidates[conc_n].pop()
+                    # Account for any applicable pairwise negative label info
+                    for objs, labels in exec_state["recognitions"].items():
+                        if not isinstance(objs, tuple): continue
+                        if o not in objs: continue
+                        obj1, obj2 = objs
+                        label1, label2 = -labels[0], -labels[1]
+                        if o == obj1 and obj2 in part_candidates.get(label2, {}):
+                            part_candidates[label2].remove(obj2)
+                        if o == obj2 and obj1 in part_candidates.get(label1, {}):
+                            part_candidates[label1].remove(obj1)
                 else:
                     o = f"n{nonobj_ind}"
                     nonobj_ind += 1
@@ -2240,14 +2238,6 @@ def _linearize_join_tree(
         for action_type, action_params in action_sequence
     ]
 
-    if any(
-        c != 1 for c in Counter([
-            action_params[-1] for action_type, action_params in action_sequence
-            if action_type in [7,8]]
-        ).values()
-    ):
-        print(0)
-
     return action_sequence, node2obj_map
 
 def _execute_pick_up(agent, action_name, action_params):
@@ -2334,6 +2324,8 @@ def _execute_pick_up(agent, action_name, action_params):
             # Enter pause mode, waiting for teacher's partial demo up to
             # next valid join
             agent.execution_paused = True
+            # Replanning needed after demo
+            exec_state["replanning_needed"] = True
 
         else:
             # Language-conversant agents can inquire the agent whether there
@@ -2355,6 +2347,9 @@ def _execute_pick_up(agent, action_name, action_params):
                 "x0": { "entity": None, "rf_info": {} }
             }
             predicates = { "pc0": (("n", target_sym), f"pcls_{target_conc}") }
+
+            # Need to replan after getting teacher's response
+            exec_state["replanning_needed"] = True
 
         # Append to & flush generation buffer
         agent.lang.dialogue.to_generate.append(
@@ -2590,6 +2585,8 @@ def report_planning_failure(agent):
     
     # Enter pause mode
     agent.execution_paused = True
+    # Need to plan again after demo
+    exec_state["replanning_needed"] = True
     # Append the original goal at the end of the agenda in order to keep
     # current episode active
     agent.planner.agenda.append(("execute_command", (action_conc, action_target)))
@@ -2704,10 +2701,6 @@ def handle_action_effect(agent, effect, actor):
                     del exec_state["recognitions"][atomic_right]
                     agent.interrupted = False        # Disable flag
 
-                # Language-less agents would need to re-plan after an undone pick-up
-                # action
-                exec_state["replanning_needed"] = True
-
             # Update action history
             exec_state["action_history"].append((action_type, (), actor))
 
@@ -2808,8 +2801,6 @@ def handle_action_effect(agent, effect, actor):
             exec_state["action_history"].append(
                 (action_type, assemble_params, actor)
             )
-            # Agent now needs to plan again before resuming execution
-            exec_state["replanning_needed"] = True
 
     if action_name.startswith("disassemble"):
         # Disassemble action effects: poses of both manipulators, poses of all
@@ -2911,6 +2902,3 @@ def handle_action_effect(agent, effect, actor):
             exec_state["action_history"].append(
                 (action_type, disassemble_params, actor)
             )
-            # Language-less agents would need to re-plan after an undone pick-up
-            # action
-            exec_state["replanning_needed"] = True
