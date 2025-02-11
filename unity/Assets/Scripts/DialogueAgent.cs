@@ -874,8 +874,9 @@ public class DialogueAgent : Agent
             var cpTgt = cpTrTgt.gameObject;
             var positionDiff = Vector3.Distance(cpTrSrc.position, cpTrTgt.position);
             var positionMatch = Mathf.Exp(
-                -Mathf.Pow(positionDiff, 2) / (2 * Mathf.Pow(0.05f, 2))
-            );      // Use Gaussian kernel with sigma of 0.1 to compute position match score 
+                -Mathf.Pow(positionDiff, 2) / (2 * Mathf.Pow(0.005f, 2))
+            );      // Use Gaussian kernel with sigma of 0.01 to compute position match score,
+                    // requiring precise position match in effect
             var rotationMatch = Math.Abs(Quaternion.Dot(cpTrSrc.rotation, cpTrTgt.rotation));
             cpPairs.Add((cpSrc, cpTgt, positionMatch, rotationMatch));
         }

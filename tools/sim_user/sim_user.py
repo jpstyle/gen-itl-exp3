@@ -509,7 +509,7 @@ class SimulatedTeacher:
                     cp_pairs = [
                         (tuple(cp_src.split("/")), tuple(cp_tgt.split("/")))
                         for cp_src, cp_tgt, diff_pos, diff_rot in cp_pairs
-                        if float(diff_pos) + float(diff_rot) > 1.8
+                        if float(diff_pos) + float(diff_rot) > 1.95
                             # Threshold for whether pair counts as match by sum of diffs
                     ]
                     cp_pairs = [
@@ -622,11 +622,8 @@ class SimulatedTeacher:
                 #       happens because user feedback by demo doesn't provide
                 #       immediately available part type info.
 
-                # Player type may be 'bool' or 'demo'
-                assert self.player_type in ["bool", "demo"]
-
-                # Whichever type it is, provide a partial demonstration, up to
-                # a next join valid in current progress
+                # Provide a partial demonstration, up to a next join valid in
+                # current progress
                 demo_segment = self._sample_demo_step()
                 if demo_segment is None:
                     # Terminate episode; see what return value of None means
@@ -1329,10 +1326,20 @@ class SimulatedTeacher:
                 if (cp_u, cp_v) in remaining_joins:
                     remaining_joins.remove((cp_u, cp_v))
                     edge = (u, v); contact = (cp_u, cp_v)
-                else:
-                    assert (cp_v, cp_u) in remaining_joins
+                elif (cp_v, cp_u) in remaining_joins:
                     remaining_joins.remove((cp_v, cp_u))
                     edge = (v, u); contact = (cp_v, cp_u)
+                else:
+                    # This really shouldn't happen... but I've witnessed it
+                    # happened once. Probably an invalid join seeped through
+                    # the stochastic perturbation wall implemented in Unity???
+                    # Aways, if this is ever to happen, log and return null
+                    # step, effectively aborting this episode
+                    log_msg = "Existing join "
+                    log_msg += f"{type_u}/{cp_u}~{type_v}/{cp_v} invalid, "
+                    log_msg += "abort episode"
+                    logger.info(log_msg)
+                    return None
                 contacts[edge] = (
                     "p_" + str(cp_names_inv[contact[0][0] + "/" + contact[0][1]]),
                     "p_" + str(cp_names_inv[contact[1][0] + "/" + contact[1][1]])

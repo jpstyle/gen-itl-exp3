@@ -1198,7 +1198,7 @@ def posthoc_episode_analysis(agent):
     possible_mappings = _match_existing_subassemblies(
         connection_graph, node_unifications, atomic_node_concs, exec_state
     )
-    for ism in possible_mappings[final_sa]:
+    for ism in possible_mappings["anchored"] + possible_mappings["lifted"]:
         for n, ex_obj in ism.items():
             node_unifications[f"{final_sa}_{ex_obj}"].add(n)
 

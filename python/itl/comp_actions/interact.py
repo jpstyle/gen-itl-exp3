@@ -511,20 +511,22 @@ def _plan_assembly(agent, build_target):
         # uncommit the recognitions involved in the the latest join since
         # agent wouldn't have made such joins without being interrupted by
         # teacher.
-        latest_teacher_action = [
+        planning_forfeited = True
+        latest_teacher_actions = [
             (action_type, action_params)
             for action_type, action_params, actor in exec_state["action_history"]
             if actor == "Teacher"
-        ][-1]
-        action_type, action_params = latest_teacher_action
-        action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
-        if action_name.startswith("assemble"):
-            _, atomic_left, _, _, atomic_right, _, _ = action_params
-            if atomic_left in exec_state["recognitions"]:
-                del exec_state["recognitions"][atomic_left]
-            if atomic_right in exec_state["recognitions"]:
-                del exec_state["recognitions"][atomic_right]
-        planning_forfeited = True
+        ]
+        if len(latest_teacher_actions) > 0:
+            action_type, action_params = latest_teacher_actions[-1]
+            action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
+            if action_name.startswith("assemble"):
+                _, atomic_left, _, _, atomic_right, _, _ = action_params
+                if atomic_left in exec_state["recognitions"]:
+                    del exec_state["recognitions"][atomic_left]
+                if atomic_right in exec_state["recognitions"]:
+                    del exec_state["recognitions"][atomic_right]
+        
     else:
         # Compile the optimal solution into appropriate data structures
         tabulated_results = _tabulate_goal_selection_result(best_model)
@@ -551,9 +553,15 @@ def _plan_assembly(agent, build_target):
         possible_mappings = _match_existing_subassemblies(
             connection_graph, node_unifications, atomic_node_concs, exec_state
         )
+        covered_objs = {
+            obj for group_mappings in possible_mappings.values()
+            for ism in group_mappings
+            for obj in ism.values()
+        }
         unmapped_subassemblies = {
             sa for sa, sa_graph in exec_state["connection_graphs"].items()
-            if len(sa_graph) > 1 and sa not in possible_mappings
+            for ex_obj in sa_graph
+            if len(sa_graph) > 1 and ex_obj not in covered_objs
         }
         if len(unmapped_subassemblies) > 0:
             # We know as invariant that existing subassemblies will always be
@@ -634,15 +642,19 @@ def _plan_assembly(agent, build_target):
         # Select valid scenarios by filtering out any in which some objects are
         # unified with the same node
         unification_scenarios = product(*[
-            [(sa, ism) for ism in isms] for sa, isms in possible_mappings.items()
+            isms for _, isms in possible_mappings.items()
         ])
         valid_scenarios = []; obj2sa_mapping = {}
         for scenario in unification_scenarios:
+            # Merge the per-group isomorphic mappings into a single mapping,
+            # while fetching object-to-subassembly affiliations as well
             combined_mapping = {}
-            for sa, mapping in scenario:
+            for mapping in scenario:
                 for n, ex_obj in mapping.items():
-                    obj2sa_mapping[ex_obj] = sa
-                    combined_mapping[ex_obj] = n
+                    for sa, sa_graph in exec_state["connection_graphs"].items():
+                        if ex_obj not in sa_graph: continue
+                        obj2sa_mapping[ex_obj] = sa
+                        combined_mapping[ex_obj] = n
 
             if len(set(combined_mapping.values())) != len(combined_mapping):
                 # Some different objects mapped to the same node, invalid
@@ -977,7 +989,7 @@ def _goal_selection(agent, build_target):
     commit_ctl.add("facts", [], facts_prg)
 
     # Optimize with clingo; using the incremental multi-shot optimization
-    # procedure unlocked in clingo 4, as built-in optimization seems to
+    # procedure supported from clingo 4, as built-in optimization seems to
     # not work for some reason...
     commit_ctl.ground([("base", []), ("facts", [])])
     best_model = None; best_score = -1
@@ -1009,7 +1021,7 @@ def _goal_selection(agent, build_target):
                 atm.arguments[0].number
                 for atm in best_model if atm.name=="avg_score"
             )
-            if best_score >= 16:
+            if best_score >= 18:
                 break           # Score good enough
 
     return best_model
@@ -1108,23 +1120,32 @@ def _match_existing_subassemblies(
             # Ignore any singletons, which are in `oXX_oXX` form
     }
 
-    anchored_sas = {sa for sa, _ in uniquely_unified}
-    lifted_sas = set(exec_state["connection_graphs"]) - anchored_sas
+    anchored_sas = {
+        sa for sa, _ in uniquely_unified
+        if len(exec_state["connection_graphs"][sa]) > 1
+    }
+    lifted_sas = {
+        sa for sa in set(exec_state["connection_graphs"]) - anchored_sas
+        if len(exec_state["connection_graphs"][sa]) > 1
+    }
     conn_graph_match = copy.deepcopy(connection_graph)
     for n in conn_graph_match:
         if n in uniquely_unified.values():
             conn_graph_match.nodes[n]["unif"] = n
     # First match and process existing subassemblies which have uniquely
     # unifiable component objects
-    for sa in anchored_sas:
-        sa_graph_match = exec_state["connection_graphs"][sa].to_undirected()
-        if len(sa_graph_match) == 1: continue       # Ignore singletons
-        for ex_obj in sa_graph_match:
-            if (sa, ex_obj) in uniquely_unified:
-                unified_node = uniquely_unified[(sa, ex_obj)]
-                sa_graph_match.nodes[ex_obj]["unif"] = unified_node
+    if len(anchored_sas) > 0:
+        anchored_sa_graphs_union = nx.union_all([
+            exec_state["connection_graphs"][sa].to_undirected()
+            for sa in anchored_sas
+        ])
+        for ex_obj in anchored_sa_graphs_union:
+            for sa in anchored_sas:
+                if (sa, ex_obj) in uniquely_unified:
+                    unified_node = uniquely_unified[(sa, ex_obj)]
+                    anchored_sa_graphs_union.nodes[ex_obj]["unif"] = unified_node
         matcher = nx.isomorphism.ISMAGS(
-            conn_graph_match, sa_graph_match,
+            conn_graph_match, anchored_sa_graphs_union,
             node_match=nx.isomorphism.categorical_node_match("unif", "*")
         )
         for ism in matcher.find_isomorphisms(symmetry=False):
@@ -1135,15 +1156,23 @@ def _match_existing_subassemblies(
                     exec_state["recognitions"][ex_obj] != atomic_node_concs[n]
                 for n, ex_obj in ism.items()
             ): continue
-            possible_mappings[sa].append(ism)
+            possible_mappings["anchored"].append(ism)
     # Punch out uniquely unified nodes
     conn_graph_match.remove_nodes_from(uniquely_unified.values())
     # Now match and process existing subassemblies that are not anchored
     # to any nodes in connection graph, with remaining `conn_graph_match`
-    for sa in lifted_sas:
-        sa_graph_match = exec_state["connection_graphs"][sa].to_undirected()
-        if len(sa_graph_match) == 1: continue       # Ignore singletons
-        matcher = nx.isomorphism.ISMAGS(conn_graph_match, sa_graph_match)
+    if len(lifted_sas) > 0:
+        lifted_sa_graphs_union = nx.union_all([
+            exec_state["connection_graphs"][sa].to_undirected()
+            for sa in lifted_sas
+        ])
+        matcher = nx.isomorphism.ISMAGS(
+            conn_graph_match, lifted_sa_graphs_union,
+            node_match=nx.isomorphism.categorical_node_match("unif", "*")
+        )
+        matcher = nx.isomorphism.ISMAGS(
+            conn_graph_match, lifted_sa_graphs_union
+        )
         for ism in matcher.find_isomorphisms(symmetry=False):
             # Typechecking again
             if any(
@@ -1151,7 +1180,7 @@ def _match_existing_subassemblies(
                     exec_state["recognitions"][ex_obj] != atomic_node_concs[n]
                 for n, ex_obj in ism.items()
             ): continue
-            possible_mappings[sa].append(ism)
+            possible_mappings["lifted"].append(ism)
 
     return possible_mappings
 
@@ -2803,6 +2832,14 @@ def handle_action_effect(agent, effect, actor):
             )
 
     if action_name.startswith("disassemble"):
+        # Disassemble action always come from teacher, when agent's previous
+        # assemble action was based on incorrect atomic part type premise
+        # and thus needs to be undone
+        assert actor == "Teacher"
+            # Note that there is no need to check `agent.interrupted` because
+            # any disassmble action is an undoing action of the previous
+            # assemble action. Still, don't forget to disable the flag later.
+
         # Disassemble action effects: poses of both manipulators, poses of all
         # atomic parts included in each disassembly resultant objects
         manip_ind = 0 if action_name.endswith("left") else 1
@@ -2866,15 +2903,15 @@ def handle_action_effect(agent, effect, actor):
         exec_state["connection_graphs"][prev_left] = graph_left
         exec_state["connection_graphs"][prev_right] = graph_right
 
-        if agent.cfg.exp.player_type in ["bool", "demo"]:
-            # Disassemble action always come from teacher, when agent's previous
-            # assemble action was based on incorrect atomic part type premise
-            # and thus needs to be undone
-            assert actor == "Teacher"
-                # Note that there is no need to check `agent.interrupted` because
-                # any disassmble action is an undoing action of the previous
-                # assemble action. Still, don't forget to disable the flag later.
+        # Update action history
+        disassemble_params = (
+            set(part_poses_left), set(part_poses_right), prev_left, prev_right
+        )
+        exec_state["action_history"].append(
+            (action_type, disassemble_params, actor)
+        )
 
+        if agent.cfg.exp.player_type in ["bool", "demo"]:
             (atomic_left, atomic_right), _ = _last_intended_join(agent)
             rcgn_left = exec_state["recognitions"][atomic_left]
             rcgn_right = exec_state["recognitions"][atomic_right]
@@ -2893,12 +2930,3 @@ def handle_action_effect(agent, effect, actor):
             del exec_state["recognitions"][atomic_left]
             del exec_state["recognitions"][atomic_right]
             agent.interrupted = False        # Disable flag
-
-            # Update action history
-            disassemble_params = (
-                set(part_poses_left), set(part_poses_right),
-                prev_left, prev_right
-            )
-            exec_state["action_history"].append(
-                (action_type, disassemble_params, actor)
-            )
