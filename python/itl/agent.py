@@ -175,9 +175,12 @@ class ITLAgent:
                     self.planner.agenda.popleft()
 
                 if utt == "Stop." and not self.execution_paused:
-                    # Enter pause mode; ignore any `execute_command` items
-                    # in agenda
+                    # Enter pause mode, where any execution related agenda
+                    # items will be ignored. Interruption also implies
+                    # currently remaining plan is invalid and replanning
+                    # would be needed.
                     self.execution_paused = True
+                    self.planner.execution_state["replanning_needed"] = True
                     self.interrupted = True     # Also log interruption
                 if utt == "Continue." and self.execution_paused:
                     # Exit pause mode
@@ -210,9 +213,13 @@ class ITLAgent:
 
         # Some cleaning steps needed whenever visual context changes
         if new_env:
-            # Refresh dialogue manager & symbolic reasoning module states
+            # Refresh agent states to prepare for new episode
             self.lang.dialogue.refresh()
             self.symbolic.refresh()
+            self.planner.refresh()
+            self.observed_demo = None
+            self.execution_paused = False
+            self.interrupted = False
 
             # Update KB snapshot on episode-basis
             self.kb_snap = copy.deepcopy(self.lt_mem.kb)

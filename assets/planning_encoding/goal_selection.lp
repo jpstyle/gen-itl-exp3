@@ -12,7 +12,7 @@ node_sa_template(n(N,NS),S2,I2) :-
 % An object that may be an instance of atomic part type P can be considered and
 % used as one, but an object cannot be used as more than one atomic part type
 % at the same time
-{ use_as(O,P) } :- is_likely(O,P,_).
+{ use_as(O,P) } :- is_likely(O,P,PR), PR >= 5, not ext_node(O,_), not ext_node(O).
 :- is_likely(O,_,_), #count { P : use_as(O,P) } > 1.
 
 % Usage should not exceed demand
@@ -23,7 +23,7 @@ part_usage(P,PU) :- atomic(P), PU = #count { O : use_as(O,P) }.
 % Do not allow any idle objects when they can be employed
 unmet_demand(P,DM-PU) :- part_demand(P,DM), part_usage(P, PU).
 ununsed_supply(P,US) :- atomic(P),
-    US = #count { O : is_likely(O,P,_), not use_as(O,_) }.
+    US = #count { O : is_likely(O,P,PR), PR >= 5, not use_as(O,_) }.
 :- unmet_demand(P,UD), ununsed_supply(P,US), UD > 0, US > 0.
 
 % For tracking which nodes will have to be connected at which contact points
@@ -43,42 +43,41 @@ fits_signature(D,N,NS,c(NS,SG)) :-
 
 % If an existing object with known part type has exactly one atomic node with
 % the matching type, unify
-must_unify(X,N) :- ext_node(X,P), 1{ node_atomic(_,P) }1, node_atomic(N,P).
+must_unify(O,N) :- ext_node(O,P), 1{ node_atomic(_,P) }1, node_atomic(N,P).
 % If a neighbor of a uniquely unified object connects with another by known
 % contact site, unify (assumption here is that contact sites of each atomic part
 % are all uniquely distinguishable)
-must_unify(X1,N1) :- must_unify(X2,N2), ext_edge(X1,X2,CP1,CP2),
+must_unify(O1,N1) :- must_unify(O2,N2), ext_edge(O1,O2,CP1,CP2),
     to_connect(N1,N2,CP1,CP2).
 % If a neighbor of a uniquely unified object has known type, and there exist
 % exactly one node with matching type in the neighborhood of the uniquely unified
 % node, unify
-must_unify(X1,N1) :- must_unify(X2,N2), ext_node(X1,P1), ext_edge(X1,X2),
+must_unify(O1,N1) :- must_unify(O2,N2), ext_node(O1,P1), ext_edge(O1,O2),
     1{ node_atomic(N,P1) : to_connect(N,N2,_,_) }1,
     node_atomic(N1,P1), to_connect(N1,N2,_,_).
 % If a neighbor of a uniquely unified object has known type, and there exist
 % more than one nodes with matching type in the neighborhood of the uniquely
 % unified node, *MAY* unify with one of them
-may_unify(X1,N1) :- must_unify(X2,N2), ext_node(X1,P1), ext_edge(X1,X2),
+may_unify(O1,N1) :- must_unify(O2,N2), ext_node(O1,P1), ext_edge(O1,O2),
     2{ node_atomic(N,P1) : to_connect(N,N2,_,_) },
     node_atomic(N1,P1), to_connect(N1,N2,_,_).
 % If one side of existing object connection uniquely unifies to an atomic node
 % while the other's type is not specified, the latter *MAY* be unified with one
 % of other atomic nodes connected to the unified node
-may_unify(X1,N1) :- must_unify(X2,N2), ext_node(X1), ext_edge(X1,X2),
+may_unify(O1,N1) :- must_unify(O2,N2), ext_node(O1), ext_edge(O1,O2),
     to_connect(N1,N2,_,_).
 % Different objects cannot be forced to unify with the same node
-:- must_unify(X1,N1), must_unify(X2,N2), X1 != X2, N1 = N2.
-% Again, usage should not exceed demand (existing obj. ver.)
-ext_usage(P,XU) :- atomic(P), XU = #count { X : must_unify(X,N), ext_node(N,P) }.
-:- part_demand(P,DM), ext_usage(P,XU), XU > DM.
+:- must_unify(O1,N1), must_unify(O2,N2), O1 != O2, N1 = N2.
+% Count as part usage if must_unify
+use_as(O,P) :- must_unify(O,N), ext_node(N,P).
 % Connections between uniquely unified objects enforce node connections
-:- must_unify(X1,N1), must_unify(X2,N2), ext_edge(X1,X2),
+:- must_unify(O1,N1), must_unify(O2,N2), ext_edge(O1,O2),
     not to_connect(N1,N2,_,_).
 
 % Edge symmetricity
 to_connect(N2,N1,CP2,CP1) :- to_connect(N1,N2,CP1,CP2).
-ext_edge(X2,X1,CP2,CP1) :- ext_edge(X1,X2,CP1,CP2).
-ext_edge(X2,X1) :- ext_edge(X1,X2).
+ext_edge(O2,O1,CP2,CP1) :- ext_edge(O1,O2,CP1,CP2).
+ext_edge(O2,O1) :- ext_edge(O1,O2).
 
 % Compute final compatibility score by taking average across all atomic nodes
 total_score(TS) :- TS = #sum { PR,O : is_likely(O,P,PR), use_as(O,P) }.
