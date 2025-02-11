@@ -111,7 +111,7 @@ class SimulatedTeacher:
                 "num_invalid_pickup": 0,
                 "num_invalid_join": 0,
                 "num_planning_forfeiture": 0,
-                "num_episode_discarded": 0
+                "episode_discarded": False
             }
         }
         self.target_task = target_task
@@ -244,8 +244,9 @@ class SimulatedTeacher:
                     if demo_type == "full":
                         # Demonstration finished (including end-of-demo message),
                         # wait w/o terminating until receiving agent's acknowledgement
-                        # message "OK"
-                        response.append((None, None))
+                        # message "OK" (unless already included)
+                        if ("OK.", {}) not in agent_reactions:
+                            response.append((None, None))
                         continue
                     elif demo_type == "frag":
                         # Tell the agent to resume its task execution
@@ -382,8 +383,8 @@ class SimulatedTeacher:
                     if demo_type == "full":
                         # Provide additional action annotations
                         response.append(("generate", act_anno))
-                    if act_dscr is not None:
-                        response.append(("generate", act_dscr))
+                        if act_dscr is not None:
+                            response.append(("generate", act_dscr))
 
             elif utt.startswith("# Action:"):
                 # Agent action intent; somewhat like reading into the agent's 'mind'
@@ -460,7 +461,7 @@ class SimulatedTeacher:
                             if demo_segment is None:
                                 # Terminate episode; see what return value of None means
                                 # in _sample_demo_step().
-                                ep_metrics["num_episode_discarded"] += 1
+                                ep_metrics["episode_discarded"] = True
                                 return []
                             else:
                                 self.ongoing_demonstration = ("frag", demo_segment)
@@ -566,7 +567,7 @@ class SimulatedTeacher:
                             if demo_segment is None:
                                 # Terminate episode; see what return value of None means
                                 # in _sample_demo_step().
-                                ep_metrics["num_episode_discarded"] += 1
+                                ep_metrics["episode_discarded"] = True
                                 return []
                             else:
                                 self.ongoing_demonstration = ("frag", demo_segment)
@@ -628,7 +629,7 @@ class SimulatedTeacher:
                 if demo_segment is None:
                     # Terminate episode; see what return value of None means
                     # in _sample_demo_step().
-                    ep_metrics["num_episode_discarded"] += 1
+                    ep_metrics["episode_discarded"] = True
                     return []
                 else:
                     self.ongoing_demonstration = ("frag", demo_segment)

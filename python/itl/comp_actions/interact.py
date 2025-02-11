@@ -675,7 +675,7 @@ def _plan_assembly(agent, build_target):
         # Give up if too many join trees to inspect. The latter check, which
         # is redundant with that above, is to catch such cases and not let them
         # flow into the else case below.
-        planning_forfeited = True       
+        planning_forfeited = True
     else:
         # Extracted mapping from string part names to agent's internal concept
         # denotations
@@ -1134,18 +1134,14 @@ def _match_existing_subassemblies(
             conn_graph_match.nodes[n]["unif"] = n
     # First match and process existing subassemblies which have uniquely
     # unifiable component objects
-    if len(anchored_sas) > 0:
-        anchored_sa_graphs_union = nx.union_all([
-            exec_state["connection_graphs"][sa].to_undirected()
-            for sa in anchored_sas
-        ])
-        for ex_obj in anchored_sa_graphs_union:
-            for sa in anchored_sas:
-                if (sa, ex_obj) in uniquely_unified:
-                    unified_node = uniquely_unified[(sa, ex_obj)]
-                    anchored_sa_graphs_union.nodes[ex_obj]["unif"] = unified_node
+    for sa in anchored_sas:
+        sa_graph_match = exec_state["connection_graphs"][sa].to_undirected()
+        for ex_obj in sa_graph_match:
+            if (sa, ex_obj) in uniquely_unified:
+                unified_node = uniquely_unified[(sa, ex_obj)]
+                sa_graph_match.nodes[ex_obj]["unif"] = unified_node
         matcher = nx.isomorphism.ISMAGS(
-            conn_graph_match, anchored_sa_graphs_union,
+            conn_graph_match, sa_graph_match,
             node_match=nx.isomorphism.categorical_node_match("unif", "*")
         )
         for ism in matcher.find_isomorphisms(symmetry=False):
@@ -1156,23 +1152,14 @@ def _match_existing_subassemblies(
                     exec_state["recognitions"][ex_obj] != atomic_node_concs[n]
                 for n, ex_obj in ism.items()
             ): continue
-            possible_mappings["anchored"].append(ism)
+            possible_mappings[sa].append(ism)
     # Punch out uniquely unified nodes
     conn_graph_match.remove_nodes_from(uniquely_unified.values())
     # Now match and process existing subassemblies that are not anchored
     # to any nodes in connection graph, with remaining `conn_graph_match`
-    if len(lifted_sas) > 0:
-        lifted_sa_graphs_union = nx.union_all([
-            exec_state["connection_graphs"][sa].to_undirected()
-            for sa in lifted_sas
-        ])
-        matcher = nx.isomorphism.ISMAGS(
-            conn_graph_match, lifted_sa_graphs_union,
-            node_match=nx.isomorphism.categorical_node_match("unif", "*")
-        )
-        matcher = nx.isomorphism.ISMAGS(
-            conn_graph_match, lifted_sa_graphs_union
-        )
+    for sa in lifted_sas:
+        sa_graph_match = exec_state["connection_graphs"][sa].to_undirected()
+        matcher = nx.isomorphism.ISMAGS(conn_graph_match, sa_graph_match)
         for ism in matcher.find_isomorphisms(symmetry=False):
             # Typechecking again
             if any(
@@ -1180,7 +1167,7 @@ def _match_existing_subassemblies(
                     exec_state["recognitions"][ex_obj] != atomic_node_concs[n]
                 for n, ex_obj in ism.items()
             ): continue
-            possible_mappings["lifted"].append(ism)
+            possible_mappings[sa].append(ism)
 
     return possible_mappings
 
@@ -2037,6 +2024,16 @@ def _linearize_join_tree(
             # be considered as candidate again
             for cnd_objs in part_candidates.values():
                 if obj in cnd_objs: cnd_objs.remove(obj)
+            # Account for any applicable pairwise negative label info
+            for objs, labels in exec_state["recognitions"].items():
+                if not isinstance(objs, tuple): continue
+                if obj not in objs: continue
+                obj1, obj2 = objs
+                label1, label2 = -labels[0], -labels[1]
+                if obj == obj1 and obj2 in part_candidates.get(label2, {}):
+                    part_candidates[label2].remove(obj2)
+                if obj == obj2 and obj1 in part_candidates.get(label1, {}):
+                    part_candidates[label1].remove(obj1)
 
             # Collect specified obj-to-node unifications
             if f"{sa}_{obj}" not in node_unifications: continue
@@ -2126,21 +2123,21 @@ def _linearize_join_tree(
             if n in atomic_node_concs and n not in node2obj_map:
                 conc_n = atomic_node_concs[n]
                 if len(part_candidates[conc_n]) > 0:
-                    o = part_candidates[conc_n].pop()
+                    obj = part_candidates[conc_n].pop()
                     # Account for any applicable pairwise negative label info
                     for objs, labels in exec_state["recognitions"].items():
                         if not isinstance(objs, tuple): continue
-                        if o not in objs: continue
+                        if obj not in objs: continue
                         obj1, obj2 = objs
                         label1, label2 = -labels[0], -labels[1]
-                        if o == obj1 and obj2 in part_candidates.get(label2, {}):
+                        if obj == obj1 and obj2 in part_candidates.get(label2, {}):
                             part_candidates[label2].remove(obj2)
-                        if o == obj2 and obj1 in part_candidates.get(label1, {}):
+                        if obj == obj2 and obj1 in part_candidates.get(label1, {}):
                             part_candidates[label1].remove(obj1)
                 else:
-                    o = f"n{nonobj_ind}"
+                    obj = f"n{nonobj_ind}"
                     nonobj_ind += 1
-                node2obj_map[n] = (o, conc_n)
+                node2obj_map[n] = (obj, conc_n)
 
         # Fetch matching (non-)object and unify with subassembly names if
         # necessary
@@ -2148,7 +2145,10 @@ def _linearize_join_tree(
         s1 = o1 if n1 == a1 else n1
         s2 = o2 if n2 == a2 else n2
 
-        if s1 in hands or s2 in hands:
+        if None not in hands:
+            # Both hands are full, nothing to do here
+            pass
+        elif s1 in hands or s2 in hands:
             # Immediately using the subassembly built in the previous join
             empty_side = hands.index(None)
             occupied_side = list({0, 1} - {empty_side})[0]
@@ -2634,6 +2634,11 @@ def handle_action_effect(agent, effect, actor):
     # Shortcut vars
     referents = agent.lang.dialogue.referents
     exec_state = agent.planner.execution_state      # Shortcut var
+
+    if len(exec_state) == 0:
+        # Probably called after a full demonstration is given, no task to be
+        # executed for this episode
+        return
 
     # Mapping from Unity-side name to scene object index
     env_handle_inv = {

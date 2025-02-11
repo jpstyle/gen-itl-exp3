@@ -529,8 +529,11 @@ def report_neologism(agent, neologism):
     information that characterize the concept denoted by the neologism (e.g., definition,
     exemplar)
     """
+    # Remove from list
+    agent.lang.unresolved_neologisms.remove(neologism)
+
     # Update cognitive state w.r.t. value assignment and word sense
-    
+
     # NL surface form and corresponding logical form
     surface_form = f"I don't know what '{neologism[1]}' means."
     gq = None; bvars = set(); ante = []
@@ -567,7 +570,6 @@ def analyze_demonstration(agent, demo_data):
     referents = agent.lang.dialogue.referents
     value_assignment = agent.lang.dialogue.value_assignment
 
-    prev_img = None         # Stores previous steps' visual observations
     inspect_data = { "img": {}, "msk": {}, "pose": {} }
             # Buffer of 3d object instance views from inspect_~ actions
 
@@ -576,6 +578,13 @@ def analyze_demonstration(agent, demo_data):
     nonatomic_subassemblies = set()
     part_labeling = {}; sa_labeling = {}
     vision_2d_data = defaultdict(list); vision_3d_data = {}; assembly_sequence = []
+    # Collecting scene image and masks at the initial setting, fecthed and organized
+    # by env_handle fields in agent.vision.scene
+    for oi, obj in agent.vision.scene.items():
+        vision_2d_data[obj["env_handle"]].append((
+            obj["scene_img"], obj["pred_mask"]
+        ))
+
     for img, annotations, env_refs in demo_data:
         # Appropriately handle each annotation
         for (_, _, ante, cons), raw, clause_info in annotations:
@@ -602,20 +611,13 @@ def analyze_demonstration(agent, demo_data):
                         left_or_right = 0 if act_name.endswith("left") else 1
                         match act_type:
                             case "pick":
-                                # pick_up_~ action; track the held object and record 2d
-                                # visual data (image + mask)
+                                # pick_up_~ action; track the held object
                                 target_info = [
                                     rf_dis for rf_dis, rf_env in value_assignment.items()
                                     if rf_dis.startswith(lit.args[0][0]) and rf_env == lit.args[2][0]
                                 ][0]
                                 target_info = referents["dis"][target_info]
                                 current_held[left_or_right] = (target_info["name"], {})
-
-                                if target_info["name"] not in nonatomic_subassemblies:
-                                    # Atomic part type to be remembered, record (image, mask)
-                                    # pair by the name index
-                                    data = (prev_img, env_refs["o0"]["mask"])
-                                    vision_2d_data[target_info["name"]].append(data)
 
                             case "drop":
                                 # drop_~ action
@@ -767,8 +769,6 @@ def analyze_demonstration(agent, demo_data):
 
             # Make way for new data
             inspect_data = { "img": {}, "msk": {}, "pose": {} }
-
-        prev_img = img
 
     # Tag each part instance with their visual concept index, registering any
     # new visual concepts & neologisms; we assume here all neologisms are nouns
@@ -1198,7 +1198,7 @@ def posthoc_episode_analysis(agent):
     possible_mappings = _match_existing_subassemblies(
         connection_graph, node_unifications, atomic_node_concs, exec_state
     )
-    for ism in possible_mappings["anchored"] + possible_mappings["lifted"]:
+    for ism in possible_mappings[final_sa]:
         for n, ex_obj in ism.items():
             node_unifications[f"{final_sa}_{ex_obj}"].add(n)
 

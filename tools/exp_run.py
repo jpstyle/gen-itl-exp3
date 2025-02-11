@@ -22,7 +22,6 @@ import logging
 import warnings
 warnings.filterwarnings("ignore")
 from PIL import Image
-from collections import defaultdict
 from itertools import product, groupby
 
 import hydra
@@ -170,8 +169,8 @@ def main(cfg):
         else:
             raise ValueError        # Shouldn't happen
 
-    for ep_i in range(cfg.exp.num_episodes):
-        logger.info(f"Sys> Episode {ep_i+1})")
+    for ep_i in range(cfg.exp.num_episodes+1):
+        logger.info(f"Sys> Episode {ep_i})")
 
         # Obtain random initialization of each episode
         sampled_inits = user.setup_episode(target_task, all_subtypes)
@@ -403,32 +402,34 @@ def main(cfg):
                 new_env = False
                 env.step()
 
-        # Collect metrics for the episode
-        ep_metric = {}
-        for metric, val in user.current_episode_record["metrics"].items():
-            ep_metric[metric] = val
-        for metric, val in agent.planner.execution_state["metrics"].items():
-            ep_metric[metric] = val
-        ep_metric["episode_length"] = len(
-            agent.planner.execution_state["action_history"]
-        )
-        metrics.append(ep_metric)
-        # Log progress to tensorboard
-        for metric, val in ep_metric.items():
-            writer.add_scalar(metric, val, global_step=ep_i)
+        # Collect metrics for the episode (except for the very first one with
+        # full demo)
+        if ep_i > 0:
+            ep_metric = {}
+            for metric, val in user.current_episode_record["metrics"].items():
+                ep_metric[metric] = val
+            for metric, val in agent.planner.execution_state["metrics"].items():
+                ep_metric[metric] = val
+            ep_metric["episode_length"] = len(
+                agent.planner.execution_state["action_history"]
+            )
+            metrics.append(ep_metric)
+            # Log progress to tensorboard
+            for metric, val in ep_metric.items():
+                writer.add_scalar(metric, val, global_step=ep_i)
 
     # Close Unity environment & tensorboard writer
     env.close()
     writer.close()
 
-    # Otherwise (i.e., learning enabled), save cumulative regret curves to output dir
-    out_csv_fname = f"cumulReg_{exp_tag}.csv"
+    # Save evaluation metric curves to output dir
+    out_csv_fname = f"{exp_tag}.csv"
 
     with open(os.path.join(results_path, out_csv_fname), "w") as out_csv:
         metric_types = [
             "num_search_failure", "num_invalid_pickup",
             "num_invalid_join", "num_planning_forfeiture",
-            "num_episode_discarded", "num_planning_attempts",
+            "episode_discarded", "num_planning_attempts",
             "num_collision_queries", "episode_length"
         ]
         out_csv.write("episode" + ",".join(metric_types) + "\n")
