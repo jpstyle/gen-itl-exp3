@@ -2173,15 +2173,23 @@ def _linearize_join_tree(
         )
         if deg_handle(a1) >= deg_handle(a2):
             # a1 is more 'central', a2 is more 'peripheral'; join a2 to a1
-            if s1 in hands:
+            if hands == [s1, s2]:
+                direction = 0
+            elif hands == [s2, s1]:
+                direction = 1
+            elif s1 in hands:
                 direction = 1 if hands.index(None) == 0 else 0
             elif s2 in hands:
                 direction = 0 if hands.index(None) == 0 else 1
             else:
                 direction = 0
         else:
-            # a2 is more 'central', a1 is more 'peripheral'; join a2 to a1
-            if s1 in hands:
+            # a2 is more 'central', a1 is more 'peripheral'; join a1 to a2
+            if hands == [s1, s2]:
+                direction = 1
+            elif hands == [s2, s1]:
+                direction = 0
+            elif s1 in hands:
                 direction = 0 if hands.index(None) == 0 else 1
             elif s2 in hands:
                 direction = 1 if hands.index(None) == 0 else 0
@@ -2194,7 +2202,13 @@ def _linearize_join_tree(
         cp_a1, cp_a2 = contacts[(a1, a2)]
         cp_a1 = int(re.findall(r"p_(.*)$", cp_a1)[0])
         cp_a2 = int(re.findall(r"p_(.*)$", cp_a2)[0])
-        if s1 in hands:
+        if hands == [s1, s2]:
+            # Already holding s1 and s2 on left and right respectively
+            join_params = (s1, o1, cp_a1, s2, o2, cp_a2, sa_name)
+        elif hands == [s2, s1]:
+            # Already holding s2 and s1 on left and right respectively
+            join_params = (s2, o2, cp_a2, s1, o1, cp_a1, sa_name)
+        elif s1 in hands:
             if hands.index(None) == 0:
                 # s1 held in right hand
                 join_params = (s2, o2, cp_a2, s1, o1, cp_a1, sa_name)
