@@ -432,7 +432,7 @@ def main(cfg):
             "episode_discarded", "num_planning_attempts",
             "num_collision_queries", "episode_length"
         ]
-        out_csv.write("episode" + ",".join(metric_types) + "\n")
+        out_csv.write("episode," + ",".join(metric_types) + "\n")
         for ep_i, ep_metric in enumerate(metrics):
             # Skip the very first full demo training episode
             if ep_i == 0: continue
