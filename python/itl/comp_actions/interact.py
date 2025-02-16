@@ -450,7 +450,6 @@ def _execute_build(agent, action_params):
             # Resp. left & right held object, manipulator pose, component masks
         "connection_graphs": {},
         "recognitions": {},
-        "join_validities": (set(), set()),
         "replanning_needed": False,
         "action_history": [],
         "metrics": {
@@ -533,6 +532,16 @@ def _plan_assembly(agent, build_target):
         assembly_hierarchy, part_candidates = tabulated_results[:2]
         connect_edges, connection_graph = tabulated_results[2:4]
         node_unifications, atomic_node_concs = tabulated_results[4:]
+
+        # Build target may have one or more 'template' options that count as
+        # valid structure for the concept, fetch the index of the selected
+        # template in order to retrieve storage of any known scope entailments
+        selected_template = next(
+            atm.arguments[2].number for atm in best_model
+            if atm.name=="node_sa_template" and \
+                (top_node := atm.arguments[0]).type == SymbolType.Number and \
+                top_node.number == 0
+        )
 
         # At this point, check if the task is already finished (if so, presumably
         # by user through demonstration), in which case no more planning is
@@ -700,7 +709,9 @@ def _plan_assembly(agent, build_target):
         }
 
         valid_join_trees = []
-        violated_entailments_collected = set()
+        structures = agent.lt_mem.kb.assembly_structures
+        scope_entailments = structures[build_target][selected_template][1]
+        violated_entailments_by_obj = set()
         for unification_choice in valid_scenarios:
             if total_planning_attempts >= 30:
                 # Tolerate up to 30 total planning attempts; if couldn't
@@ -722,12 +733,11 @@ def _plan_assembly(agent, build_target):
                     compression_sequence, connection_graph,
                     atomic_node_concs, connect_edges, part_names, cp_names,
                     (exec_state["connection_graphs"], unification_choice_fmt),
-                    exec_state["join_validities"],
-                    agent.cfg.paths.assets_dir, agent.cfg.seed
+                    scope_entailments, agent.cfg.paths.assets_dir, agent.cfg.seed
                 )
             total_planning_attempts += planning_attempts
             total_query_count += query_count
-            violated_entailments_collected |= {
+            violated_entailments_by_obj |= {
                 (
                     frozenset([unification_choice_inv[n] for n in ante]),
                     unification_choice_inv[cons]
@@ -743,7 +753,7 @@ def _plan_assembly(agent, build_target):
             # happen if agent has all of its part type recognition premise correct.
             # Find all relevant joins made by Teacher and uncommit their part type
             # recognitions. Forfeit planning for the current round.
-            for ante, cons in violated_entailments_collected:
+            for ante, cons in violated_entailments_by_obj:
                 involved_objs = ante | {cons}
                 for action_type, action_params, actor in exec_state["action_history"]:
                     if actor != "Teacher": continue
@@ -880,7 +890,7 @@ def _goal_selection(agent, build_target):
     assembly_pieces = set()
     for (_, sa_conc), templates in structures.items():
         # For each valid template option
-        for ti, template in enumerate(templates):
+        for ti, (template, _) in enumerate(templates):
             # Register this specific template option
             assembly_pieces.add(Literal(
                 "template_option", wrap_args(sa_conc, ti)
@@ -1174,7 +1184,7 @@ def _match_existing_subassemblies(
 def _divide_and_conquer(
     compression_sequence, connection_graph,
     atomic_node_concs, contacts, part_names, cp_names,
-    current_progress, join_validities, assets_dir, seed
+    current_progress, scope_entailments, assets_dir, seed
 ):
     """
     Helper method factored out for piecewise planning of a join sequence
@@ -1201,40 +1211,17 @@ def _divide_and_conquer(
     with open(f"{knowledge_path}/collision_table.yaml") as yml_f:
         collision_table = yaml.safe_load(yml_f)
 
-    # Remembering valid & invalid joins of subassemblies, so as to avoid
-    # calling oracle (be it cheat sheet or external motion planner)
-    valid_joins_cached = join_validities[0]
-    invalid_joins_cached = join_validities[1]
-
     # Method for obtaining a new instance of physical collision 'theory'
     # propagator
     def new_propagator():
         return _PhysicalAssemblyPropagator(
             (connection_graph, contacts), atomic_node_concs,
             (collision_table, part_names, cp_names),
-            (valid_joins_cached, invalid_joins_cached)
+            scope_entailments
         )
     # Instantiate a new propagator, which will establish a mapping between
     # connection graph nodes and collision table instances.
     collision_checker = new_propagator()
-    # Record any available 'assembly scope entailment' such that if a set of
-    # certain atomic objects are to be included in a chunk, some other object
-    # must be included in the set as well, so as to avoid deadends due to
-    # violations of precedence constraints
-    scope_entailments = set()
-    def update_scope_entailments(propagator):
-        # Update list of known scope entailments from invalid joins witnessed
-        for insts1, insts2 in propagator.invalid_joins:
-            nodes1 = frozenset(propagator.inst2node[i] for i in insts1)
-            nodes2 = frozenset(propagator.inst2node[i] for i in insts2)
-
-            # Process each direction only if the 'consequent' side of the
-            # entailment has one object in the set
-            if len(nodes1) == 1:
-                scope_entailments.add((nodes2, list(nodes1)[0]))
-            if len(nodes2) == 1:
-                scope_entailments.add((nodes1, list(nodes2)[0]))
-    update_scope_entailments(collision_checker)
 
     # Compress the connection graph part by part, randomly selecting chunks
     # of parts or subassemblies to form smaller planning problems
@@ -1360,8 +1347,6 @@ def _divide_and_conquer(
                 # won't be tried again. Update tracker states and restart.
                 planning_attempts += 1
                 invalid_chunk_sequences.add(current_chunk_sequence)
-                valid_joins_cached |= collision_checker.valid_joins
-                invalid_joins_cached |= collision_checker.invalid_joins
                 remaining_subproblems = deque(
                     _planning_subproblems(
                         compression_sequence, connection_graph, current_progress
@@ -1457,8 +1442,12 @@ def _divide_and_conquer(
             
             plan_ctl.configuration.solver.seed = seed
 
-        # Update list of known scope entailments
-        update_scope_entailments(collision_checker)
+        # Update list of known scope entailments from invalid joins witnessed
+        # by the collision check propagator
+        for ante_i, cons_i in collision_checker.scope_entailments:
+            ante_n = frozenset(collision_checker.inst2node[i] for i in ante_i)
+            cons_n = collision_checker.inst2node[cons_i]
+            scope_entailments.add((ante_n, cons_n))
 
         # Tracking sequence of selected chunks, so as to remember invalid
         # sequences that led to deadend states and prevent following the
@@ -1472,8 +1461,6 @@ def _divide_and_conquer(
             # and restart.
             planning_attempts += 1
             invalid_chunk_sequences.add(current_chunk_sequence)
-            valid_joins_cached |= collision_checker.valid_joins
-            invalid_joins_cached |= collision_checker.invalid_joins
             remaining_subproblems = deque(
                 _planning_subproblems(
                     compression_sequence, connection_graph, current_progress
@@ -1550,7 +1537,7 @@ def _divide_and_conquer(
         join_tree.add_edge(s1, res, join_by=n1)
         join_tree.add_edge(s2, res, join_by=n2)
 
-    return join_tree, planning_attempts, query_count, set()
+    return join_tree, planning_attempts, query_count, scope_entailments
 
 def _compress_chunk(compression_graph, chunk, name):
     """
@@ -1673,11 +1660,10 @@ def _planning_subproblems(
 
 class _PhysicalAssemblyPropagator:
     def __init__(
-        self, connections, atomic_node_concs, cheat_sheet, test_result_cached
+        self, connections, atomic_node_concs, cheat_sheet, scope_entailments
     ):
         connection_graph, contacts = connections
         collision_table, part_names, cp_names = cheat_sheet
-        valid_joins, invalid_joins = test_result_cached
 
         self.connection_graph = connection_graph
 
@@ -1750,10 +1736,14 @@ class _PhysicalAssemblyPropagator:
         # For tracking per-thread status
         self.assembly_status = None
 
-        # For caching inclusion-minimal invalid object set pairs that
-        # can/cannot be joined
-        self.valid_joins = valid_joins
-        self.invalid_joins = invalid_joins
+        # For caching inclusion-minimal 'scope entailments', such that if
+        # the 'antecedent' part is included in one side of the join, the
+        # 'consequent' part must also be included in that side so as to
+        # avoid planning failure by lack of collision-free paths
+        self.scope_entailments = {
+            (frozenset([self.node2inst[n] for n in ante]), self.node2inst[cons])
+            for ante, cons in scope_entailments
+        }
 
         # Count of how many times the oracle was queried; in case we do not
         # have any access to oracle and need to resort to some path planning
@@ -1857,56 +1847,44 @@ class _PhysicalAssemblyPropagator:
             insts_s1 = frozenset(self.node2inst[n] for n in nodes_s1)
             insts_s2 = frozenset(self.node2inst[n] for n in nodes_s2)
 
-            # Checking if join can be verified to be valid without querying
-            # the oracle. Note that if either of nodes_s1 or nodes_s2 is empty,
-            # the vacuous join will always be treated as 'not impossible';
-            # i.e., not ruled out due to physical collision.
-            for cached_s1, cached_s2 in self.valid_joins:
-                if insts_s1 <= cached_s1 and insts_s2 <= cached_s2:
-                    verified_by_cache = True
-                    break
-                if insts_s1 <= cached_s2 and insts_s2 <= cached_s1:
-                    verified_by_cache = True
-                    break
+            entailment_violating = any(
+                (insts_s1 >= ante and insts_s2 >= {cons}) or \
+                    (insts_s2 >= ante and insts_s1 >= {cons})
+                for ante, cons in self.scope_entailments
+            )
+            if entailment_violating:
+                # Some subset pair recognized and cached as invalid
+                join_possible = False
             else:
-                verified_by_cache = False
+                # Test against table needed; bipartite atomic-atomic
+                # collision check, then union across the pairwise checks
+                # to obtain collision test result
+                collision_directions = set.union(*[
+                    self.collision_table.get((i_s1, i_s2), set())
+                    for i_s1, i_s2 in product(insts_s1, insts_s2)
+                ])
+                self.query_count += 1       # Update count
+                # Collision-free join is possible when the resultant
+                # union does not have six members, standing for each
+                # direction of assembly, hence a feasible join path
+                join_possible = len(collision_directions) < 6
 
-            if verified_by_cache:
-                join_possible = True
-            else:
-                subset_cached_as_invalid = any(
-                    (insts_s1 >= s1 and insts_s2 >= s2) or \
-                        (insts_s1 >= s2 and insts_s2 >= s1)
-                    for s1, s2 in self.invalid_joins
-                )
-                if subset_cached_as_invalid:
-                    # Some subset pair recognized and cached as invalid
-                    join_possible = False
-                else:
-                    # Test against table needed; bipartite atomic-atomic
-                    # collision check, then union across the pairwise checks
-                    # to obtain collision test result
-                    collision_directions = set.union(*[
-                        self.collision_table.get((i_s1, i_s2), set())
-                        for i_s1, i_s2 in product(insts_s1, insts_s2)
-                    ])
-                    self.query_count += 1       # Update count
-                    # Collision-free join is possible when the resultant
-                    # union does not have six members, standing for each
-                    # direction of assembly, hence a feasible join path
-                    join_possible = len(collision_directions) < 6
-
-            if join_possible:
-                # Cache valid join
-                self.valid_joins.add(frozenset([insts_s1, insts_s2]))
-            else:
+            if not join_possible:
                 # Join of this subassembly pair proved to be unreachable
                 # while including current object members; add nogood
                 # as appropriate and return
-                if not subset_cached_as_invalid:
+                if not entailment_violating:
                     minimal_pair = self.analyze_collision((nodes_s1, nodes_s2))
                     if minimal_pair is not None:
-                        self.invalid_joins.add(minimal_pair)
+                        # If one side of the minimal pair is an atomic singleton,
+                        # we can treat the pair as a scope entailment where the
+                        # singleton side is its consequent and the other side is
+                        # its antecedent.
+                        insts1, insts2 = minimal_pair
+                        if len(insts1) == 1:
+                            self.scope_entailments.add((insts2, list(insts1)[0]))
+                        if len(insts2) == 1:
+                            self.scope_entailments.add((insts1, list(insts2)[0]))
 
                 join_lit = self.join_actions_a2l[(s1, n1, s2, n2, t)]
                 part_of_lits = [

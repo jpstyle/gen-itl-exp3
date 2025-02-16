@@ -11,6 +11,7 @@ the agent's learning capability, fixing the agent's knowledge across the evaluat
 suite, measuring the agent's answers and ground truths for the 'test problems'.
 """
 import os
+import re
 import sys
 sys.path.insert(
     0,
@@ -23,6 +24,7 @@ import warnings
 warnings.filterwarnings("ignore")
 from PIL import Image
 from itertools import product, groupby
+from collections import defaultdict
 
 import hydra
 import numpy as np
@@ -281,6 +283,49 @@ def main(cfg):
                                         "env_handle": env_handle, "type_code": type_code
                                     })
                                     aliases[f"o{oi}"] = env_handle
+                                # Log mean F1 score across part types for non-initial episodes
+                                if ep_i > 0:
+                                    # Compute F1 scores for all categories known to agent with
+                                    # few-shot binary classifiers available, then log average
+                                    groundings = []
+                                    get_label = lambda c: agent.lt_mem.lexicon.codesheet[c] \
+                                        if agent.cfg.exp.player_type in ["bool", "demo"] \
+                                        else agent.lt_mem.lexicon.d2s[("pcls", c)][0][1]
+                                    for obj in agent.vision.scene.values():
+                                        ans_conc = obj["pred_cls"].argmax()
+                                        ans_prob = obj["pred_cls"][ans_conc]
+                                        ans_label = get_label(ans_conc) if ans_prob >= 0.35 else None
+                                        gt_label = re.findall(r"t_(.*)_\d+$", obj["env_handle"])[0]
+                                        groundings.append((gt_label, ans_label))
+                                    stats = defaultdict(lambda: { "tp": 0, "fp": 0, "fn": 0 })
+                                    for gt, ans in groundings:
+                                        if gt == ans:
+                                            stats[gt]["tp"] += 1        # True positive for gt/ans
+                                        else:
+                                            stats[gt]["fn"] += 1        # False negative for gt
+                                            stats[ans]["fp"] += 1       # False positive for ans
+                                    f1_scores = {}
+                                    for c in agent.lt_mem.exemplars.binary_classifiers_2d["pcls"]:
+                                        # Looping only for concepts whose binary classifier exists
+                                        label = get_label(c)
+                                        tp = stats[label]["tp"]
+                                        fp = stats[label]["fp"]
+                                        fn = stats[label]["fn"]
+                                        if tp == 0:
+                                            # Edge cases needing careful handling
+                                            if fp == 0 and fn == 0:
+                                                # No concept instance, successfully avoided false positives.
+                                                # Consider as 100% success for the concept.
+                                                f1 = 1.0
+                                            else:
+                                                # If FP > 0, precision is zero; if FN > 0, recall is zero.
+                                                # Consider as 100% failure for the concept.
+                                                f1 = 0.0
+                                        else:
+                                            # General cases
+                                            precision = tp / (tp + fp); recall = tp / (tp + fn)
+                                            f1 = 2 * precision * recall / (precision + recall)
+                                        f1_scores[c] = f1
                             else:
                                 # General case where message from Teacher or Student-side
                                 # action effect feedback from Unity environment has arrived
@@ -413,6 +458,7 @@ def main(cfg):
             ep_metric["episode_length"] = len(
                 agent.planner.execution_state["action_history"]
             )
+            ep_metric["mean_f1"] = sum(f1_scores.values()) / len(f1_scores)
             metrics.append(ep_metric)
             # Log progress to tensorboard
             for metric, val in ep_metric.items():
@@ -430,7 +476,7 @@ def main(cfg):
             "num_search_failure", "num_invalid_pickup",
             "num_invalid_join", "num_planning_forfeiture",
             "episode_discarded", "num_planning_attempts",
-            "num_collision_queries", "episode_length"
+            "num_collision_queries", "episode_length", "mean_f1"
         ]
         out_csv.write("episode," + ",".join(metric_types) + "\n")
         for ep_i, ep_metric in enumerate(metrics):
