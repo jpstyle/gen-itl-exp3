@@ -731,7 +731,7 @@ def _plan_assembly(agent, build_target):
             }
             join_tree, planning_attempts, query_count, viol_ents = \
                 _divide_and_conquer(
-                    compression_sequence, connection_graph,
+                    compression_sequence, connection_graph, exec_state["recognitions"],
                     atomic_node_concs, connect_edges, part_names, cp_names,
                     (exec_state["connection_graphs"], unification_choice_fmt),
                     scope_entailments, verified_joins,
@@ -1184,7 +1184,7 @@ def _match_existing_subassemblies(
     return possible_mappings
 
 def _divide_and_conquer(
-    compression_sequence, connection_graph,
+    compression_sequence, connection_graph, recognitions,
     atomic_node_concs, contacts, part_names, cp_names,
     current_progress, scope_entailments, verified_joins,
     assets_dir, seed
@@ -1196,6 +1196,28 @@ def _divide_and_conquer(
     subproblems and conquer each subproblem. Start from scratch if a bad
     subproblem division led to deadend.
     """
+    # Test if the planning problem is outright unsolvable with given premise
+    # and the history of current episode; in particular, if the premise
+    # would enforce a join that's proven invalid by teacher
+    unification_choice_inv = {
+        n: re.findall(r"(s\d+)_(o\d+)", ex_obj)[0]
+        for ex_obj, n in current_progress[1].items()
+        if re.match(r"(s\d+)_(o\d+)", ex_obj)
+    }
+    for u, v in connection_graph.edges:
+        if u not in unification_choice_inv: continue
+        if v not in unification_choice_inv: continue
+        obj_u = unification_choice_inv[u][1]
+        obj_v = unification_choice_inv[v][1]
+        conc_u = atomic_node_concs[u]
+        conc_v = atomic_node_concs[v]
+        if recognitions.get((obj_u, obj_v)) == (-conc_u, -conc_v) or \
+            recognitions.get((obj_v, obj_u)) == (-conc_v, -conc_u):
+            # Pairwise negative feedback from teacher exists, such that
+            # it shouldn't hold that obj_u is an instance of conc_u and
+            # obj_v of conc_v simultaneously
+            return None, 0, 0, set()
+
     # Inverse direction mapping of `atomic_node_concs`, from concept to
     # corresponding node group
     atomic_nodes_by_conc = {

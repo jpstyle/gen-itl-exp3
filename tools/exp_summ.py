@@ -95,7 +95,9 @@ def main(cfg):
                         [int(entry[0]), sum(float(entry[i]) for i in col_inds)]
                         for entry in row
                     ])
-                    if cumsum: curve[:,1] = np.cumsum(curve[:,1])
+                    if cumsum:
+                        curve[:,1] = np.cumsum(curve[:,1])
+                        curve = np.concatenate([[[0, 0]], curve])
 
                     if player_type in results[d_name]:
                         stats_agg = results[d_name][player_type]

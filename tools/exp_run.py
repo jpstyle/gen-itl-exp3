@@ -485,7 +485,7 @@ def main(cfg):
 
             metric_values = [str(ep_metric[m_type]) for m_type in metric_types]
             metric_values = ",".join(metric_values)
-            out_csv.write(f"{ep_i},{metric_values}\n")
+            out_csv.write(f"{ep_i+1},{metric_values}\n")
 
 if __name__ == "__main__":
     main()

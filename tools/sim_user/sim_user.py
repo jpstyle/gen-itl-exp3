@@ -1376,7 +1376,7 @@ class SimulatedTeacher:
         compression_sequence = [("truck", all_nodes)]
         # Now run the procedure, just the join tree is needed
         join_tree, _, _, _ = _divide_and_conquer(
-            compression_sequence, connection_graph,
+            compression_sequence, connection_graph, {},
             atomic_node_concs, contacts, part_names, cp_names,
             (connection_status, node_unifications), set(), set(),
             self.cfg.paths.assets_dir, self.cfg.seed
