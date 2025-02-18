@@ -11,6 +11,7 @@ from collections import defaultdict, Counter
 import open3d as o3d
 import numpy as np
 import networkx as nx
+from tqdm import tqdm
 from numpy.linalg import norm, inv
 from sklearn.metrics import pairwise_distances
 from sklearn.decomposition import PCA
@@ -753,14 +754,10 @@ def analyze_demonstration(agent, demo_data):
         if len(inspect_data["img"]) == 40 and len(inspect_data["msk"]) == 40:
             inst_inspected = current_held[left_or_right][0]
 
-            # Reconstruct 3D structure of the inspected object instance
-            reconstruction = agent.vision.reconstruct_3d_structure(
-                inspect_data["img"], inspect_data["msk"], inspect_data["pose"],
-                CON_GRAPH, STORE_VP_INDS,
-                # resolution_multiplier=1.25
+            # Collect 3D & 2D visual data for later processing
+            vision_3d_data[inst_inspected] = (
+                inspect_data["img"], inspect_data["msk"], inspect_data["pose"]
             )
-            vision_3d_data[inst_inspected] = reconstruction
-
             # Add select examples to 2D classification data as well
             vision_2d_data[inst_inspected] += [
                 (inspect_data["img"][view_ind], inspect_data["msk"][view_ind])
@@ -769,6 +766,16 @@ def analyze_demonstration(agent, demo_data):
 
             # Make way for new data
             inspect_data = { "img": {}, "msk": {}, "pose": {} }
+
+    # Reconstruct 3D structure of the inspected object instances
+    v3d_it = tqdm(
+        vision_3d_data.items(), desc="Extracting 3D structure", leave=False
+    )
+    for inst, (data_img, data_msk, data_pose) in v3d_it:
+        vision_3d_data[inst] = agent.vision.reconstruct_3d_structure(
+            data_img, data_msk, data_pose, CON_GRAPH, STORE_VP_INDS,
+            # resolution_multiplier=1.25
+        )
 
     # Tag each part instance with their visual concept index, registering any
     # new visual concepts & neologisms; we assume here all neologisms are nouns
@@ -843,7 +850,10 @@ def analyze_demonstration(agent, demo_data):
     }
     vis_model = agent.vision.model; vis_model.eval()
     with torch.no_grad():
-        for part_inst, examples in vision_2d_data.items():
+        v2d_it = tqdm(
+            vision_2d_data.items(), desc="Extracting 2D features", leave=False
+        )
+        for part_inst, examples in v2d_it:
             examples_with_embs = []
             for data in examples:
                 image, mask, _, vis_prompt = data
@@ -897,7 +907,10 @@ def analyze_demonstration(agent, demo_data):
     # and topological structure of (sub)assemblies
     assembly_trees = {}          # Tracking progress as structure trees
     cp2conc_map = {}
-    for assembly_step in assembly_sequence:
+    ass_it = tqdm(
+        assembly_sequence, desc="Inferring 3D contacts", leave=False
+    )
+    for assembly_step in ass_it:
         # Unpacking assembly step information
         (obj_l, part_poses_l), contact_l = assembly_step[0]
         (obj_r, part_poses_r), contact_r = assembly_step[1]

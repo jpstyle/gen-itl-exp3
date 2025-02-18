@@ -384,6 +384,9 @@ class ITLAgent:
                     # All parts of learning from demonstration take place here
                     self.comp_actions.analyze_demonstration(aligned_demo_data)
 
+                    # Acknowledge user's demonstration in a cool way
+                    self.planner.agenda.append(("utter_simple", ("OK.", { "mood": "." })))
+
                     # Back to normal execution mode
                     self.observed_demo = None
 
@@ -603,19 +606,9 @@ class ITLAgent:
                         # Signal that it is observing user's actions, then break.
                         return_val.append(("generate", ("# Observing", {})))
                     else:
-                        user_linguistic_inputs = [
-                            utt for usr_in in self.lang.latest_input[0]
-                            for utt in usr_in["source"].values()
-                            if not utt.startswith("#")
-                        ]
-                        if len(user_linguistic_inputs) > 0:
-                            if len(return_val) == 0:
-                                # No specific reaction to utter, acknowledge any user input
-                                return_val.append(("generate", ("OK.", {})))
-                        else:
-                            # Break loop with no-op reaction (do nothing but don't
-                            # terminate the episode)
-                            return_val.append((None, None))
+                        # Break loop with no-op reaction (do nothing but don't
+                        # terminate the episode)
+                        return_val.append((None, None))
 
                 # Break loop with return vals
                 break

@@ -50,8 +50,7 @@ def main(cfg):
                 dirs_with_results.append((group_dir, run_dir))
 
     results = defaultdict(dict)
-
-    all_seeds = set()
+    collected_configs = defaultdict(set)
 
     # Collect results
     for res_dir in tqdm.tqdm(dirs_with_results, total=len(dirs_with_results)):
@@ -63,7 +62,7 @@ def main(cfg):
             name_parse = data.split(".")[0].split("_")
             task, player_type, seed = name_parse
 
-            all_seeds.add(seed)
+            collected_configs[seed].add(player_type)
 
             # Collect data
             with open(os.path.join(res_dir, data)) as data_f:
@@ -79,20 +78,21 @@ def main(cfg):
                 # 7) num_planning_attempts
                 # 8) num_collision_queries
                 # 9) episode_length
+                # 10) mean_f1
                 fields = next(reader)
                 data_of_interests = [
                     ([1, 2, 3, 4], True),
                     ([1], False), ([2], False), ([3], False), ([4], False),
-                    ([6], False), ([7], False), ([8], False)
+                    ([6], False), ([7], True), ([8], False), ([9], False)
                 ]
                 data_names = ["cumulative_regret"] + [
-                    fields[i] for i in [1, 2, 3, 4, 6, 7, 8]
+                    fields[i] for i in [1, 2, 3, 4, 6, 7, 8, 9]
                 ]
 
                 row = [row_data for row_data in reader]
                 for (col_inds, cumsum), d_name in zip(data_of_interests, data_names):
                     curve = np.array([
-                        [int(entry[0]), sum(int(entry[i]) for i in col_inds)]
+                        [int(entry[0]), sum(float(entry[i]) for i in col_inds)]
                         for entry in row
                     ])
                     if cumsum: curve[:,1] = np.cumsum(curve[:,1])
@@ -108,6 +108,13 @@ def main(cfg):
                         results[d_name][player_type] = {
                             ep_num: [val] for ep_num, val in curve
                         }
+
+    all_player_types = set.union(*collected_configs.values())
+    for seed, player_types in collected_configs.items():
+        if len(player_types) < 4:
+            missing = all_player_types - player_types
+            missing = ",".join(missing)
+            logger.info(f"Missing data from: seed={seed}, player_type=[{missing}]")
 
     # Pre-defined ordering for listing legends
     config_ord = ["bool", "demo", "label", "full"]
@@ -153,9 +160,12 @@ def main(cfg):
 
         # Plot curve
         ax.set_xlabel("# training episodes")
-        ax.set_xticks([10, 20, 30, 40, 50])
+        ax.set_xticks([10, 20, 30, 40])
         ax.set_ylabel(d_name)
-        ax.set_ylim(0, (ymax+1) * 1.1)
+        if d_name == "mean_f1":
+            ax.set_ylim(0, 1)
+        else:
+            ax.set_ylim(0, (ymax+1) * 1.1)
         ax.grid()
 
         # Ordering legends according to the prespecified ordering above
@@ -168,7 +178,7 @@ def main(cfg):
         labels = [config_aliases.get(hl[1], hl[1]) for hl in hls_sorted]
         ax.legend(handles, labels)
 
-        ax.set_title(f"{d_name} ({len(all_seeds)} seeds)")
+        ax.set_title(f"{d_name} ({len(collected_configs)} seeds)")
         plt.savefig(os.path.join(cfg.paths.outputs_dir, f"{d_name}.png"), bbox_inches="tight")
 
     # print("")
