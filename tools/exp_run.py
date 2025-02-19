@@ -295,7 +295,14 @@ def main(cfg):
                                         ans_conc = obj["pred_cls"].argmax()
                                         ans_prob = obj["pred_cls"][ans_conc]
                                         ans_label = get_label(ans_conc) if ans_prob >= 0.35 else None
-                                        gt_label = re.findall(r"t_(.*)_\d+$", obj["env_handle"])[0]
+                                        if cfg.exp.task == "build_truck_supertype" and \
+                                            cfg.exp.player_type in ["label", "full"]:
+                                            # Supertype as ground-truth label for base-difficulty task
+                                            # with languageful agents
+                                            gt_label = re.findall(r"t_(.*)_\d+$", obj["env_handle"])[0]
+                                        else:
+                                            # Subtype as ground-truth label otherwise
+                                            gt_label = obj["type_code"]
                                         groundings.append((gt_label, ans_label))
                                     stats = defaultdict(lambda: { "tp": 0, "fp": 0, "fn": 0 })
                                     for gt, ans in groundings:
