@@ -124,6 +124,9 @@ class SimulatedTeacher:
             ("forall", "truck", (["staircase_chassis_center", "rocket_launcher"], None), False)
         ]
 
+        sampled_truck_subtype = random.sample([
+            "base_truck", "dumper_truck", "missile_truck", "fire_truck"
+        ], 1)[0]
         if target_task == "build_truck_supertype":
             # More 'basic' experiment suite invested on learning part types, valid
             # structures of trucks (& subassemblies) and contact pairs & points
@@ -133,6 +136,9 @@ class SimulatedTeacher:
             # structure can be built; no distractors added
             num_distractors = 0
             constraints += [
+                ("exists", definiendum, (list(definiens["parts"].values()), []), True)
+                for definiendum, definiens in self.domain_knowledge["definitions"].items()
+            ] + [
                 ("forall", "truck", (["normal_wheel", "large_wheel"], None), False),
             ]   # For the easier difficulty, keep the sizes of the wheels identical
 
@@ -142,9 +148,7 @@ class SimulatedTeacher:
             # 'Advanced' stage invested on learning definitions of truck subtypes,
             # along with rules and constraints that influence trucks in general
             # or specific truck subtypes
-            self.target_concept = random.sample([
-                "base_truck", "dumper_truck", "missile_truck", "fire_truck"
-            ], 1)[0]
+            self.target_concept = sampled_truck_subtype
 
             # Sampling with full consideration of constraints in domain knowledge;
             # add distractors specifically selected to allow mistakes
@@ -163,7 +167,7 @@ class SimulatedTeacher:
         # a set of constraints
         random.seed(self.next_seed)
         sampled_inits = self._sample_ASP(
-            self.target_concept, self.domain_knowledge,
+            sampled_truck_subtype, self.domain_knowledge,
             constraints, all_subtypes, num_distractors
         )
         self.next_seed = random.randint(1, 1000000)
