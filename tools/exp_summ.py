@@ -167,7 +167,7 @@ def main(cfg):
         if d_name == "mean_f1":
             ax.set_ylim(0, 1)
         else:
-            ax.set_ylim(0, (ymax+1) * 1.1)
+            ax.set_ylim(0, ymax * 1.1)
         ax.grid()
 
         # Ordering legends according to the prespecified ordering above

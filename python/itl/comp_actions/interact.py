@@ -860,9 +860,11 @@ def _goal_selection(agent, build_target):
     likelihood_values = np.stack([
         obj["pred_cls"] for obj in agent.vision.scene.values()
     ])
-    min_val = max(likelihood_values.min(), threshold)
-    max_val = likelihood_values.max()
-    val_range = max_val - min_val
+    # Obtaining per-category minimums/maximums of probability scores for
+    # normalization and discretization later
+    min_vals = np.maximum(likelihood_values.min(axis=0), threshold)
+    max_vals = likelihood_values.max(axis=0)
+    val_ranges = max_vals - min_vals
 
     for oi, obj in agent.vision.scene.items():
         if oi in exec_state["recognitions"]:
@@ -879,7 +881,7 @@ def _goal_selection(agent, build_target):
                 # Normalize & discretize within [0,dsc_bin]; the more bins we
                 # use for discrete approximation, the more time it takes to
                 # solve the program
-                nrm_val = (val-min_val) / val_range
+                nrm_val = (val-min_vals[ci]) / val_ranges[ci]
                 dsc_val = int(nrm_val * dsc_bin)
 
                 obs_lit = Literal(
