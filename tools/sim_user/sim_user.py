@@ -124,13 +124,21 @@ class SimulatedTeacher:
             ("forall", "truck", (["staircase_chassis_center", "rocket_launcher"], None), False)
         ]
 
-        sampled_truck_subtype = random.sample([
-            "base_truck", "dumper_truck", "missile_truck", "fire_truck"
-        ], 1)[0]
         if target_task == "build_truck_supertype":
             # More 'basic' experiment suite invested on learning part types, valid
             # structures of trucks (& subassemblies) and contact pairs & points
-            self.target_concept = "truck"
+            if any(
+                any(st is None for st in subtypes) for subtypes in all_subtypes.values()
+            ):
+                # Now already constrained after the first sampling
+                sampled_truck_subtype = "truck"
+            else:
+                # First sampling, sample uniformly across truck subtypes (since naive
+                # samples per ASP models are not evenly distributed)
+                sampled_truck_subtype = random.sample([
+                    "base_truck", "dump_truck", "missile_truck", "fire_truck"
+                ], 1)[0]
+            self.target_concept = "truck"       # Always denoted as 'truck' in any case
 
             # Sampling with minimal constraints, just so enough that a valid truck
             # structure can be built; no distractors added
@@ -148,6 +156,9 @@ class SimulatedTeacher:
             # 'Advanced' stage invested on learning definitions of truck subtypes,
             # along with rules and constraints that influence trucks in general
             # or specific truck subtypes
+            sampled_truck_subtype = random.sample([
+                "base_truck", "dump_truck", "missile_truck", "fire_truck"
+            ], 1)[0]
             self.target_concept = sampled_truck_subtype
 
             # Sampling with full consideration of constraints in domain knowledge;
@@ -885,7 +896,7 @@ class SimulatedTeacher:
         with ctl.solve(yield_=True) as solve_gen:
             for m in solve_gen:
                 models.append(m.symbols(atoms=True))
-                if len(models) > 30000: break       # Should be enough...
+                if len(models) > 10000: break       # Should be enough...
 
         # Randomly select a sampled model
         sampled_model = random.sample(models, 1)[0]
