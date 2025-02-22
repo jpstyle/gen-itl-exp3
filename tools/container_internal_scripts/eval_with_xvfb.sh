@@ -2,5 +2,3 @@
 bash tools/container_internal_scripts/start_xvfb.sh
 eval $*
 rsync --archive --recursive --update --compress --info=progress2 outputs/ /mnt/data_volume/outputs/
-# sleep 5
-# runpodctl stop pod $RUNPOD_POD_ID

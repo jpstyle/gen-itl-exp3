@@ -1,0 +1,12 @@
+#!/bin/bash
+export PYTHONHASHSEED=42
+player_types=( bool demo label full )
+
+for ((seed=$1;seed<=$2;seed++))
+do
+
+    for pl_type in "${player_types[@]}"
+    do
+        python ~/git/semantic-assembler/tools/exp_run.py exp.task=$3 exp.player_type=${pl_type} vision.calibrate_camera=false seed=$seed
+    done
+done
