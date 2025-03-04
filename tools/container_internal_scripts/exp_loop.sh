@@ -7,6 +7,6 @@ do
 
     for pl_type in "${player_types[@]}"
     do
-        python ~/git/semantic-assembler/tools/exp_run.py exp.task=$3 exp.player_type=${pl_type} vision.calibrate_camera=false seed=$seed
+        python ~/semantic-assembler/tools/exp_run.py paths.assets_dir=$3 exp.task=$4 exp.player_type=${pl_type} vision.calibrate_camera=false seed=$seed
     done
 done
