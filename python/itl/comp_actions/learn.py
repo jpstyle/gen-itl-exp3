@@ -11,6 +11,7 @@ from collections import defaultdict, Counter
 import open3d as o3d
 import numpy as np
 import networkx as nx
+from tqdm import tqdm
 from numpy.linalg import norm, inv
 from sklearn.metrics import pairwise_distances
 from sklearn.decomposition import PCA
@@ -529,8 +530,11 @@ def report_neologism(agent, neologism):
     information that characterize the concept denoted by the neologism (e.g., definition,
     exemplar)
     """
+    # Remove from list
+    agent.lang.unresolved_neologisms.remove(neologism)
+
     # Update cognitive state w.r.t. value assignment and word sense
-    
+
     # NL surface form and corresponding logical form
     surface_form = f"I don't know what '{neologism[1]}' means."
     gq = None; bvars = set(); ante = []
@@ -567,7 +571,6 @@ def analyze_demonstration(agent, demo_data):
     referents = agent.lang.dialogue.referents
     value_assignment = agent.lang.dialogue.value_assignment
 
-    prev_img = None         # Stores previous steps' visual observations
     inspect_data = { "img": {}, "msk": {}, "pose": {} }
             # Buffer of 3d object instance views from inspect_~ actions
 
@@ -576,6 +579,13 @@ def analyze_demonstration(agent, demo_data):
     nonatomic_subassemblies = set()
     part_labeling = {}; sa_labeling = {}
     vision_2d_data = defaultdict(list); vision_3d_data = {}; assembly_sequence = []
+    # Collecting scene image and masks at the initial setting, fecthed and organized
+    # by env_handle fields in agent.vision.scene
+    for oi, obj in agent.vision.scene.items():
+        vision_2d_data[obj["env_handle"]].append((
+            obj["scene_img"], obj["pred_mask"]
+        ))
+
     for img, annotations, env_refs in demo_data:
         # Appropriately handle each annotation
         for (_, _, ante, cons), raw, clause_info in annotations:
@@ -602,20 +612,13 @@ def analyze_demonstration(agent, demo_data):
                         left_or_right = 0 if act_name.endswith("left") else 1
                         match act_type:
                             case "pick":
-                                # pick_up_~ action; track the held object and record 2d
-                                # visual data (image + mask)
+                                # pick_up_~ action; track the held object
                                 target_info = [
                                     rf_dis for rf_dis, rf_env in value_assignment.items()
                                     if rf_dis.startswith(lit.args[0][0]) and rf_env == lit.args[2][0]
                                 ][0]
                                 target_info = referents["dis"][target_info]
                                 current_held[left_or_right] = (target_info["name"], {})
-
-                                if target_info["name"] not in nonatomic_subassemblies:
-                                    # Atomic part type to be remembered, record (image, mask)
-                                    # pair by the name index
-                                    data = (prev_img, env_refs["o0"]["mask"])
-                                    vision_2d_data[target_info["name"]].append(data)
 
                             case "drop":
                                 # drop_~ action
@@ -751,14 +754,10 @@ def analyze_demonstration(agent, demo_data):
         if len(inspect_data["img"]) == 40 and len(inspect_data["msk"]) == 40:
             inst_inspected = current_held[left_or_right][0]
 
-            # Reconstruct 3D structure of the inspected object instance
-            reconstruction = agent.vision.reconstruct_3d_structure(
-                inspect_data["img"], inspect_data["msk"], inspect_data["pose"],
-                CON_GRAPH, STORE_VP_INDS,
-                # resolution_multiplier=1.25
+            # Collect 3D & 2D visual data for later processing
+            vision_3d_data[inst_inspected] = (
+                inspect_data["img"], inspect_data["msk"], inspect_data["pose"]
             )
-            vision_3d_data[inst_inspected] = reconstruction
-
             # Add select examples to 2D classification data as well
             vision_2d_data[inst_inspected] += [
                 (inspect_data["img"][view_ind], inspect_data["msk"][view_ind])
@@ -768,7 +767,15 @@ def analyze_demonstration(agent, demo_data):
             # Make way for new data
             inspect_data = { "img": {}, "msk": {}, "pose": {} }
 
-        prev_img = img
+    # Reconstruct 3D structure of the inspected object instances
+    v3d_it = tqdm(
+        vision_3d_data.items(), desc="Extracting 3D structure", leave=False
+    )
+    for inst, (data_img, data_msk, data_pose) in v3d_it:
+        vision_3d_data[inst] = agent.vision.reconstruct_3d_structure(
+            data_img, data_msk, data_pose, CON_GRAPH, STORE_VP_INDS,
+            # resolution_multiplier=1.25
+        )
 
     # Tag each part instance with their visual concept index, registering any
     # new visual concepts & neologisms; we assume here all neologisms are nouns
@@ -843,7 +850,10 @@ def analyze_demonstration(agent, demo_data):
     }
     vis_model = agent.vision.model; vis_model.eval()
     with torch.no_grad():
-        for part_inst, examples in vision_2d_data.items():
+        v2d_it = tqdm(
+            vision_2d_data.items(), desc="Extracting 2D features", leave=False
+        )
+        for part_inst, examples in v2d_it:
             examples_with_embs = []
             for data in examples:
                 image, mask, _, vis_prompt = data
@@ -897,7 +907,10 @@ def analyze_demonstration(agent, demo_data):
     # and topological structure of (sub)assemblies
     assembly_trees = {}          # Tracking progress as structure trees
     cp2conc_map = {}
-    for assembly_step in assembly_sequence:
+    ass_it = tqdm(
+        assembly_sequence, desc="Inferring 3D contacts", leave=False
+    )
+    for assembly_step in ass_it:
         # Unpacking assembly step information
         (obj_l, part_poses_l), contact_l = assembly_step[0]
         (obj_r, part_poses_r), contact_r = assembly_step[1]
@@ -1198,7 +1211,7 @@ def posthoc_episode_analysis(agent):
     possible_mappings = _match_existing_subassemblies(
         connection_graph, node_unifications, atomic_node_concs, exec_state
     )
-    for ism in possible_mappings["anchored"] + possible_mappings["lifted"]:
+    for ism in possible_mappings[final_sa]:
         for n, ex_obj in ism.items():
             node_unifications[f"{final_sa}_{ex_obj}"].add(n)
 

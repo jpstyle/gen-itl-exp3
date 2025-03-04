@@ -26,19 +26,20 @@ COPY python/itl/action_planning/requirements.txt itl/action_planning/
 COPY python/itl/lpmln/requirements.txt itl/lpmln/
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Needed for adding new PPAs
-RUN apt install -y software-properties-common
-RUN apt install -y python3-launchpadlib
-# Add this mesa PPA to ensure vulkan recognizes the GPU
-RUN add-apt-repository -y ppa:kisak/kisak-mesa
+# # Needed for adding new PPAs
+# RUN apt install -y software-properties-common
+# RUN apt install -y python3-launchpadlib
+# # Add this mesa PPA to ensure vulkan recognizes the GPU
+# RUN add-apt-repository -y ppa:kisak/kisak-mesa
 RUN apt update && apt upgrade -y
 
 # Some graphics related libraries needed
-RUN apt install -y libgl1
+RUN apt install -y libgl1 libglib2.0-0
 RUN apt install -y libvulkan1 mesa-vulkan-drivers vulkan-tools
 RUN apt install -y mesa-utils
 
 # Let's add in vim, less and rsync
+RUN apt update
 RUN apt install -y vim
 RUN apt install -y less
 RUN apt install -y rsync

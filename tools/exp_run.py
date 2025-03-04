@@ -11,6 +11,7 @@ the agent's learning capability, fixing the agent's knowledge across the evaluat
 suite, measuring the agent's answers and ground truths for the 'test problems'.
 """
 import os
+import re
 import sys
 sys.path.insert(
     0,
@@ -22,8 +23,8 @@ import logging
 import warnings
 warnings.filterwarnings("ignore")
 from PIL import Image
-from collections import defaultdict
 from itertools import product, groupby
+from collections import defaultdict
 
 import hydra
 import numpy as np
@@ -170,8 +171,8 @@ def main(cfg):
         else:
             raise ValueError        # Shouldn't happen
 
-    for ep_i in range(cfg.exp.num_episodes):
-        logger.info(f"Sys> Episode {ep_i+1})")
+    for ep_i in range(cfg.exp.num_episodes+1):
+        logger.info(f"Sys> Episode {ep_i})")
 
         # Obtain random initialization of each episode
         sampled_inits = user.setup_episode(target_task, all_subtypes)
@@ -282,6 +283,56 @@ def main(cfg):
                                         "env_handle": env_handle, "type_code": type_code
                                     })
                                     aliases[f"o{oi}"] = env_handle
+                                # Log mean F1 score across part types for non-initial episodes
+                                if ep_i > 0:
+                                    # Compute F1 scores for all categories known to agent with
+                                    # few-shot binary classifiers available, then log average
+                                    groundings = []
+                                    get_label = lambda c: agent.lt_mem.lexicon.codesheet[c] \
+                                        if agent.cfg.exp.player_type in ["bool", "demo"] \
+                                        else agent.lt_mem.lexicon.d2s[("pcls", c)][0][1]
+                                    for obj in agent.vision.scene.values():
+                                        ans_conc = obj["pred_cls"].argmax()
+                                        ans_prob = obj["pred_cls"][ans_conc]
+                                        ans_label = get_label(ans_conc) if ans_prob >= 0.35 else None
+                                        if cfg.exp.task == "build_truck_supertype" and \
+                                            cfg.exp.player_type in ["label", "full"]:
+                                            # Supertype as ground-truth label for base-difficulty task
+                                            # with languageful agents
+                                            gt_label = re.findall(r"t_(.*)_\d+$", obj["env_handle"])[0]
+                                        else:
+                                            # Subtype as ground-truth label otherwise
+                                            gt_label = obj["type_code"]
+                                        groundings.append((gt_label, ans_label))
+                                    stats = defaultdict(lambda: { "tp": 0, "fp": 0, "fn": 0 })
+                                    for gt, ans in groundings:
+                                        if gt == ans:
+                                            stats[gt]["tp"] += 1        # True positive for gt/ans
+                                        else:
+                                            stats[gt]["fn"] += 1        # False negative for gt
+                                            stats[ans]["fp"] += 1       # False positive for ans
+                                    f1_scores = {}
+                                    for c in agent.lt_mem.exemplars.binary_classifiers_2d["pcls"]:
+                                        # Looping only for concepts whose binary classifier exists
+                                        label = get_label(c)
+                                        tp = stats[label]["tp"]
+                                        fp = stats[label]["fp"]
+                                        fn = stats[label]["fn"]
+                                        if tp == 0:
+                                            # Edge cases needing careful handling
+                                            if fp == 0 and fn == 0:
+                                                # No concept instance, successfully avoided false positives.
+                                                # Consider as 100% success for the concept.
+                                                f1 = 1.0
+                                            else:
+                                                # If FP > 0, precision is zero; if FN > 0, recall is zero.
+                                                # Consider as 100% failure for the concept.
+                                                f1 = 0.0
+                                        else:
+                                            # General cases
+                                            precision = tp / (tp + fp); recall = tp / (tp + fn)
+                                            f1 = 2 * precision * recall / (precision + recall)
+                                        f1_scores[c] = f1
                             else:
                                 # General case where message from Teacher or Student-side
                                 # action effect feedback from Unity environment has arrived
@@ -403,42 +454,42 @@ def main(cfg):
                 new_env = False
                 env.step()
 
-        # Collect metrics for the episode
-        ep_metric = {}
-        for metric, val in user.current_episode_record["metrics"].items():
-            ep_metric[metric] = val
-        for metric, val in agent.planner.execution_state["metrics"].items():
-            ep_metric[metric] = val
-        ep_metric["episode_length"] = len(
-            agent.planner.execution_state["action_history"]
-        )
-        metrics.append(ep_metric)
-        # Log progress to tensorboard
-        for metric, val in ep_metric.items():
-            writer.add_scalar(metric, val, global_step=ep_i)
+        # Collect metrics for the episode (except for the very first one with
+        # full demo)
+        if ep_i > 0:
+            ep_metric = {}
+            for metric, val in user.current_episode_record["metrics"].items():
+                ep_metric[metric] = val
+            for metric, val in agent.planner.execution_state["metrics"].items():
+                ep_metric[metric] = val
+            ep_metric["episode_length"] = len(
+                agent.planner.execution_state["action_history"]
+            )
+            ep_metric["mean_f1"] = sum(f1_scores.values()) / len(f1_scores)
+            metrics.append(ep_metric)
+            # Log progress to tensorboard
+            for metric, val in ep_metric.items():
+                writer.add_scalar(metric, val, global_step=ep_i)
 
     # Close Unity environment & tensorboard writer
     env.close()
     writer.close()
 
-    # Otherwise (i.e., learning enabled), save cumulative regret curves to output dir
-    out_csv_fname = f"cumulReg_{exp_tag}.csv"
+    # Save evaluation metric curves to output dir
+    out_csv_fname = f"{exp_tag}.csv"
 
     with open(os.path.join(results_path, out_csv_fname), "w") as out_csv:
         metric_types = [
             "num_search_failure", "num_invalid_pickup",
             "num_invalid_join", "num_planning_forfeiture",
-            "num_episode_discarded", "num_planning_attempts",
-            "num_collision_queries", "episode_length"
+            "episode_discarded", "num_planning_attempts",
+            "num_collision_queries", "episode_length", "mean_f1"
         ]
-        out_csv.write("episode" + ",".join(metric_types) + "\n")
+        out_csv.write("episode," + ",".join(metric_types) + "\n")
         for ep_i, ep_metric in enumerate(metrics):
-            # Skip the very first full demo training episode
-            if ep_i == 0: continue
-
             metric_values = [str(ep_metric[m_type]) for m_type in metric_types]
             metric_values = ",".join(metric_values)
-            out_csv.write(f"{ep_i},{metric_values}\n")
+            out_csv.write(f"{ep_i+1},{metric_values}\n")
 
 if __name__ == "__main__":
     main()

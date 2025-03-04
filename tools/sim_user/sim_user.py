@@ -111,7 +111,7 @@ class SimulatedTeacher:
                 "num_invalid_pickup": 0,
                 "num_invalid_join": 0,
                 "num_planning_forfeiture": 0,
-                "num_episode_discarded": 0
+                "episode_discarded": False
             }
         }
         self.target_task = target_task
@@ -127,12 +127,26 @@ class SimulatedTeacher:
         if target_task == "build_truck_supertype":
             # More 'basic' experiment suite invested on learning part types, valid
             # structures of trucks (& subassemblies) and contact pairs & points
-            self.target_concept = "truck"
+            if any(
+                any(st is None for st in subtypes) for subtypes in all_subtypes.values()
+            ):
+                # Now already constrained after the first sampling
+                sampled_truck_subtype = "truck"
+            else:
+                # First sampling, sample uniformly across truck subtypes (since naive
+                # samples per ASP models are not evenly distributed)
+                sampled_truck_subtype = random.sample([
+                    "base_truck", "dump_truck", "missile_truck", "fire_truck"
+                ], 1)[0]
+            self.target_concept = "truck"       # Always denoted as 'truck' in any case
 
             # Sampling with minimal constraints, just so enough that a valid truck
             # structure can be built; no distractors added
             num_distractors = 0
             constraints += [
+                ("exists", definiendum, (list(definiens["parts"].values()), []), True)
+                for definiendum, definiens in self.domain_knowledge["definitions"].items()
+            ] + [
                 ("forall", "truck", (["normal_wheel", "large_wheel"], None), False),
             ]   # For the easier difficulty, keep the sizes of the wheels identical
 
@@ -142,9 +156,10 @@ class SimulatedTeacher:
             # 'Advanced' stage invested on learning definitions of truck subtypes,
             # along with rules and constraints that influence trucks in general
             # or specific truck subtypes
-            self.target_concept = random.sample([
-                "base_truck", "dumper_truck", "missile_truck", "fire_truck"
+            sampled_truck_subtype = random.sample([
+                "base_truck", "dump_truck", "missile_truck", "fire_truck"
             ], 1)[0]
+            self.target_concept = sampled_truck_subtype
 
             # Sampling with full consideration of constraints in domain knowledge;
             # add distractors specifically selected to allow mistakes
@@ -163,7 +178,7 @@ class SimulatedTeacher:
         # a set of constraints
         random.seed(self.next_seed)
         sampled_inits = self._sample_ASP(
-            self.target_concept, self.domain_knowledge,
+            sampled_truck_subtype, self.domain_knowledge,
             constraints, all_subtypes, num_distractors
         )
         self.next_seed = random.randint(1, 1000000)
@@ -244,8 +259,9 @@ class SimulatedTeacher:
                     if demo_type == "full":
                         # Demonstration finished (including end-of-demo message),
                         # wait w/o terminating until receiving agent's acknowledgement
-                        # message "OK"
-                        response.append((None, None))
+                        # message "OK" (unless already included)
+                        if ("OK.", {}) not in agent_reactions:
+                            response.append((None, None))
                         continue
                     elif demo_type == "frag":
                         # Tell the agent to resume its task execution
@@ -382,8 +398,8 @@ class SimulatedTeacher:
                     if demo_type == "full":
                         # Provide additional action annotations
                         response.append(("generate", act_anno))
-                    if act_dscr is not None:
-                        response.append(("generate", act_dscr))
+                        if act_dscr is not None:
+                            response.append(("generate", act_dscr))
 
             elif utt.startswith("# Action:"):
                 # Agent action intent; somewhat like reading into the agent's 'mind'
@@ -460,7 +476,7 @@ class SimulatedTeacher:
                             if demo_segment is None:
                                 # Terminate episode; see what return value of None means
                                 # in _sample_demo_step().
-                                ep_metrics["num_episode_discarded"] += 1
+                                ep_metrics["episode_discarded"] = True
                                 return []
                             else:
                                 self.ongoing_demonstration = ("frag", demo_segment)
@@ -566,7 +582,7 @@ class SimulatedTeacher:
                             if demo_segment is None:
                                 # Terminate episode; see what return value of None means
                                 # in _sample_demo_step().
-                                ep_metrics["num_episode_discarded"] += 1
+                                ep_metrics["episode_discarded"] = True
                                 return []
                             else:
                                 self.ongoing_demonstration = ("frag", demo_segment)
@@ -628,7 +644,7 @@ class SimulatedTeacher:
                 if demo_segment is None:
                     # Terminate episode; see what return value of None means
                     # in _sample_demo_step().
-                    ep_metrics["num_episode_discarded"] += 1
+                    ep_metrics["episode_discarded"] = True
                     return []
                 else:
                     self.ongoing_demonstration = ("frag", demo_segment)
@@ -880,7 +896,7 @@ class SimulatedTeacher:
         with ctl.solve(yield_=True) as solve_gen:
             for m in solve_gen:
                 models.append(m.symbols(atoms=True))
-                if len(models) > 30000: break       # Should be enough...
+                if len(models) > 10000: break       # Should be enough...
 
         # Randomly select a sampled model
         sampled_model = random.sample(models, 1)[0]
@@ -1375,9 +1391,9 @@ class SimulatedTeacher:
         compression_sequence = [("truck", all_nodes)]
         # Now run the procedure, just the join tree is needed
         join_tree, _, _, _ = _divide_and_conquer(
-            compression_sequence, connection_graph,
+            compression_sequence, connection_graph, {},
             atomic_node_concs, contacts, part_names, cp_names,
-            (connection_status, node_unifications), (set(), set()),
+            (connection_status, node_unifications), set(), set(),
             self.cfg.paths.assets_dir, self.cfg.seed
         )
         if join_tree is None:

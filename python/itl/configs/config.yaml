@@ -19,6 +19,6 @@ vision:
 exp:
     task: "build_truck_supertype"
     player_type: "label"     # Options: "bool", "demo", "label", "full"
-    num_episodes: 50
+    num_episodes: 40
 
 seed: 42

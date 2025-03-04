@@ -384,6 +384,9 @@ class ITLAgent:
                     # All parts of learning from demonstration take place here
                     self.comp_actions.analyze_demonstration(aligned_demo_data)
 
+                    # Acknowledge user's demonstration in a cool way
+                    self.planner.agenda.append(("utter_simple", ("OK.", { "mood": "." })))
+
                     # Back to normal execution mode
                     self.observed_demo = None
 
@@ -596,32 +599,18 @@ class ITLAgent:
             if num_resolved_items == 0:
                 # No resolvable agenda item any more
                 if self.lang.latest_input is not None:
-                    user_linguistic_inputs = [
-                        utt for usr_in in self.lang.latest_input[0]
-                        for utt in usr_in["source"].values()
-                        if not utt.startswith("#")
-                    ]
-
                     if self.execution_paused and len(return_val) == 0:
                         # Entered (only) when agent, most likely to be language-less
                         # player type, had to pause execution due to its imperfect
                         # knowledge and thus needs to wait for user's partial demo.
                         # Signal that it is observing user's actions, then break.
                         return_val.append(("generate", ("# Observing", {})))
-                        break
                     else:
-                        if len(return_val) == 0 and len(user_linguistic_inputs) > 0:
-                            # No specific reaction to utter, acknowledge any user input
-                            self.planner.agenda.append(
-                                ("utter_simple", ("OK.", { "mood": "." }))
-                            )
-                        else:
-                            # Break loop with no-op reaction (do nothing but don't
-                            # terminate the episode)
-                            return_val.append((None, None))
-                            break
-                else:
-                    # Break loop with return vals
-                    break
+                        # Break loop with no-op reaction (do nothing but don't
+                        # terminate the episode)
+                        return_val.append((None, None))
+
+                # Break loop with return vals
+                break
 
         return return_val

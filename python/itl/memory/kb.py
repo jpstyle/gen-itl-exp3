@@ -557,7 +557,9 @@ class KnowledgeBase:
 
     def add_structure(self, conc, tree):
         """ Add or modify subassembly structure knowledge """
-        self.assembly_structures[conc].append(tree)
+        self.assembly_structures[conc].append((tree, set(), set()))
+            # Second entry of the pair will store any precedence constraint
+            # heuristics learned later
 
     @staticmethod
     def analyze_exported_reasoning_program(prog):

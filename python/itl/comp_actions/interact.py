@@ -450,7 +450,6 @@ def _execute_build(agent, action_params):
             # Resp. left & right held object, manipulator pose, component masks
         "connection_graphs": {},
         "recognitions": {},
-        "join_validities": (set(), set()),
         "replanning_needed": False,
         "action_history": [],
         "metrics": {
@@ -533,6 +532,16 @@ def _plan_assembly(agent, build_target):
         assembly_hierarchy, part_candidates = tabulated_results[:2]
         connect_edges, connection_graph = tabulated_results[2:4]
         node_unifications, atomic_node_concs = tabulated_results[4:]
+
+        # Build target may have one or more 'template' options that count as
+        # valid structure for the concept, fetch the index of the selected
+        # template in order to retrieve storage of any known scope entailments
+        selected_tmpl = next(
+            atm.arguments[2].number for atm in best_model
+            if atm.name=="node_sa_template" and \
+                (top_node := atm.arguments[0]).type == SymbolType.Number and \
+                top_node.number == 0
+        )
 
         # At this point, check if the task is already finished (if so, presumably
         # by user through demonstration), in which case no more planning is
@@ -675,7 +684,7 @@ def _plan_assembly(agent, build_target):
         # Give up if too many join trees to inspect. The latter check, which
         # is redundant with that above, is to catch such cases and not let them
         # flow into the else case below.
-        planning_forfeited = True       
+        planning_forfeited = True
     else:
         # Extracted mapping from string part names to agent's internal concept
         # denotations
@@ -700,7 +709,10 @@ def _plan_assembly(agent, build_target):
         }
 
         valid_join_trees = []
-        violated_entailments_collected = set()
+        structures = agent.lt_mem.kb.assembly_structures
+        _, scope_entailments, verified_joins = \
+            structures[build_target][selected_tmpl]
+        violated_entailments_by_obj = set()
         for unification_choice in valid_scenarios:
             if total_planning_attempts >= 30:
                 # Tolerate up to 30 total planning attempts; if couldn't
@@ -719,15 +731,15 @@ def _plan_assembly(agent, build_target):
             }
             join_tree, planning_attempts, query_count, viol_ents = \
                 _divide_and_conquer(
-                    compression_sequence, connection_graph,
+                    compression_sequence, connection_graph, exec_state["recognitions"],
                     atomic_node_concs, connect_edges, part_names, cp_names,
                     (exec_state["connection_graphs"], unification_choice_fmt),
-                    exec_state["join_validities"],
+                    scope_entailments, verified_joins,
                     agent.cfg.paths.assets_dir, agent.cfg.seed
                 )
             total_planning_attempts += planning_attempts
             total_query_count += query_count
-            violated_entailments_collected |= {
+            violated_entailments_by_obj |= {
                 (
                     frozenset([unification_choice_inv[n] for n in ante]),
                     unification_choice_inv[cons]
@@ -743,7 +755,7 @@ def _plan_assembly(agent, build_target):
             # happen if agent has all of its part type recognition premise correct.
             # Find all relevant joins made by Teacher and uncommit their part type
             # recognitions. Forfeit planning for the current round.
-            for ante, cons in violated_entailments_collected:
+            for ante, cons in violated_entailments_by_obj:
                 involved_objs = ante | {cons}
                 for action_type, action_params, actor in exec_state["action_history"]:
                     if actor != "Teacher": continue
@@ -848,9 +860,11 @@ def _goal_selection(agent, build_target):
     likelihood_values = np.stack([
         obj["pred_cls"] for obj in agent.vision.scene.values()
     ])
-    min_val = max(likelihood_values.min(), threshold)
-    max_val = likelihood_values.max()
-    val_range = max_val - min_val
+    # Obtaining per-category minimums/maximums of probability scores for
+    # normalization and discretization later
+    min_vals = np.maximum(likelihood_values.min(axis=0), threshold)
+    max_vals = likelihood_values.max(axis=0)
+    val_ranges = max_vals - min_vals
 
     for oi, obj in agent.vision.scene.items():
         if oi in exec_state["recognitions"]:
@@ -867,7 +881,7 @@ def _goal_selection(agent, build_target):
                 # Normalize & discretize within [0,dsc_bin]; the more bins we
                 # use for discrete approximation, the more time it takes to
                 # solve the program
-                nrm_val = (val-min_val) / val_range
+                nrm_val = (val-min_vals[ci]) / val_ranges[ci]
                 dsc_val = int(nrm_val * dsc_bin)
 
                 obs_lit = Literal(
@@ -880,7 +894,7 @@ def _goal_selection(agent, build_target):
     assembly_pieces = set()
     for (_, sa_conc), templates in structures.items():
         # For each valid template option
-        for ti, template in enumerate(templates):
+        for ti, (template, _, _) in enumerate(templates):
             # Register this specific template option
             assembly_pieces.add(Literal(
                 "template_option", wrap_args(sa_conc, ti)
@@ -1134,18 +1148,14 @@ def _match_existing_subassemblies(
             conn_graph_match.nodes[n]["unif"] = n
     # First match and process existing subassemblies which have uniquely
     # unifiable component objects
-    if len(anchored_sas) > 0:
-        anchored_sa_graphs_union = nx.union_all([
-            exec_state["connection_graphs"][sa].to_undirected()
-            for sa in anchored_sas
-        ])
-        for ex_obj in anchored_sa_graphs_union:
-            for sa in anchored_sas:
-                if (sa, ex_obj) in uniquely_unified:
-                    unified_node = uniquely_unified[(sa, ex_obj)]
-                    anchored_sa_graphs_union.nodes[ex_obj]["unif"] = unified_node
+    for sa in anchored_sas:
+        sa_graph_match = exec_state["connection_graphs"][sa].to_undirected()
+        for ex_obj in sa_graph_match:
+            if (sa, ex_obj) in uniquely_unified:
+                unified_node = uniquely_unified[(sa, ex_obj)]
+                sa_graph_match.nodes[ex_obj]["unif"] = unified_node
         matcher = nx.isomorphism.ISMAGS(
-            conn_graph_match, anchored_sa_graphs_union,
+            conn_graph_match, sa_graph_match,
             node_match=nx.isomorphism.categorical_node_match("unif", "*")
         )
         for ism in matcher.find_isomorphisms(symmetry=False):
@@ -1156,23 +1166,14 @@ def _match_existing_subassemblies(
                     exec_state["recognitions"][ex_obj] != atomic_node_concs[n]
                 for n, ex_obj in ism.items()
             ): continue
-            possible_mappings["anchored"].append(ism)
+            possible_mappings[sa].append(ism)
     # Punch out uniquely unified nodes
     conn_graph_match.remove_nodes_from(uniquely_unified.values())
     # Now match and process existing subassemblies that are not anchored
     # to any nodes in connection graph, with remaining `conn_graph_match`
-    if len(lifted_sas) > 0:
-        lifted_sa_graphs_union = nx.union_all([
-            exec_state["connection_graphs"][sa].to_undirected()
-            for sa in lifted_sas
-        ])
-        matcher = nx.isomorphism.ISMAGS(
-            conn_graph_match, lifted_sa_graphs_union,
-            node_match=nx.isomorphism.categorical_node_match("unif", "*")
-        )
-        matcher = nx.isomorphism.ISMAGS(
-            conn_graph_match, lifted_sa_graphs_union
-        )
+    for sa in lifted_sas:
+        sa_graph_match = exec_state["connection_graphs"][sa].to_undirected()
+        matcher = nx.isomorphism.ISMAGS(conn_graph_match, sa_graph_match)
         for ism in matcher.find_isomorphisms(symmetry=False):
             # Typechecking again
             if any(
@@ -1180,14 +1181,15 @@ def _match_existing_subassemblies(
                     exec_state["recognitions"][ex_obj] != atomic_node_concs[n]
                 for n, ex_obj in ism.items()
             ): continue
-            possible_mappings["lifted"].append(ism)
+            possible_mappings[sa].append(ism)
 
     return possible_mappings
 
 def _divide_and_conquer(
-    compression_sequence, connection_graph,
+    compression_sequence, connection_graph, recognitions,
     atomic_node_concs, contacts, part_names, cp_names,
-    current_progress, join_validities, assets_dir, seed
+    current_progress, scope_entailments, verified_joins,
+    assets_dir, seed
 ):
     """
     Helper method factored out for piecewise planning of a join sequence
@@ -1196,6 +1198,28 @@ def _divide_and_conquer(
     subproblems and conquer each subproblem. Start from scratch if a bad
     subproblem division led to deadend.
     """
+    # Test if the planning problem is outright unsolvable with given premise
+    # and the history of current episode; in particular, if the premise
+    # would enforce a join that's proven invalid by teacher
+    unification_choice_inv = {
+        n: re.findall(r"(s\d+)_(o\d+)", ex_obj)[0]
+        for ex_obj, n in current_progress[1].items()
+        if re.match(r"(s\d+)_(o\d+)", ex_obj)
+    }
+    for u, v in connection_graph.edges:
+        if u not in unification_choice_inv: continue
+        if v not in unification_choice_inv: continue
+        obj_u = unification_choice_inv[u][1]
+        obj_v = unification_choice_inv[v][1]
+        conc_u = atomic_node_concs[u]
+        conc_v = atomic_node_concs[v]
+        if recognitions.get((obj_u, obj_v)) == (-conc_u, -conc_v) or \
+            recognitions.get((obj_v, obj_u)) == (-conc_v, -conc_u):
+            # Pairwise negative feedback from teacher exists, such that
+            # it shouldn't hold that obj_u is an instance of conc_u and
+            # obj_v of conc_v simultaneously
+            return None, 0, 0, set()
+
     # Inverse direction mapping of `atomic_node_concs`, from concept to
     # corresponding node group
     atomic_nodes_by_conc = {
@@ -1214,40 +1238,17 @@ def _divide_and_conquer(
     with open(f"{knowledge_path}/collision_table.yaml") as yml_f:
         collision_table = yaml.safe_load(yml_f)
 
-    # Remembering valid & invalid joins of subassemblies, so as to avoid
-    # calling oracle (be it cheat sheet or external motion planner)
-    valid_joins_cached = join_validities[0]
-    invalid_joins_cached = join_validities[1]
-
     # Method for obtaining a new instance of physical collision 'theory'
     # propagator
     def new_propagator():
         return _PhysicalAssemblyPropagator(
             (connection_graph, contacts), atomic_node_concs,
             (collision_table, part_names, cp_names),
-            (valid_joins_cached, invalid_joins_cached)
+            scope_entailments, verified_joins
         )
     # Instantiate a new propagator, which will establish a mapping between
     # connection graph nodes and collision table instances.
     collision_checker = new_propagator()
-    # Record any available 'assembly scope entailment' such that if a set of
-    # certain atomic objects are to be included in a chunk, some other object
-    # must be included in the set as well, so as to avoid deadends due to
-    # violations of precedence constraints
-    scope_entailments = set()
-    def update_scope_entailments(propagator):
-        # Update list of known scope entailments from invalid joins witnessed
-        for insts1, insts2 in propagator.invalid_joins:
-            nodes1 = frozenset(propagator.inst2node[i] for i in insts1)
-            nodes2 = frozenset(propagator.inst2node[i] for i in insts2)
-
-            # Process each direction only if the 'consequent' side of the
-            # entailment has one object in the set
-            if len(nodes1) == 1:
-                scope_entailments.add((nodes2, list(nodes1)[0]))
-            if len(nodes2) == 1:
-                scope_entailments.add((nodes1, list(nodes2)[0]))
-    update_scope_entailments(collision_checker)
 
     # Compress the connection graph part by part, randomly selecting chunks
     # of parts or subassemblies to form smaller planning problems
@@ -1373,8 +1374,6 @@ def _divide_and_conquer(
                 # won't be tried again. Update tracker states and restart.
                 planning_attempts += 1
                 invalid_chunk_sequences.add(current_chunk_sequence)
-                valid_joins_cached |= collision_checker.valid_joins
-                invalid_joins_cached |= collision_checker.invalid_joins
                 remaining_subproblems = deque(
                     _planning_subproblems(
                         compression_sequence, connection_graph, current_progress
@@ -1470,8 +1469,30 @@ def _divide_and_conquer(
             
             plan_ctl.configuration.solver.seed = seed
 
-        # Update list of known scope entailments
-        update_scope_entailments(collision_checker)
+        # Update list of known scope entailments from invalid joins witnessed
+        # by the collision check propagator
+        for ante_i, cons_i in collision_checker.scope_entailments:
+            ante_n = frozenset(collision_checker.inst2node[i] for i in ante_i)
+            cons_n = collision_checker.inst2node[cons_i]
+            scope_entailments.add((ante_n, cons_n))
+        # Similarly, update list of verified joins witnessed
+        for cached_s1, cached_s2 in collision_checker.verified_joins:
+            nodes_s1 = frozenset(collision_checker.inst2node[i] for i in cached_s1)
+            nodes_s2 = frozenset(collision_checker.inst2node[i] for i in cached_s2)
+            subsumed = set()
+            for cached_s1, cached_s2 in verified_joins:
+                if nodes_s1 >= cached_s1 and nodes_s2 >= cached_s2 or \
+                    nodes_s1 >= cached_s2 and nodes_s2 >= cached_s1:
+                    # Can safely remove this already cached join as this
+                    # will be entailed
+                    subsumed.add(frozenset((cached_s1, cached_s2)))
+                if nodes_s1 <= cached_s1 and nodes_s2 <= cached_s2 or \
+                    nodes_s1 <= cached_s2 and nodes_s2 <= cached_s1:
+                    # Already entailed, no need to add
+                    break
+            else:
+                verified_joins -= subsumed
+                verified_joins.add(frozenset((nodes_s1, nodes_s2)))
 
         # Tracking sequence of selected chunks, so as to remember invalid
         # sequences that led to deadend states and prevent following the
@@ -1485,8 +1506,6 @@ def _divide_and_conquer(
             # and restart.
             planning_attempts += 1
             invalid_chunk_sequences.add(current_chunk_sequence)
-            valid_joins_cached |= collision_checker.valid_joins
-            invalid_joins_cached |= collision_checker.invalid_joins
             remaining_subproblems = deque(
                 _planning_subproblems(
                     compression_sequence, connection_graph, current_progress
@@ -1563,7 +1582,7 @@ def _divide_and_conquer(
         join_tree.add_edge(s1, res, join_by=n1)
         join_tree.add_edge(s2, res, join_by=n2)
 
-    return join_tree, planning_attempts, query_count, set()
+    return join_tree, planning_attempts, query_count, scope_entailments
 
 def _compress_chunk(compression_graph, chunk, name):
     """
@@ -1686,11 +1705,11 @@ def _planning_subproblems(
 
 class _PhysicalAssemblyPropagator:
     def __init__(
-        self, connections, atomic_node_concs, cheat_sheet, test_result_cached
+        self, connections, atomic_node_concs, cheat_sheet,
+        scope_entailments, verified_joins
     ):
         connection_graph, contacts = connections
         collision_table, part_names, cp_names = cheat_sheet
-        valid_joins, invalid_joins = test_result_cached
 
         self.connection_graph = connection_graph
 
@@ -1763,10 +1782,23 @@ class _PhysicalAssemblyPropagator:
         # For tracking per-thread status
         self.assembly_status = None
 
-        # For caching inclusion-minimal invalid object set pairs that
-        # can/cannot be joined
-        self.valid_joins = valid_joins
-        self.invalid_joins = invalid_joins
+        # For caching inclusion-minimal 'scope entailments', such that if
+        # the 'antecedent' part is included in one side of the join, the
+        # 'consequent' part must also be included in that side so as to
+        # avoid planning failure by lack of collision-free paths
+        self.scope_entailments = {
+            (frozenset([self.node2inst[n] for n in ante]), self.node2inst[cons])
+            for ante, cons in scope_entailments
+        }
+        # Similarly, caching inclusion-maximal joins that are verified to
+        # have collision-free assembly paths
+        self.verified_joins = {
+            frozenset((
+                frozenset([self.node2inst[n] for n in nodes1]),
+                frozenset([self.node2inst[n] for n in nodes2])
+            ))
+            for nodes1, nodes2 in verified_joins
+        }
 
         # Count of how many times the oracle was queried; in case we do not
         # have any access to oracle and need to resort to some path planning
@@ -1874,25 +1906,22 @@ class _PhysicalAssemblyPropagator:
             # the oracle. Note that if either of nodes_s1 or nodes_s2 is empty,
             # the vacuous join will always be treated as 'not impossible';
             # i.e., not ruled out due to physical collision.
-            for cached_s1, cached_s2 in self.valid_joins:
-                if insts_s1 <= cached_s1 and insts_s2 <= cached_s2:
+            verified_by_cache = False
+            for cached_s1, cached_s2 in self.verified_joins:
+                if insts_s1 <= cached_s1 and insts_s2 <= cached_s2 or \
+                    insts_s1 <= cached_s2 and insts_s2 <= cached_s1:
                     verified_by_cache = True
                     break
-                if insts_s1 <= cached_s2 and insts_s2 <= cached_s1:
-                    verified_by_cache = True
-                    break
-            else:
-                verified_by_cache = False
 
             if verified_by_cache:
                 join_possible = True
             else:
-                subset_cached_as_invalid = any(
-                    (insts_s1 >= s1 and insts_s2 >= s2) or \
-                        (insts_s1 >= s2 and insts_s2 >= s1)
-                    for s1, s2 in self.invalid_joins
+                entailment_violating = any(
+                    (insts_s1 >= ante and insts_s2 >= {cons}) or \
+                        (insts_s2 >= ante and insts_s1 >= {cons})
+                    for ante, cons in self.scope_entailments
                 )
-                if subset_cached_as_invalid:
+                if entailment_violating:
                     # Some subset pair recognized and cached as invalid
                     join_possible = False
                 else:
@@ -1910,16 +1939,32 @@ class _PhysicalAssemblyPropagator:
                     join_possible = len(collision_directions) < 6
 
             if join_possible:
-                # Cache valid join
-                self.valid_joins.add(frozenset([insts_s1, insts_s2]))
+                # Store the join as verified, if there isn't any stricter
+                # verified join already stored
+                if not verified_by_cache:
+                    subsumed = set()        # Delete any weaker (subsumed) joins
+                    for cached_s1, cached_s2 in self.verified_joins:
+                        if insts_s1 >= cached_s1 and insts_s2 >= cached_s2 or \
+                            insts_s1 >= cached_s2 and insts_s2 >= cached_s1:
+                            subsumed.add(frozenset((cached_s1, cached_s2)))
+                    self.verified_joins -= subsumed
+                    self.verified_joins.add(frozenset((insts_s1, insts_s2)))
             else:
                 # Join of this subassembly pair proved to be unreachable
                 # while including current object members; add nogood
                 # as appropriate and return
-                if not subset_cached_as_invalid:
+                if not entailment_violating:
                     minimal_pair = self.analyze_collision((nodes_s1, nodes_s2))
                     if minimal_pair is not None:
-                        self.invalid_joins.add(minimal_pair)
+                        # If one side of the minimal pair is an atomic singleton,
+                        # we can treat the pair as a scope entailment where the
+                        # singleton side is its consequent and the other side is
+                        # its antecedent.
+                        insts1, insts2 = minimal_pair
+                        if len(insts1) == 1:
+                            self.scope_entailments.add((insts2, list(insts1)[0]))
+                        if len(insts2) == 1:
+                            self.scope_entailments.add((insts1, list(insts2)[0]))
 
                 join_lit = self.join_actions_a2l[(s1, n1, s2, n2, t)]
                 part_of_lits = [
@@ -2037,6 +2082,16 @@ def _linearize_join_tree(
             # be considered as candidate again
             for cnd_objs in part_candidates.values():
                 if obj in cnd_objs: cnd_objs.remove(obj)
+            # Account for any applicable pairwise negative label info
+            for objs, labels in exec_state["recognitions"].items():
+                if not isinstance(objs, tuple): continue
+                if obj not in objs: continue
+                obj1, obj2 = objs
+                label1, label2 = -labels[0], -labels[1]
+                if obj == obj1 and obj2 in part_candidates.get(label2, {}):
+                    part_candidates[label2].remove(obj2)
+                if obj == obj2 and obj1 in part_candidates.get(label1, {}):
+                    part_candidates[label1].remove(obj1)
 
             # Collect specified obj-to-node unifications
             if f"{sa}_{obj}" not in node_unifications: continue
@@ -2126,21 +2181,21 @@ def _linearize_join_tree(
             if n in atomic_node_concs and n not in node2obj_map:
                 conc_n = atomic_node_concs[n]
                 if len(part_candidates[conc_n]) > 0:
-                    o = part_candidates[conc_n].pop()
+                    obj = part_candidates[conc_n].pop()
                     # Account for any applicable pairwise negative label info
                     for objs, labels in exec_state["recognitions"].items():
                         if not isinstance(objs, tuple): continue
-                        if o not in objs: continue
+                        if obj not in objs: continue
                         obj1, obj2 = objs
                         label1, label2 = -labels[0], -labels[1]
-                        if o == obj1 and obj2 in part_candidates.get(label2, {}):
+                        if obj == obj1 and obj2 in part_candidates.get(label2, {}):
                             part_candidates[label2].remove(obj2)
-                        if o == obj2 and obj1 in part_candidates.get(label1, {}):
+                        if obj == obj2 and obj1 in part_candidates.get(label1, {}):
                             part_candidates[label1].remove(obj1)
                 else:
-                    o = f"n{nonobj_ind}"
+                    obj = f"n{nonobj_ind}"
                     nonobj_ind += 1
-                node2obj_map[n] = (o, conc_n)
+                node2obj_map[n] = (obj, conc_n)
 
         # Fetch matching (non-)object and unify with subassembly names if
         # necessary
@@ -2148,7 +2203,10 @@ def _linearize_join_tree(
         s1 = o1 if n1 == a1 else n1
         s2 = o2 if n2 == a2 else n2
 
-        if s1 in hands or s2 in hands:
+        if None not in hands:
+            # Both hands are full, nothing to do here
+            pass
+        elif s1 in hands or s2 in hands:
             # Immediately using the subassembly built in the previous join
             empty_side = hands.index(None)
             occupied_side = list({0, 1} - {empty_side})[0]
@@ -2173,15 +2231,23 @@ def _linearize_join_tree(
         )
         if deg_handle(a1) >= deg_handle(a2):
             # a1 is more 'central', a2 is more 'peripheral'; join a2 to a1
-            if s1 in hands:
+            if hands == [s1, s2]:
+                direction = 0
+            elif hands == [s2, s1]:
+                direction = 1
+            elif s1 in hands:
                 direction = 1 if hands.index(None) == 0 else 0
             elif s2 in hands:
                 direction = 0 if hands.index(None) == 0 else 1
             else:
                 direction = 0
         else:
-            # a2 is more 'central', a1 is more 'peripheral'; join a2 to a1
-            if s1 in hands:
+            # a2 is more 'central', a1 is more 'peripheral'; join a1 to a2
+            if hands == [s1, s2]:
+                direction = 1
+            elif hands == [s2, s1]:
+                direction = 0
+            elif s1 in hands:
                 direction = 0 if hands.index(None) == 0 else 1
             elif s2 in hands:
                 direction = 1 if hands.index(None) == 0 else 0
@@ -2194,7 +2260,13 @@ def _linearize_join_tree(
         cp_a1, cp_a2 = contacts[(a1, a2)]
         cp_a1 = int(re.findall(r"p_(.*)$", cp_a1)[0])
         cp_a2 = int(re.findall(r"p_(.*)$", cp_a2)[0])
-        if s1 in hands:
+        if hands == [s1, s2]:
+            # Already holding s1 and s2 on left and right respectively
+            join_params = (s1, o1, cp_a1, s2, o2, cp_a2, sa_name)
+        elif hands == [s2, s1]:
+            # Already holding s2 and s1 on left and right respectively
+            join_params = (s2, o2, cp_a2, s1, o1, cp_a1, sa_name)
+        elif s1 in hands:
             if hands.index(None) == 0:
                 # s1 held in right hand
                 join_params = (s2, o2, cp_a2, s1, o1, cp_a1, sa_name)
@@ -2634,6 +2706,11 @@ def handle_action_effect(agent, effect, actor):
     # Shortcut vars
     referents = agent.lang.dialogue.referents
     exec_state = agent.planner.execution_state      # Shortcut var
+
+    if len(exec_state) == 0:
+        # Probably called after a full demonstration is given, no task to be
+        # executed for this episode
+        return
 
     # Mapping from Unity-side name to scene object index
     env_handle_inv = {
