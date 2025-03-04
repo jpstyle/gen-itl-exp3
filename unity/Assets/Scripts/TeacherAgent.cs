@@ -34,7 +34,7 @@ public class TeacherAgent : DialogueAgent
     [SerializeField]
     private List<GameObject> boltTypes;
     [SerializeField]
-    private List<Material> colors;
+    private List<string> colors;
 
     private int _randomSeed = 42;
     
@@ -332,12 +332,12 @@ public class TeacherAgent : DialogueAgent
             ("br_fender", fenderBackRightTypes.Select(t => t.name).ToList()),
             ("wheel", wheelTypes.Select(t => t.name).ToList()),
             ("bolt", boltTypes.Select(t => t.name).ToList()),
-            ("color", colors.Select(t => t.name.Replace("plastic_", "")).ToList())
+            ("color", colors.ToList())
         };
     }
 
     private static void InstantiateAtomicPrefab(
-        GameObject prefab, Material colorMaterial, GameObject partition,
+        GameObject prefab, string colorString, GameObject partition,
         string wrapperName, string supertypeName,
         Vector3 wrapperPos, Vector3 wrapperRot, Vector3 prtRot,
         bool licenseSupertypeLabel
@@ -373,9 +373,13 @@ public class TeacherAgent : DialogueAgent
         // Apply color to colorable meshes 
         foreach (var mesh in prefabInstance.GetComponentsInChildren<MeshRenderer>())
         {
-            if (colorMaterial is null) continue;
-            if (mesh.material.name.StartsWith("Default"))
-                mesh.material = colorMaterial;
+            // 'Colorable' meshes are marked with "Default" material
+            if (colorString is null) continue;
+            if (!mesh.material.name.StartsWith("Default")) continue;
+
+            // Use metallic material for large fenders; otherwise, plain plastic
+            var materialType = prefab.name.StartsWith("large") ? "metal" : "plastic"; 
+            mesh.material = Resources.Load<Material>($"Materials/{materialType}_{colorString}");
         }
 
         // Make sure to attach EnvEntity component after adding the atomic child
