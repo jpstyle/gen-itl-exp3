@@ -983,7 +983,7 @@ public class DialogueAgent : Agent
     private string Inspect(int viewIndex, string inspectedObjName, bool onLeft)
     {
         // Move the specified hand to 'observation' position, then rotate according to the
-        // specified viewing angle index. Index value of 40 indicates end of inspection,
+        // specified viewing angle index. Index value of 24 indicates end of inspection,
         // bring the hand back to the original position.
         var directionString = onLeft ? "left" : "right";
 
@@ -1007,7 +1007,7 @@ public class DialogueAgent : Agent
             activeHand.position = relativeViewCenter.position;
         }
 
-        if (viewIndex < 40)
+        if (viewIndex < 24)
         {
             // Turn hand orientation to each direction where the imaginary viewer is supposed to be
             if (viewIndex % 8 == 0)
@@ -1015,11 +1015,9 @@ public class DialogueAgent : Agent
                 // Adjust 'viewing height'
                 var rx = (viewIndex / 8) switch
                 {
-                    0 => _cameraSensor.Camera.transform.eulerAngles.x - 70f,
-                    1 => _cameraSensor.Camera.transform.eulerAngles.x - 50f,
-                    2 => _cameraSensor.Camera.transform.eulerAngles.x,
-                    3 => _cameraSensor.Camera.transform.eulerAngles.x + 50f,
-                    4 => _cameraSensor.Camera.transform.eulerAngles.x + 70f,
+                    0 => _cameraSensor.Camera.transform.eulerAngles.x - 50f,
+                    1 => _cameraSensor.Camera.transform.eulerAngles.x,
+                    2 => _cameraSensor.Camera.transform.eulerAngles.x + 50f,
                     _ => relativeViewCenter.eulerAngles.x
                 };
                 relativeViewCenter.eulerAngles = new Vector3(rx, 0f, 0f);
@@ -1033,7 +1031,7 @@ public class DialogueAgent : Agent
             activeHand.LookAt(relativeViewPoint, relativeViewCenter.up);
         }
 
-        if (viewIndex == 40)
+        if (viewIndex == 24)
         {
             // Back to default poses at the end of inspection
             activeHand.localPosition = onLeft ? leftOriginalPosition : rightOriginalPosition;
