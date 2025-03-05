@@ -722,7 +722,7 @@ class VisionModule:
 
 class VisualConceptInventory:
     def __init__(self):
-        # Inventory of (visually perceivable) relation concept is a fixed singleton
-        # set, containing "have"
-        self.pcls = 0
+        # Inventory of (visually perceivable) relation concept starts with five
+        # color concepts & the quasi-hypernym "color", and "have" relation
+        self.pcls = 6
         self.prel = 1

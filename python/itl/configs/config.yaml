@@ -11,14 +11,16 @@ paths:
 
 vision:
     model:
-        dino_model: "facebook/dinov2-small"
+        dino_model: "facebook/dinov2-base"
         sam_model: "facebook/sam-vit-base"
 
     calibrate_camera: true
 
 exp:
     task: "build_truck_supertype"
-    player_type: "label"     # Options: "bool", "demo", "label", "full"
+        # Options: "build_truck_supertype", "build_truck_subtype", "inject_color"
+    player_type: "label"
+        # Options: "bool", "demo", "label", "full"
     num_episodes: 40
 
 seed: 42

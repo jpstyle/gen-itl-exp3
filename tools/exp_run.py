@@ -85,6 +85,8 @@ def main(cfg):
     #   "build_truck_subtype": Learn how to build fine-grained subtypes of trucks,
     #       where main learning targets are ontology rules (definitions and constraints)
     #       that need to be followed
+    # In addition, "inject_color" is specified for the preparation step where
+    # the agent is pre-trained with color concepts
     target_task = cfg.exp.task
 
     # Student/teacher-side string message communication side channels

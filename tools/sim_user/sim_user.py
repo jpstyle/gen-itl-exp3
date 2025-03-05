@@ -151,7 +151,7 @@ class SimulatedTeacher:
             ]   # For the easier difficulty, keep the sizes of the wheels identical
 
         else:
-            assert target_task == "build_truck_subtype"
+            assert target_task in ["build_truck_subtype", "inject_color"]
 
             # 'Advanced' stage invested on learning definitions of truck subtypes,
             # along with rules and constraints that influence trucks in general
@@ -187,15 +187,25 @@ class SimulatedTeacher:
             # starting seed
 
         # Extract and store sampled part subtype info for the current scene
-        sampled_parts = {}
+        sampled_parts = defaultdict(lambda: (None, None))
         for spec, subtype_id in sampled_inits.items():
             supertype, attribute_type, obj_id = spec.split("/")
-            if attribute_type != "type": continue
-            if not obj_id.startswith("t"): continue
+            obj_id = re.findall(r"([td])(\d+)$", obj_id)[0]
+            obj_id = (obj_id[0], int(obj_id[1]))
 
-            obj_id = int(obj_id.replace("t", ""))
-            sampled_parts[(supertype, obj_id)] = all_subtypes[supertype][subtype_id]
-        self.current_episode_record["sampled_parts"] = sampled_parts
+            match attribute_type:
+                case "type":
+                    sampled_parts[(supertype, obj_id)] = (
+                        all_subtypes[supertype][subtype_id],
+                        sampled_parts[(supertype, obj_id)][1]
+                    )
+                case "color":
+                    sampled_parts[(supertype, obj_id)] = (
+                        sampled_parts[(supertype, obj_id)][0],
+                        all_subtypes["color"][subtype_id]
+                    )
+
+        self.current_episode_record["sampled_parts"] = dict(sampled_parts)
 
         # Return sampled parts to pass as environment parameters
         return sampled_inits
@@ -303,7 +313,7 @@ class SimulatedTeacher:
 
                     if self.player_type in ["label", "full"]:
                         inst = re.findall(r"^t_(.*)_(\d+)$", target)
-                        inst = (inst[0][0], int(inst[0][1])) if len(inst) == 1 else None
+                        inst = (inst[0][0], ("t", int(inst[0][1]))) if len(inst) == 1 else None
                         if inst in sampled_parts:
                             target_label = f"a {inst[0]}"
                         else:
@@ -673,8 +683,8 @@ class SimulatedTeacher:
                 # Fetch list of matching instances and select one that hasn't
                 # been used yet (i.e., still on the tabletop)
                 matching_insts = [
-                    f"t_{supertype}_{inst}"
-                    for (supertype, inst), subtype in sampled_parts.items()
+                    f"t_{supertype}_{inst_id[1]}"
+                    for (supertype, inst_id), (subtype, _) in sampled_parts.items()
                     if queried_type == supertype or queried_type == subtype
                 ]
                 consumed_insts = [
@@ -1233,7 +1243,8 @@ class SimulatedTeacher:
 
             # For manual check of fender-wheel compatibility...
             if result.endswith("_fw_unit"):
-                large_wheel_needed = sampled_parts[(f"{result[:2]}_fender", 0)].startswith("large")
+                obj_id = (f"{result[:2]}_fender", ("t", 0))
+                large_wheel_needed = sampled_parts[obj_id][0].startswith("large")
             else:
                 large_wheel_needed = None
 
@@ -1244,7 +1255,7 @@ class SimulatedTeacher:
             for action in act_seq:
                 if action[0].startswith("pick_up") and action[1][0] in atomic_supertypes:
                     compatible_parts = []
-                    for instance, subtype in sampled_parts.items():
+                    for instance, (subtype, _) in sampled_parts.items():
                         if instance[0] != action[1][0]: continue
                         if action[1][0] == "wheel" and large_wheel_needed is not None:
                             if subtype != "large_wheel" and large_wheel_needed: continue
@@ -1252,9 +1263,12 @@ class SimulatedTeacher:
 
                         compatible_parts.append(instance)
 
-                    instance = random.sample(compatible_parts, 1)[0]
-                    grounded_action = (action[0], (f"t_{instance[0]}_{instance[1]}", action[1][1]))
-                    subtype = sampled_parts.pop(instance)
+                    inst_supertype, inst_id = random.sample(compatible_parts, 1)[0]
+                    grounded_action = (
+                        action[0],
+                        (f"{inst_id[0]}_{inst_supertype}_{inst_id[1]}", action[1][1])
+                    )
+                    subtype, _ = sampled_parts.pop((inst_supertype, inst_id))
 
                     plan.append(grounded_action)
 
@@ -1267,8 +1281,11 @@ class SimulatedTeacher:
                         introduced_subtypes.add(subtype)
                         hand = "left" if action[0].endswith("left") else "right"
                         plan += [
-                            (f"inspect_{hand}", (f"t_{instance[0]}_{instance[1]}", i))
-                            for i in range(41)
+                            (
+                                f"inspect_{hand}",
+                                (f"{inst_id[0]}_{inst_supertype}_{inst_id[1]}", i)
+                            )
+                            for i in range(24+1)
                         ]
 
                 else:
@@ -1282,7 +1299,9 @@ class SimulatedTeacher:
             ]
 
         # All sampled parts that build target object are used
-        assert len(sampled_parts) == 0
+        assert len([
+            inst_id for _, inst_id in sampled_parts if inst_id[0] == "t"
+        ]) == 0
 
         return plan
 
