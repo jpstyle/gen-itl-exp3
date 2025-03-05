@@ -37,23 +37,18 @@ CON_GRAPH = nx.Graph()
 for i in range(8):
     CON_GRAPH.add_edge(i, i+8)
     CON_GRAPH.add_edge(i+8, i+16)
-    CON_GRAPH.add_edge(i+16, i+24)
-    CON_GRAPH.add_edge(i+24, i+32)
     if i < 7:
-        CON_GRAPH.add_edge(i, i+1); CON_GRAPH.add_edge(i+8, i+9)
-        CON_GRAPH.add_edge(i+16, i+17); CON_GRAPH.add_edge(i+24, i+25)
-        CON_GRAPH.add_edge(i+32, i+33)
+        CON_GRAPH.add_edge(i, i+1)
+        CON_GRAPH.add_edge(i+8, i+9)
+        CON_GRAPH.add_edge(i+16, i+17)
     else:
-        CON_GRAPH.add_edge(i, i-7); CON_GRAPH.add_edge(i+8, i+1)
-        CON_GRAPH.add_edge(i+16, i+9); CON_GRAPH.add_edge(i+24, i+17)
-        CON_GRAPH.add_edge(i+32, i+25)
+        CON_GRAPH.add_edge(i, i-7)
+        CON_GRAPH.add_edge(i+8, i+1)
+        CON_GRAPH.add_edge(i+16, i+9)
 # Index of viewpoints whose data (camera pose, visible points and their descriptors)
-# will be stored in long-term memory; storing for all consumes too much time (for
-# examining possible initial poses during pose estimation) and space (storing all
-# descriptors---even in reduced dimensionalities---would take too much)
-STORE_VP_INDS = [
-    0, 2, 4, 6, 8, 10, 12, 14, 24, 26, 28, 30, 32, 34, 36, 38
-]
+# will be stored in long-term memory; storing for all consumes too much space (storing
+# all descriptors---even in reduced dimensionalities---would take too much)
+STORE_VP_INDS = [0, 2, 4, 6, 16, 18, 20, 22]
 
 # Recursive helper methods for checking whether rule cons/ante is grounded (variable-
 # free), lifted (all variables), contains any predicate referent as argument, or uses
@@ -649,7 +644,7 @@ def analyze_demonstration(agent, demo_data):
                                 # inspect_~ action; collect all views for 3D reconstruction
                                 viewed_obj = lit.args[2][0]
                                 view_ind = int(referents["dis"][lit.args[3][0]]["name"])
-                                if view_ind < 40:
+                                if view_ind < 24:
                                     inspect_data["img"][view_ind] = img
                                 if view_ind > 0:
                                     inspect_data["msk"][view_ind-1] = env_refs[viewed_obj]["mask"]
@@ -728,7 +723,7 @@ def analyze_demonstration(agent, demo_data):
                                 # in camera coordinate, where the camera is put at different
                                 # vantage points. Needed for appropriately adjusting ground
                                 # truth poses passed from Unity environment.
-                                if view_ind < 40:
+                                if view_ind < 24:
                                     inspect_data["pose"][view_ind] = (
                                         flip_quaternion_y(xyzw2wxyz(parse_floats(2))),
                                         flip_position_y(parse_floats(3))
@@ -751,7 +746,7 @@ def analyze_demonstration(agent, demo_data):
                 # expressed in natural language in the scope of our experiment
                 raise NotImplementedError
 
-        if len(inspect_data["img"]) == 40 and len(inspect_data["msk"]) == 40:
+        if len(inspect_data["img"]) == 24 and len(inspect_data["msk"]) == 24:
             inst_inspected = current_held[left_or_right][0]
 
             # Collect 3D & 2D visual data for later processing
