@@ -179,7 +179,7 @@ def main(cfg):
         # Obtain random initialization of each episode
         sampled_inits = user.setup_episode(target_task, all_subtypes)
 
-        # Send randomly initialized parameters to Unity
+        # Send the randomly initialized parameters to Unity
         for field, value in sampled_inits.items():
             env_par_channel.set_float_parameter(field, value)
 
@@ -205,10 +205,11 @@ def main(cfg):
 
         # Send teacher's episode-initial output---thus user's episode-initial input
         opening_output = user.initiate_dialogue()
-        user_channel.send_string(
-            "Teacher", opening_output[0]["utterance"], opening_output[0]["pointing"]
-        )
-        logger.info(f"T> {TAB}{opening_output[0]['utterance']}")
+        for usr_in in opening_output:
+            user_channel.send_string(
+                "Teacher", usr_in["utterance"], usr_in["pointing"]
+            )
+            logger.info(f"T> {TAB}{usr_in['utterance']}")
 
         # Let the settings take effect and begin the episode
         env.reset()
@@ -290,22 +291,48 @@ def main(cfg):
                                     # Compute F1 scores for all categories known to agent with
                                     # few-shot binary classifiers available, then log average
                                     groundings = []
-                                    get_label = lambda c: agent.lt_mem.lexicon.codesheet[c] \
-                                        if agent.cfg.exp.player_type in ["bool", "demo"] \
-                                        else agent.lt_mem.lexicon.d2s[("pcls", c)][0][1]
-                                    for obj in agent.vision.scene.values():
-                                        ans_conc = obj["pred_cls"].argmax()
-                                        ans_prob = obj["pred_cls"][ans_conc]
-                                        ans_label = get_label(ans_conc) if ans_prob >= 0.35 else None
-                                        if cfg.exp.task == "build_truck_supertype" and \
-                                            cfg.exp.player_type in ["label", "full"]:
-                                            # Supertype as ground-truth label for base-difficulty task
-                                            # with languageful agents
-                                            gt_label = re.findall(r"t_(.*)_\d+$", obj["env_handle"])[0]
-                                        else:
-                                            # Subtype as ground-truth label otherwise
-                                            gt_label = obj["type_code"]
-                                        groundings.append((gt_label, ans_label))
+                                    color_concs = {
+                                        agent.lt_mem.lexicon.s2d[("a", col)][0][1]: col
+                                        for col in ["red", "green", "blue", "gold", "white"]
+                                    }
+                                    if cfg.exp.task == "inject_color":
+                                        # Tracking color classification accuracy scores
+                                        current_sample = user.current_episode_record["sampled_parts"]
+                                        get_label = lambda c: agent.lt_mem.lexicon.d2s[("pcls", c)][0][1]
+                                        for obj in agent.vision.scene.values():
+                                            scores = obj["pred_cls"].copy()
+                                            noncolor_inds = ~np.isin(np.arange(len(scores)), list(color_concs))
+                                            scores[noncolor_inds] = np.nan
+                                            ans_conc = np.nanargmax(scores)
+                                            ans_prob = scores[ans_conc]
+                                            ans_label = color_concs[ans_conc]
+                                            inst = re.findall(r"([td])_(.*)_(\d+)$", obj["env_handle"])[0]
+                                            inst = (inst[1], (inst[0], int(inst[2])))
+                                            gt_label = current_sample[inst][1]
+                                            if gt_label is not None:
+                                                # Only tracking colorable parts
+                                                groundings.append((gt_label, ans_label))
+                                    else:
+                                        # Tracking part type classification accuracy scores
+                                        get_label = lambda c: agent.lt_mem.lexicon.codesheet[c] \
+                                            if cfg.exp.player_type in ["bool", "demo"] \
+                                            else agent.lt_mem.lexicon.d2s[("pcls", c)][0][1]
+                                        for obj in agent.vision.scene.values():
+                                            scores = obj["pred_cls"].copy()
+                                            color_inds = np.isin(np.arange(len(scores)), list(color_concs))
+                                            scores[color_inds] = np.nan
+                                            ans_conc = np.nanargmax(scores)
+                                            ans_prob = scores[ans_conc]
+                                            ans_label = get_label(ans_conc) if ans_prob >= 0.35 else None
+                                            if cfg.exp.task == "build_truck_supertype" and \
+                                                cfg.exp.player_type in ["label", "full"]:
+                                                # Supertype as ground-truth label for base-difficulty task
+                                                # with languageful agents
+                                                gt_label = re.findall(r"t_(.*)_\d+$", obj["env_handle"])[0]
+                                            else:
+                                                # Subtype as ground-truth label otherwise
+                                                gt_label = obj["type_code"]
+                                            groundings.append((gt_label, ans_label))
                                     stats = defaultdict(lambda: { "tp": 0, "fp": 0, "fn": 0 })
                                     for gt, ans in groundings:
                                         if gt == ans:
@@ -451,6 +478,13 @@ def main(cfg):
             if terminate:
                 # End of episode, push record to history and break
                 user.episode_records.append(user.current_episode_record)
+
+                # Hard resetting existing environment parameter values with -1;
+                # any fields not overwritten in the next initialization step
+                # will be ignored
+                for field, value in sampled_inits.items():
+                    env_par_channel.set_float_parameter(field, -1)
+
                 break
             else:
                 new_env = False
@@ -462,10 +496,10 @@ def main(cfg):
             ep_metric = {}
             for metric, val in user.current_episode_record["metrics"].items():
                 ep_metric[metric] = val
-            for metric, val in agent.planner.execution_state["metrics"].items():
+            for metric, val in agent.planner.execution_state.get("metrics", {}).items():
                 ep_metric[metric] = val
             ep_metric["episode_length"] = len(
-                agent.planner.execution_state["action_history"]
+                agent.planner.execution_state.get("action_history", [])
             )
             ep_metric["mean_f1"] = sum(f1_scores.values()) / len(f1_scores)
             metrics.append(ep_metric)
@@ -477,21 +511,25 @@ def main(cfg):
     env.close()
     writer.close()
 
-    # Save evaluation metric curves to output dir
-    out_csv_fname = f"{exp_tag}.csv"
+    if cfg.exp.task == "inject_color":
+        # Just save the model
+        agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/color_pretrained.ckpt")
+    else:
+        # Save evaluation metric curves to output dir
+        out_csv_fname = f"{exp_tag}.csv"
 
-    with open(os.path.join(results_path, out_csv_fname), "w") as out_csv:
-        metric_types = [
-            "num_search_failure", "num_invalid_pickup",
-            "num_invalid_join", "num_planning_forfeiture",
-            "episode_discarded", "num_planning_attempts",
-            "num_collision_queries", "episode_length", "mean_f1"
-        ]
-        out_csv.write("episode," + ",".join(metric_types) + "\n")
-        for ep_i, ep_metric in enumerate(metrics):
-            metric_values = [str(ep_metric[m_type]) for m_type in metric_types]
-            metric_values = ",".join(metric_values)
-            out_csv.write(f"{ep_i+1},{metric_values}\n")
+        with open(os.path.join(results_path, out_csv_fname), "w") as out_csv:
+            metric_types = [
+                "num_search_failure", "num_invalid_pickup",
+                "num_invalid_join", "num_planning_forfeiture",
+                "episode_discarded", "num_planning_attempts",
+                "num_collision_queries", "episode_length", "mean_f1"
+            ]
+            out_csv.write("episode," + ",".join(metric_types) + "\n")
+            for ep_i, ep_metric in enumerate(metrics):
+                metric_values = [str(ep_metric[m_type]) for m_type in metric_types]
+                metric_values = ",".join(metric_values)
+                out_csv.write(f"{ep_i+1},{metric_values}\n")
 
 if __name__ == "__main__":
     main()

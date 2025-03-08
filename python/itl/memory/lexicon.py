@@ -34,11 +34,11 @@ class Lexicon:
 
         # Specify the initial inventory of lexical entries that each agent starts with
         self.add(("n", "color"), ("pcls", 0))
-        self.add(("n", "red"), ("pcls", 1))
-        self.add(("n", "green"), ("pcls", 2))
-        self.add(("n", "blue"), ("pcls", 3))
-        self.add(("n", "gold"), ("pcls", 4))
-        self.add(("n", "white"), ("pcls", 5))
+        self.add(("a", "red"), ("pcls", 1))
+        self.add(("a", "green"), ("pcls", 2))
+        self.add(("a", "blue"), ("pcls", 3))
+        self.add(("a", "gold"), ("pcls", 4))
+        self.add(("a", "white"), ("pcls", 5))
         self.add(("vs", "have"), ("prel", 0))
         self.add(("va", "build"), ("arel", 0))
         self.add(("va", "join"), ("arel", 1))

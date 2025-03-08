@@ -354,9 +354,8 @@ class ITLAgent:
                 ##          Recording ongoing task demonstration by user         ##
                 ###################################################################
 
-                # Set of statements made by user at this time step
+                # Set of statements made by user at this turn
                 _, user_statements = resolved_record[-1]
-                (_, _, _, user_last_statement), _, _ = user_statements[-1]
 
                 # If a statement provides labeled instance of the 'target concept'
                 # of a "Build X" task, consider demonstration is finished
@@ -364,7 +363,11 @@ class ITLAgent:
                 build_pred = f"{build_pred[0]}_{build_pred[1]}"
                 task_preds = {lit.name for lit in self.observed_demo[0]}
 
-                if ({lit.name for lit in user_last_statement} | {build_pred}) <= task_preds:
+                if any(
+                    ({lit.name for lit in user_last_statement} | {build_pred}) <= task_preds \
+                        and clause_info["mood"] == "."
+                    for (_, _, _, user_last_statement), _, clause_info in user_statements
+                ):
                     # End of demonstration recognized; collect & learn from demo data
                     user_annotations = [
                         (ti, contents) for ti, (spk, contents) in enumerate(resolved_record)
@@ -383,9 +386,6 @@ class ITLAgent:
 
                     # All parts of learning from demonstration take place here
                     self.comp_actions.analyze_demonstration(aligned_demo_data)
-
-                    # Acknowledge user's demonstration in a cool way
-                    self.planner.agenda.append(("utter_simple", ("OK.", { "mood": "." })))
 
                     # Back to normal execution mode
                     self.observed_demo = None
@@ -598,17 +598,30 @@ class ITLAgent:
 
             if num_resolved_items == 0:
                 # No resolvable agenda item any more
-                if self.lang.latest_input is not None:
-                    if self.execution_paused and len(return_val) == 0:
-                        # Entered (only) when agent, most likely to be language-less
-                        # player type, had to pause execution due to its imperfect
-                        # knowledge and thus needs to wait for user's partial demo.
-                        # Signal that it is observing user's actions, then break.
+
+                # Has user done/said anything this turn?
+                user_inputs = [
+                    (raw, spk)
+                    for parse, _, spk in zip(*self.lang.latest_input)
+                    for raw in parse["source"].values()
+                ] if self.lang.latest_input is not None else []
+                user_nl_inputs = [
+                    (raw, spk) for raw, spk in user_inputs
+                    if spk == "Teacher" and not raw.startswith("#")
+                ]
+
+                if len(user_inputs) > 0 and len(return_val) == 0:
+                    if self.execution_paused:
+                        # Entered (only) when agent, most likely to be language-
+                        # less player type, had to pause execution due to its
+                        # imperfect knowledge and thus needs to wait for user's
+                        # partial demo. Signal that it is observing user's actions.
                         return_val.append(("generate", ("# Observing", {})))
-                    else:
-                        # Break loop with no-op reaction (do nothing but don't
-                        # terminate the episode)
-                        return_val.append((None, None))
+
+                if len(user_nl_inputs) > 0 and len(return_val) == 0:
+                    # Break loop with cool acknowledgement to whichever NL
+                    # input from user so that user doesn't feel awkward
+                    return_val.append(("generate", ("OK.", {})))
 
                 # Break loop with return vals
                 break

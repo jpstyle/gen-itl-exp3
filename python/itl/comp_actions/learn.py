@@ -111,22 +111,51 @@ def identify_mismatch(agent, statement):
 
         match conc_type:
             case "pcls":
-                if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
-                    # New exemplar, mask & vector of the object should be added
+                if all(obj["exemplar_ind"] is None for obj in agent.vision.scene.values()):
+                    # Totally new visual scene; both scene and object should be added
+                    scene_id = None
+                    scene_img = agent.vision.scene[ex_obj]["scene_img"]
                     pointer = ((conc_type, conc_ind, pol), (True, 0))
                 else:
-                    # Exemplar present in storage, only add pointer
-                    ex_ind = agent.vision.scene[ex_obj]["exemplar_ind"]
-                    pointer = ((conc_type, conc_ind, pol), (False, ex_ind))
+                    # Scene already registered in XB, fetch scene id
+                    scene_id = next(
+                        obj["exemplar_ind"][0] for obj in agent.vision.scene.values()
+                        if obj["exemplar_ind"] is not None
+                    )
+                    scene_img = None
+                    if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
+                        # New object for existing scene, object should be added
+                        pointer = ((conc_type, conc_ind, pol), (True, 0))
+                    else:
+                        # Exemplar present in storage, only add pointer
+                        ex_ind = agent.vision.scene[ex_obj]["exemplar_ind"]
+
+                        # First check if this exemplar info is already present in XB
+                        # for this particular concept-polarity descriptor and thus
+                        # redundant
+                        ex_mem = agent.lt_mem.exemplars
+                        redundant = False
+                        match pol:
+                            case "pos":
+                                ex_exs = ex_mem.object_2d_pos[conc_type][conc_ind]
+                                redundant = ex_ind in ex_exs
+                            case "neg":
+                                ex_exs = ex_mem.object_2d_neg[conc_type][conc_ind]
+                                redundant = ex_ind in ex_exs
+                        if redundant:
+                            # No need to update XB, continue to next iteration
+                            continue
+                        else:
+                            pointer = ((conc_type, conc_ind, pol), (False, ex_ind))
 
                 added_xi = _add_scene_and_exemplar_2d(
-                    pointer,
-                    agent.vision.scene[ex_obj]["scene_img"],
+                    scene_id, scene_img, pointer,
                     agent.vision.scene[ex_obj]["pred_mask"],
                     agent.vision.scene[ex_obj]["vis_emb"],
                     agent.lt_mem.exemplars
                 )
                 if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
+                    assert added_xi is not None
                     agent.vision.scene[ex_obj]["exemplar_ind"] = added_xi
                 xb_updated = True
 
@@ -1360,31 +1389,30 @@ def posthoc_episode_analysis(agent):
         scene_img=scene_img, exemplars=exemplars, pointers=pointers
     )
 
-def _add_scene_and_exemplar_2d(pointer, scene_img, mask, f_vec, ex_mem):
+def _add_scene_and_exemplar_2d(scene_id, scene_img, pointer, mask, f_vec, ex_mem):
     """
     Helper method factored out for adding a scene, object and/or concept exemplar
     pointer
     """
     exemplar_spec, (is_new_obj, exemplar_id) = pointer
 
-    if is_new_obj:
-        # New scene img, new ID should be assigend (flagged as None). Second
-        # entry of the tuple `exemplar_id` is an integer index pointing to
-        # an item in the `exemplars` list defined below.
-        assert isinstance(exemplar_id, int)
-        scene_id = None
+    if scene_id is None:
+        # New scene img, image should be registered in XB and assigned a new ID
+        assert scene_img is not None
     else:
-        # Scene is already stored in memory, fetch the scene ID
-        assert isinstance(exemplar_id, tuple) and len(exemplar_id) == 2
-        scene_id = exemplar_id[0]
+        # Scene is already registered in XB
+        assert scene_img is None
 
     # Add concept exemplar to memory
-    scene_img = scene_img if scene_id is None else None
-        # Need to pass the scene image if not already stored in memory
-    exemplars = [{ "scene_id": scene_id, "mask": mask, "f_vec": f_vec }]
+    if is_new_obj:
+        # Scene object is new, store object info
+        exemplars = [{ "scene_id": scene_id, "mask": mask, "f_vec": f_vec }]
+    else:
+        # Already stored in XB, no need to store again
+        exemplars = []
     pointers = { exemplar_spec: [(is_new_obj, exemplar_id)] }
     added_inds = ex_mem.add_exs_2d(
         scene_img=scene_img, exemplars=exemplars, pointers=pointers
     )
 
-    return added_inds[0]
+    return added_inds[0] if is_new_obj else None
