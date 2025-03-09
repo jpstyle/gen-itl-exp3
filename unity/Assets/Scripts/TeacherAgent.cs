@@ -43,11 +43,10 @@ public class TeacherAgent : DialogueAgent
     {
         new Vector3(-0.36f, 0.76f, 0.24f),
         new Vector3(0.36f, 0.76f, 0.24f),
-        new Vector3(-0.48f, 0.76f, 0.48f),
-        new Vector3(-0.24f, 0.76f, 0.48f),
-        new Vector3(0f, 0.76f, 0.48f),
-        new Vector3(0.24f, 0.76f, 0.48f),
-        new Vector3(0.48f, 0.76f, 0.48f),
+        new Vector3(-0.42f, 0.76f, 0.48f),
+        new Vector3(-0.14f, 0.76f, 0.48f),
+        new Vector3(0.14f, 0.76f, 0.48f),
+        new Vector3(0.42f, 0.76f, 0.48f),
         new Vector3(-0.42f, 0.88f, 0.75f),
         new Vector3(-0.14f, 0.88f, 0.75f),
         new Vector3(0.14f, 0.88f, 0.75f),
@@ -115,6 +114,11 @@ public class TeacherAgent : DialogueAgent
             var groupType = partGroups[partSupertype];
 
             var paramValue = GetEnvParam(envParams, key);
+
+            if (paramValue == -1)
+                // Field hard reset and not overwritten for use in this episode; ignore
+                continue;
+
             if (identifier.StartsWith("t"))
             {
                 // Parts that make up desired target object

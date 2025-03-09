@@ -98,7 +98,7 @@ public class DialogueAgent : Agent
         leftOriginalPosition = leftHand.localPosition;
         rightOriginalPosition = rightHand.localPosition;
 
-        dialogueChannel.dialogueParticipants.Add(this);
+        dialogueChannel.dialogueParticipants[dialogueParticipantID] = this;
     }
 
     public override void OnEpisodeBegin()

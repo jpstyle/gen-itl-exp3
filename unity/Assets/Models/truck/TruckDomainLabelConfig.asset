@@ -22,68 +22,65 @@ MonoBehaviour:
   - label: flat_chassis_center
     id: 2
     hierarchyRelation: 0
-  - label: staircase_hemtt_chassis_center
+  - label: staircase_chassis_center
     id: 3
     hierarchyRelation: 0
-  - label: staircase_quad_chassis_center
+  - label: spares_chassis_center
     id: 4
     hierarchyRelation: 0
-  - label: spares_chassis_center
+  - label: chassis_front
     id: 5
     hierarchyRelation: 0
-  - label: chassis_front
+  - label: cabin
     id: 6
     hierarchyRelation: 0
-  - label: cabin
+  - label: hemtt_cabin
     id: 7
     hierarchyRelation: 0
-  - label: hemtt_cabin
+  - label: quad_cabin
     id: 8
     hierarchyRelation: 0
-  - label: quad_cabin
+  - label: load
     id: 9
     hierarchyRelation: 0
-  - label: load
+  - label: dumper
     id: 10
     hierarchyRelation: 0
-  - label: dumper
+  - label: load_empty
     id: 11
     hierarchyRelation: 0
-  - label: load_empty
+  - label: ladder
     id: 12
     hierarchyRelation: 0
-  - label: ladder
+  - label: rocket_launcher
     id: 13
     hierarchyRelation: 0
-  - label: rocket_launcher
+  - label: fender
     id: 14
     hierarchyRelation: 0
-  - label: fender
+  - label: normal_fender
     id: 15
     hierarchyRelation: 0
-  - label: normal_fender
+  - label: large_fender
     id: 16
     hierarchyRelation: 0
-  - label: large_fender
+  - label: wheel
     id: 17
     hierarchyRelation: 0
-  - label: wheel
+  - label: wheel_normal
     id: 18
     hierarchyRelation: 0
-  - label: wheel_normal
+  - label: wheel_large
     id: 19
     hierarchyRelation: 0
-  - label: wheel_large
+  - label: bolt
     id: 20
     hierarchyRelation: 0
-  - label: bolt
+  - label: subassembly
     id: 21
     hierarchyRelation: 0
-  - label: subassembly
-    id: 22
-    hierarchyRelation: 0
   - label: truck
-    id: 23
+    id: 22
     hierarchyRelation: 0
   autoAssignIds: 1
   startingLabelId: 0

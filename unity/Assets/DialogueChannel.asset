@@ -12,4 +12,3 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: befe1611c97d761c0b2172d93b97943b, type: 3}
   m_Name: DialogueChannel
   m_EditorClassIdentifier: 
-  dialogueParticipants: []

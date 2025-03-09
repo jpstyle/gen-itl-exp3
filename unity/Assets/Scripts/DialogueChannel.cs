@@ -8,7 +8,7 @@ public class DialogueChannel : ScriptableObject
     // Serves as inter-agent communication channel
 
     // List of dialogue participants
-    public List<DialogueAgent> dialogueParticipants;
+    public Dictionary<string, DialogueAgent> dialogueParticipants = new();
 
     public void CommitUtterance(
         string speaker, string inputString,
@@ -34,7 +34,7 @@ public class DialogueChannel : ScriptableObject
 
         // Broadcast the record to all audience members
         if (speaker == "System") return;        // Don't broadcast System 'messages'
-        foreach (var agt in dialogueParticipants)
+        foreach (var agt in dialogueParticipants.Values)
         {
             if (agt.dialogueParticipantID != speaker)
                 agt.incomingMsgBuffer.Enqueue(inputRecord);
