@@ -112,7 +112,7 @@ class SimulatedTeacher:
                 "num_invalid_join": 0,
                 "num_planning_forfeiture": 0,
                 "episode_discarded": False
-            }
+            } if target_task != "inject_color" else {}
         }
         self.target_task = target_task
 
@@ -163,7 +163,7 @@ class SimulatedTeacher:
 
             # Sampling with full consideration of constraints in domain knowledge;
             # add distractors specifically selected to allow mistakes
-            num_distractors = 4
+            num_distractors = 3
             constraints += [
                 ("exists", definiendum, (list(definiens["parts"].values()), []), True)
                 for definiendum, definiens in self.domain_knowledge["definitions"].items()
@@ -217,10 +217,24 @@ class SimulatedTeacher:
         self.react method below, which is invoked only when prompted by an agent
         reaction)
         """
-        return [{
-            "utterance": f"Build a {self.target_concept}.",
-            "pointing": {}
-        }]
+        if self.target_task == "inject_color":
+            # Color injection pre-task; provide all positive color labels
+            return [
+                {
+                    "utterance": f"This is {col}.",
+                    "pointing": {
+                        (0, 4): (f"/{inst[1][0]}_{inst[0]}_{inst[1][1]}", True)
+                    }
+                }
+                for inst, (_, col) in self.current_episode_record["sampled_parts"].items()
+                if col is not None
+            ]
+        else:
+            # Main task of building the truck supertype or a truck subtype
+            return [{
+                "utterance": f"Build a {self.target_concept}.",
+                "pointing": {}
+            }]
 
     def react(self, agent_reactions):
         """ Rule-based pattern matching for handling agent responses """
@@ -720,8 +734,8 @@ class SimulatedTeacher:
                 # Agent reported its originally intended join of two part instances
                 # which is based on incorrect grounding
                 for crange, inst_name in dem_refs.items():
-                    inst = re.findall(r"t_(.*)_(\d+)$", inst_name)[0]
-                    inst = (inst[0], int(inst[1]))
+                    inst = re.findall(r"([td])_(.*)_(\d+)$", inst_name)[0]
+                    inst = (inst[1], (inst[0], int(inst[2])))
                     reported_grounding = utt[slice(*crange)]
 
                     # Determine correctness according to the expected knowledge level
@@ -730,7 +744,7 @@ class SimulatedTeacher:
                     if self.target_task == "build_truck_supertype":
                         gt_type = inst[0]
                     else:
-                        gt_type = sampled_parts[inst]
+                        gt_type = sampled_parts[inst][0]
                     if reported_grounding == gt_type: continue
 
                     # For incorrect groundings results, provide appropriate corrective
@@ -1257,6 +1271,7 @@ class SimulatedTeacher:
                     compatible_parts = []
                     for instance, (subtype, _) in sampled_parts.items():
                         if instance[0] != action[1][0]: continue
+                        if instance[1][0] != "t": continue      # Don't use distractors
                         if action[1][0] == "wheel" and large_wheel_needed is not None:
                             if subtype != "large_wheel" and large_wheel_needed: continue
                             if subtype == "large_wheel" and not large_wheel_needed: continue
@@ -1324,7 +1339,7 @@ class SimulatedTeacher:
 
         # Tabulate and assign arbitrary indices to relevant entities (parts,
         # contact points)
-        all_nodes = [f"t_{supertype}_{inst}" for supertype, inst in sampled_parts]
+        all_nodes = [f"t_{supertype}_{inst[1]}" for supertype, inst in sampled_parts]
         part_names = dict(enumerate(set(supertype for supertype, _ in sampled_parts)))
         cp_names = set("/".join(cp) for cps in VALID_JOINS for cp in cps)
         cp_names = dict(enumerate(cp_names))
@@ -1333,7 +1348,10 @@ class SimulatedTeacher:
 
         # Pick a valid target structure while accounting for the current progress
         inst_pool = {
-            supertype: {f"t_{supertype}_{inst}" for _, inst in insts}
+            supertype: {
+                f"{inst[0]}_{supertype}_{inst[1]}"
+                for _, inst in insts if inst[0] == "t"
+            }
             for supertype, insts in groupby(
                 sorted(sampled_parts, key=lambda x: x[0]), key=lambda x: x[0]
             )

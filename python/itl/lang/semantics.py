@@ -33,11 +33,12 @@ class SemanticParser:
             #   3) "I will demonstrate a valid join."
             #   4) "# Action/Effect: {action_type}({parameters})"
             #   5) "This is (not) a {concept_type}."
-            #   6) "Pick up a {part_type}." or "Pick up the subassembly/{subassembly_type}."
-            #   7) "Join the {part_type_1} and the {part_type_2}."
-            #   8) "# Observing"
-            #   9) "What were you trying to do?"
-            #   10) "Stop." & "Continue."
+            #   6) "This is [red/green/blue/gold/white]."
+            #   7) "Pick up a {part_type}." or "Pick up the subassembly/{subassembly_type}."
+            #   8) "Join the {part_type_1} and the {part_type_2}."
+            #   9) "# Observing"
+            #   10) "What were you trying to do?"
+            #   11) "Stop." & "Continue."
             if re.match(r"Build a (.*)\.$", utt):
                 # Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -188,6 +189,32 @@ class SemanticParser:
                 }
 
                 source = { "e0": utt }
+
+            elif re.match(r"This is (red|green|blue|gold|white).", utt):
+                # Providing color concept labeling of the demonstratively referenced
+                # object instance, during color concept injection pre-task. Label
+                # always positive; colors assumed to be mutually exclusive, so other
+                # colors are inferred to be negative.
+                color_label = re.findall(r"This is (red|green|blue|gold|white).", utt)[0]
+                color_negatives = {"red", "green", "blue", "gold", "white"} - {color_label}
+
+                clauses = {
+                    "e0": (None, set(), [], [("a", color_label, ["x0"])])
+                } | {
+                    f"e{i+1}": (None, set(), [("a", col, [f"x{i+1}"])], [])
+                    for i, col in enumerate(color_negatives)
+                }       # Single positive label & inferred negative labels
+                referents = {}
+                for i in range(len(color_negatives)+1):
+                    referents |= {
+                        f"e{i}": { "mood": "." },
+                        f"x{i}": { "source_evt": f"e{i}", "dem_ref": (0, 4) }
+                    }
+
+                source = { "e0": utt } | {
+                    f"e{i+1}": "(Inference by domain knowledge)"
+                    for i in range(len(color_negatives))
+                }
 
             elif re.match(r"Pick up (.*)\.$", utt):
                 # Utterance has appearance of a command, but more like a NL
