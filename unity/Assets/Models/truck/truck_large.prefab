@@ -68,9 +68,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 3a611df269dde2ed0bb259fb39c2ea5a, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  licensedLabels: []
   uid: 
   isAtomic: 0
   isBogus: 0
+  closestChildren: []
 --- !u!114 &1858869606864586550
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1225,7 +1227,7 @@ PrefabInstance:
     m_Modifications:
     - target: {fileID: 2852883547059117394, guid: ce97a92100acb1a849a5eda3850c80f2, type: 3}
       propertyPath: m_Name
-      value: wheel_large
+      value: large_wheel
       objectReference: {fileID: 0}
     - target: {fileID: 3232646460368717800, guid: ce97a92100acb1a849a5eda3850c80f2, type: 3}
       propertyPath: m_RootOrder
@@ -1555,7 +1557,7 @@ PrefabInstance:
     m_Modifications:
     - target: {fileID: 2852883547059117394, guid: ce97a92100acb1a849a5eda3850c80f2, type: 3}
       propertyPath: m_Name
-      value: wheel_large
+      value: large_wheel
       objectReference: {fileID: 0}
     - target: {fileID: 3232646460368717800, guid: ce97a92100acb1a849a5eda3850c80f2, type: 3}
       propertyPath: m_RootOrder
@@ -1815,7 +1817,7 @@ PrefabInstance:
     m_Modifications:
     - target: {fileID: 2852883547059117394, guid: ce97a92100acb1a849a5eda3850c80f2, type: 3}
       propertyPath: m_Name
-      value: wheel_large
+      value: large_wheel
       objectReference: {fileID: 0}
     - target: {fileID: 3232646460368717800, guid: ce97a92100acb1a849a5eda3850c80f2, type: 3}
       propertyPath: m_RootOrder
@@ -2079,7 +2081,7 @@ PrefabInstance:
     m_Modifications:
     - target: {fileID: 2852883547059117394, guid: ce97a92100acb1a849a5eda3850c80f2, type: 3}
       propertyPath: m_Name
-      value: wheel_large
+      value: large_wheel
       objectReference: {fileID: 0}
     - target: {fileID: 3232646460368717800, guid: ce97a92100acb1a849a5eda3850c80f2, type: 3}
       propertyPath: m_RootOrder

@@ -91,9 +91,17 @@ PrefabInstance:
       propertyPath: m_LocalRotation.z
       value: 0
       objectReference: {fileID: 0}
+    - target: {fileID: 407865362947455328, guid: 27c4dcc7060fa1cb38c165e926b096fd, type: 3}
+      propertyPath: m_Name
+      value: normal_wheel_tire
+      objectReference: {fileID: 0}
     - target: {fileID: 919132149155446097, guid: 27c4dcc7060fa1cb38c165e926b096fd, type: 3}
       propertyPath: m_Name
       value: normal_wheel
+      objectReference: {fileID: 0}
+    - target: {fileID: 2411100466787102608, guid: 27c4dcc7060fa1cb38c165e926b096fd, type: 3}
+      propertyPath: m_Name
+      value: normal_wheel_rim
       objectReference: {fileID: 0}
     - target: {fileID: 3221723036782925899, guid: 27c4dcc7060fa1cb38c165e926b096fd, type: 3}
       propertyPath: 'm_Materials.Array.data[0]'
@@ -196,7 +204,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   labels:
-  - wheel_normal
+  - normal_wheel
   - wheel
   useAutoLabeling: 0
   autoLabelingSchemeType: 

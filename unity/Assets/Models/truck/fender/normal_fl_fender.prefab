@@ -172,7 +172,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   labels:
   - fender
-  - normal_fender
+  - normal_fl_fender
   useAutoLabeling: 0
   autoLabelingSchemeType: 
 --- !u!4 &9071447267408383178 stripped

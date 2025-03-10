@@ -58,29 +58,23 @@ MonoBehaviour:
   - label: fender
     id: 14
     hierarchyRelation: 0
-  - label: normal_fender
+  - label: wheel
     id: 15
     hierarchyRelation: 0
-  - label: large_fender
+  - label: normal_wheel
     id: 16
     hierarchyRelation: 0
-  - label: wheel
+  - label: large_wheel
     id: 17
     hierarchyRelation: 0
-  - label: wheel_normal
+  - label: bolt
     id: 18
     hierarchyRelation: 0
-  - label: wheel_large
+  - label: subassembly
     id: 19
     hierarchyRelation: 0
-  - label: bolt
-    id: 20
-    hierarchyRelation: 0
-  - label: subassembly
-    id: 21
-    hierarchyRelation: 0
   - label: truck
-    id: 22
+    id: 20
     hierarchyRelation: 0
   autoAssignIds: 1
   startingLabelId: 0

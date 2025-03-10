@@ -177,6 +177,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   labels:
   - fender
-  - normal_fender
+  - normal_bl_fender
   useAutoLabeling: 0
   autoLabelingSchemeType: 
