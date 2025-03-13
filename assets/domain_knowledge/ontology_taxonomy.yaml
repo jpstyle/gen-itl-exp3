@@ -39,40 +39,15 @@ chassis_center:
     subtypes:
         - flat_chassis_center
         - spares_chassis_center
-        - staircase_quad_chassis_center
-        - staircase_hemtt_chassis_center
-
-staircase_chassis_center:
-    relation_type: proper
-    subtypes:
-        - staircase_quad_chassis_center
-        - staircase_hemtt_chassis_center
+        - staircase_chassis_center
 
 fender:
     relation_type: proper
     subtypes:
-        - normal_fender
-        - large_fender
         - fl_fender
         - fr_fender
         - bl_fender
         - br_fender
-
-normal_fender:
-    relation_type: proper
-    subtypes:
-        - normal_fl_fender
-        - normal_fr_fender
-        - normal_bl_fender
-        - normal_br_fender
-
-large_fender:
-    relation_type: proper
-    subtypes:
-        - large_fl_fender
-        - large_fr_fender
-        - large_bl_fender
-        - large_br_fender
 
 fl_fender:
     relation_type: proper
@@ -107,34 +82,34 @@ wheel:
 fw_unit:
     relation_type: proper
     subtypes:
-        - front_left_fw_unit
-        - front_right_fw_unit
-        - back_left_fw_unit
-        - back_right_fw_unit
+        - fl_fw_unit
+        - fr_fw_unit
+        - bl_fw_unit
+        - br_fw_unit
 
-front_left_fw_unit:
+fl_fw_unit:
     relation_type: proper
     subtypes:
-        - normal_front_left_fw_unit
-        - large_front_left_fw_unit
+        - normal_fl_fw_unit
+        - large_fl_fw_unit
 
-front_right_fw_unit:
+fr_fw_unit:
     relation_type: proper
     subtypes:
-        - normal_front_right_fw_unit
-        - large_front_right_fw_unit
+        - normal_fr_fw_unit
+        - large_fr_fw_unit
 
-back_left_fw_unit:
+bl_fw_unit:
     relation_type: proper
     subtypes:
-        - normal_back_left_fw_unit
-        - large_back_left_fw_unit
+        - normal_bl_fw_unit
+        - large_bl_fw_unit
 
-back_right_fw_unit:
+br_fw_unit:
     relation_type: proper
     subtypes:
-        - normal_back_right_fw_unit
-        - large_back_right_fw_unit
+        - normal_br_fw_unit
+        - large_br_fw_unit
 
 color:
     relation_type: quasi

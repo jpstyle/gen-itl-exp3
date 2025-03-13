@@ -49,4 +49,5 @@ fire_truck:
     supertype: truck
     parts:
         load: ladder
+        chassis_center: staircase_chassis_center
     part_attributes: null

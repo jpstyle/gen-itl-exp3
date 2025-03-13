@@ -115,7 +115,7 @@ class Exemplars:
                 # Induce binary decision boundary by fitting a classifier and
                 # update
                 # bin_clf = SVC(C=1000, probability=True)
-                bin_clf = KNeighborsClassifier(n_neighbors=min(len(X), 5), weights="distance")
+                bin_clf = KNeighborsClassifier(n_neighbors=min(len(X), 8), weights="distance")
                 bin_clf.fit(X, y)
                 self.binary_classifiers_2d[conc_type][conc_ind] = bin_clf
 

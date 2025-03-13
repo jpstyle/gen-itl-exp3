@@ -17,49 +17,45 @@
 #                 constraints only)
 
 truck_front:
-    exists: []
     forall:
         - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
 
 truck_back:
-    exists: []
     forall:
         - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
 
 fw_unit:
-    exists: []
     forall:
         - [["large_fender", "normal_wheel"], null]
 
 truck:
-    exists: []
     forall:
         - [["fender", "chassis_center"], [["_same_color", false, [0, 1]]]]
         - [["normal_wheel", "large_wheel"], null]
-        - [["quad_cabin", "staircase_hemtt_chassis_center"], null]
-        - [["hemtt_cabin", "staircase_quad_chassis_center"], null]
 
 base_truck:
-    exists: []
     forall:
-        - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+        - [["cabin", "chassis_center"], [["_same_color", false, [0, 1]]]]
+        - [["staircase_chassis_center"], null]
 
 missile_truck:
     exists:
-        - [["colored_part"], [["green", true, [0]]]]
+        - [["fender"], [["green", true, [0]]]]
     forall:
-        - [["wheel"], [["large_wheel", true, [0]]]]
+        - [["cabin", "chassis_center"], [["_same_color", true, [0, 1]]]]
 
 dump_truck:
     forall:
-        - [["fender"], [["gold", true, [0]]]]
+        - [["colored_part"], [["gold", false, [0]]]]
+        - [["wheel"], [["normal_wheel", true, [0]]]]
 
-# container_truck:
-#     exists:
-#         - [["fender"], [["double_fender", true, [0]]]]
+container_truck:
+    forall:
+        - [["colored_part"], [["blue", false, [0]]]]
+        - [["wheel"], [["large_wheel", true, [0]]]]
 
 fire_truck:
     exists:
-        - [["staircase_chassis_center"], []]
+        - [["colored_part"], [["white", true, [0]]]]
     forall:
         - [["fender"], [["red", true, [0]]]]

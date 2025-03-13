@@ -11,7 +11,7 @@ from itertools import product, combinations, groupby
 
 import yaml
 import networkx as nx
-from clingo import Control, Function
+from clingo import Control, Function, Number
 
 from python.itl.comp_actions.interact import _divide_and_conquer
 
@@ -120,8 +120,8 @@ class SimulatedTeacher:
         # infeasible part combinations...
         constraints = [
             ("forall", "truck", (["spares_chassis_center", "dumper"], None), False),
-            ("forall", "truck", (["staircase_chassis_center", "dumper"], None), False),
-            ("forall", "truck", (["staircase_chassis_center", "rocket_launcher"], None), False)
+            ("forall", "truck", (["spares_chassis_center", "rocket_launcher"], None), False),
+            ("forall", "truck", (["staircase_chassis_center", "dumper"], None), False)
         ]
 
         if target_task == "build_truck_supertype":
@@ -136,7 +136,7 @@ class SimulatedTeacher:
                 # First sampling, sample uniformly across truck subtypes (since naive
                 # samples per ASP models are not evenly distributed)
                 sampled_truck_subtype = random.sample([
-                    "base_truck", "dump_truck", "missile_truck", "fire_truck"
+                    "base_truck", "dump_truck", "container_truck", "missile_truck", "fire_truck"
                 ], 1)[0]
             self.target_concept = "truck"       # Always denoted as 'truck' in any case
 
@@ -148,7 +148,7 @@ class SimulatedTeacher:
                 for definiendum, definiens in self.domain_knowledge["definitions"].items()
             ] + [
                 ("forall", "truck", (["normal_wheel", "large_wheel"], None), False),
-            ]   # For the easier difficulty, keep the sizes of the wheels identical
+            ]   # Keep the sizes of the wheels identical
 
         else:
             assert target_task in ["build_truck_subtype", "inject_color"]
@@ -157,7 +157,7 @@ class SimulatedTeacher:
             # along with rules and constraints that influence trucks in general
             # or specific truck subtypes
             sampled_truck_subtype = random.sample([
-                "base_truck", "dump_truck", "missile_truck", "fire_truck"
+                "base_truck", "dump_truck", "container_truck", "missile_truck", "fire_truck"
             ], 1)[0]
             self.target_concept = sampled_truck_subtype
 
@@ -187,23 +187,22 @@ class SimulatedTeacher:
             # starting seed
 
         # Extract and store sampled part subtype info for the current scene
-        sampled_parts = defaultdict(lambda: (None, None))
-        for spec, subtype_id in sampled_inits.items():
-            supertype, attribute_type, obj_id = spec.split("/")
+        sampled_parts = defaultdict(dict)
+        for field, value in sampled_inits.items():
+            supertype, obj_id, attribute_type = field.split("/")
             obj_id = re.findall(r"([td])(\d+)$", obj_id)[0]
             obj_id = (obj_id[0], int(obj_id[1]))
 
+            inst_id = (supertype, obj_id)
             match attribute_type:
                 case "type":
-                    sampled_parts[(supertype, obj_id)] = (
-                        all_subtypes[supertype][subtype_id],
-                        sampled_parts[(supertype, obj_id)][1]
-                    )
+                    sampled_parts[inst_id]["type"] = \
+                        all_subtypes[supertype][value]
                 case "color":
-                    sampled_parts[(supertype, obj_id)] = (
-                        sampled_parts[(supertype, obj_id)][0],
-                        all_subtypes["color"][subtype_id]
-                    )
+                    sampled_parts[inst_id]["color"] = \
+                        all_subtypes["color"][value]
+                case "viol":
+                    sampled_parts[inst_id]["violated_constraint"] = value
 
         self.current_episode_record["sampled_parts"] = dict(sampled_parts)
 
@@ -226,8 +225,8 @@ class SimulatedTeacher:
                         (0, 4): (f"/{inst[1][0]}_{inst[0]}_{inst[1][1]}", True)
                     }
                 }
-                for inst, (_, col) in self.current_episode_record["sampled_parts"].items()
-                if col is not None
+                for inst, info in self.current_episode_record["sampled_parts"].items()
+                if (col := info.get("color")) is not None
             ]
         else:
             # Main task of building the truck supertype or a truck subtype
@@ -698,8 +697,8 @@ class SimulatedTeacher:
                 # been used yet (i.e., still on the tabletop)
                 matching_insts = [
                     f"t_{supertype}_{inst_id[1]}"
-                    for (supertype, inst_id), (subtype, _) in sampled_parts.items()
-                    if queried_type == supertype or queried_type == subtype
+                    for (supertype, inst_id), info in sampled_parts.items()
+                    if queried_type == supertype or queried_type == info["type"]
                 ]
                 consumed_insts = [
                     inst for sa_graph in subassems.values() for inst in sa_graph
@@ -744,7 +743,7 @@ class SimulatedTeacher:
                     if self.target_task == "build_truck_supertype":
                         gt_type = inst[0]
                     else:
-                        gt_type = sampled_parts[inst][0]
+                        gt_type = sampled_parts[inst]["type"]
                     if reported_grounding == gt_type: continue
 
                     # For incorrect groundings results, provide appropriate corrective
@@ -869,8 +868,8 @@ class SimulatedTeacher:
                 for attr, pol, arg_inds in attributes:
                     if attr == "_same_color":
                         assert len(arg_inds) == 2
-                        piece_str = f"hasColor(O{arg_inds[0]}, C0), "
-                        piece_str += f"hasColor(O{arg_inds[1]}, C1), "
+                        piece_str = f"hasColor(O{arg_inds[0]},C0), "
+                        piece_str += f"hasColor(O{arg_inds[1]},C1), "
                         piece_str += "C0 = C1" if pol else "C0 != C1"
                     else:
                         piece_args_str = ", ".join(f"O{a}" for a in arg_inds)
@@ -898,16 +897,12 @@ class SimulatedTeacher:
         base_prg_str += "rule_violated(R) :- rule(R), exists_applicable(R), not case_found(R).\n"
         base_prg_str += "rule_violated(R) :- rule(R), forall_applicable(R), exception_found(R).\n"
 
-        # Control the number of rules to be violated (0 or 1) by an external query atom
+        # Control the number of rules to be violated (0) by an external query atom
+        base_prg_str += "#external violate_none.\n"
         base_prg_str += ":- violate_none, rule_violated(R).\n"
-        base_prg_str += ":- violate_one, not 1{ rule_violated(R) : rule(R) }1.\n"
 
         # Finally add a grounded instance representing the whole truck sample
         base_prg_str += f"{goal_object}(o).\n"
-
-        # Program fragment defining the external control atoms
-        base_prg_str += "#external violate_none.\n"
-        base_prg_str += "#external violate_one.\n"
 
         ctl = Control(["--warn=none"])
         ctl.configuration.solve.models = 0
@@ -951,15 +946,27 @@ class SimulatedTeacher:
 
         if num_distractors > 0:
             # For distractors, we want to sample additional part groups that violate
-            # exactly one of the constraints
-            ctl.assign_external(Function("violate_none", []), False)
-            ctl.assign_external(Function("violate_one", []), True)
+            # exactly one of the constraints. Sampling is on rule-basis; i.e., we
+            # first select a rule to violate with resampling, then select among
+            # possible rule-violating models.
+            ctl.release_external(Function("violate_none", []))
+            ctl.cleanup()
 
-            # Part groups to consider resampling as distractors
+            # Additional program fragment for controlling the number of rules to be
+            # violated (1) by an external query atom
+            resample_prg_str = "#external violate_one(R) : rule(R).\n"
+            resample_prg_str += ":- violate_one(R), not rule_violated(R).\n"
+            resample_prg_str += ":- violate_one(_), not 1{ rule_violated(R) : rule(R) }1.\n"
+
+            # Part groups to consider resampling as distractors; types may not
+            # be mutually exclusive as with the case of fenders
             part_groups_by_type = [
                 [["cabin"]],
                 [["load"]],
                 [["chassis_center"]],
+                [["wheel"]],
+                [["fl_fender", "fr_fender"]],
+                [["bl_fender", "br_fender"]],
                 [["fl_fender", "fr_fender", "bl_fender", "br_fender"], ["wheel"]]
             ]
             part_groups_by_obj = [
@@ -969,126 +976,164 @@ class SimulatedTeacher:
                 ]
                 for part_supertypes in part_groups_by_type
             ]
+            # Track which part groups overlap with which other groups by type
+            as_flat_set = lambda groups: set.union(*[set(group) for group in groups])
+            part_group_overlaps = {
+                (gi, gj) for (gi, groups_gi), (gj, groups_gj) in combinations(
+                    enumerate(part_groups_by_type), 2
+                )
+                if len(as_flat_set(groups_gi) & as_flat_set(groups_gj)) > 0
+            }
+            part_group_overlaps |= {(gj, gi) for gi, gj in part_group_overlaps}
+            part_group_overlaps = {
+                gi: {gj for _, gj in gjs} for gi, gjs in groupby(
+                    sorted(part_group_overlaps), key=lambda x: x[0]
+                )
+            }
+
+            # One and only one of the part groups may be resampled as distractor
+            # to violate one and only one constraint. If a group is selected to be
+            # resampled, none of the already sampled spec should be sampled again.
+            # If a group is not selected and thus specified to be 'preserved', all
+            # of the already sampled specs should be reproduced, except those belonging
+            # to the resampled group
+            resample_prg_str += "#external resample_group(G) : part_group(G).\n"
+            resample_prg_str += "{ reproduce_slot_with(S,O) } :- may_fill(O,S).\n"
+            resample_prg_str += "resample_slot(S) :- " \
+                "part_slot(S), slot_group(S,G), resample_group(G).\n"
+            resample_prg_str += "reproduce_slot(S) :- " \
+                "part_slot(S), not resample_slot(S).\n"
+            resample_prg_str += ":- resample_slot(S), may_fill(_,S).\n"
+            resample_prg_str += \
+                ":- reproduce_slot(S), #count { O : reproduce_slot_with(S,O) } != 1.\n"
+            resample_prg_str += \
+                ":- reproduce_slot_with(S1,O), reproduce_slot_with(S2,O), S1 != S2.\n"
+
+            # Recognizing each 'part slot' that could be replaced with a part
+            # with newly sampled spec; each slot is identified with the fname
+            sample_slots = {
+                obj for groups in part_groups_by_obj
+                for group in groups
+                for obj in group
+            }
+            for slot in sample_slots:
+                resample_prg_str += f"part_slot({slot}).\n"
+
+            # Encoding how the identical resampling would be achieved based on the specs
+            # of the parts already sampled as 'ground-truth'
             part_specs = {
                 obj: (tgt_parts_by_fname[obj][0], tgt_colors_by_fname.get(obj))
                 for groups in part_groups_by_obj
                 for group in groups
                 for obj in group
             }
+            for gi, groups in enumerate(part_groups_by_obj):
+                resample_prg_str += f"part_group({gi}).\n"
+                for group in groups:
+                    for obj in group:
+                        resample_prg_str += f"slot_group({obj},{gi}).\n"
+                        part_type_str = f"{part_specs[obj][0]}(O)"
+                        part_color_str = "" if part_specs[obj][1] is None \
+                            else f", hasColor(O,{part_specs[obj][1]})"
+                        resample_prg_str += \
+                            f"may_fill(O,{obj}) :- {part_type_str}{part_color_str}.\n"
+
+            ctl.add("resample", [], resample_prg_str)
+            ctl.ground([("resample", [])])
 
             # Remove already sampled parts in this group so that exact same part
             # specs (part type and color if applicable) cannot be sampled again,
             # while fixing all other parts as identical; implement as additional
             # clingo program fragment
             sampled_distractor_groups = []
-            dtr_parts_by_fname = {}; dtr_colors_by_fname = {}
+            sampled_distractors = {}
 
-            i = 0; sample_pool = list(range(len(part_groups_by_obj)))
+            # Get list of constraints that are in action in the sampled model so
+            # that we can sample from them one by one
+            model_predicates = {atm.name for atm in sampled_model}
+            relevant_constraint_pool = [
+                ci for ci, (_, scope_class, _, can_violate) in enumerate(constraints)
+                if can_violate and scope_class in model_predicates
+            ]
+            part_group_pool = list(range(len(part_groups_by_type)))
             while len(sampled_distractor_groups) < num_distractors:
-                if len(sample_pool) == 0:
+                if len(relevant_constraint_pool) == 0:
                     # No more distractor sampling possible, terminate here
                     break
 
-                gi = random.sample(sample_pool, 1)[0]
-                sample_pool.remove(gi)
+                ci = random.sample(relevant_constraint_pool, 1)[0]
+                relevant_constraint_pool.remove(ci)
 
-                # Program fragment representing additional temporary constraints
-                alt_prg_str = f"#external active_{i}.\n"
+                # Specify the sole constraint to violate
+                ctl.assign_external(Function("violate_one", [Number(ci)]), True)
 
-                # Ban current specs of the resampling target group
-                for group in part_groups_by_obj[gi]:
-                    for obj in group:
-                        if tgt_parts_by_fname[obj][1] == "wheel":
-                            # ... yet allow resampling of wheels, many of which could
-                            # be needed
-                            continue
+                # Test every part group to see if a distractor (group) can be
+                # sampled to violate only the particular constraint selected
+                samples_per_group = {}
+                for gi in part_group_pool:
+                    ctl.assign_external(Function("resample_group", [Number(gi)]), True)
 
-                        part_type_str = f"{part_specs[obj][0]}(O)"
-                        part_color_str = "" if part_specs[obj][1] is None \
-                            else f", hasColor(O, {part_specs[obj][1]})"
-                        alt_prg_str += f":- {part_type_str}{part_color_str}, active_{i}.\n"
+                    # Obtain up to 1k samples; there may be none, in which case
+                    # no resampling from the part group can violate the constraint
+                    samples = set()
+                    with ctl.solve(yield_=True) as solve_gen:
+                        models_inspected = 0
+                        for m in solve_gen:
+                            if models_inspected > 100: break
+                            models_inspected += 1
 
-                # Enforce current specs for the remainder
-                piece_strs = []; oi = 0
-                for gj, groups in enumerate(part_groups_by_obj):
-                    if gi == gj: continue
+                            # Extract the atomic parts and colors (where applicable)
+                            # sampled; part type first, then color
+                            types_to_collect = sum(part_groups_by_type[gi], [])
+                            sample = {}
+                            for atm in m.symbols(atoms=True):
+                                if atm.name != "atomic": continue
+                                fname = atm.arguments[0].name
+                                part_subtype = atm.arguments[1].name
+                                part_supertype = all_subtypes_inv_map[part_subtype]
+                                if part_supertype not in types_to_collect: continue
+                                sample[fname] = (part_subtype, None)
+                            for atm in m.symbols(atoms=True):
+                                if atm.name != "hasColor": continue
+                                fname = atm.arguments[0].name
+                                color = atm.arguments[1].name
+                                if fname not in sample: continue
+                                sample[fname] = (sample[fname][0], color)
+                            samples.add(frozenset(
+                                (fname, part_subtype, color)
+                                for fname, (part_subtype, color) in sample.items()
+                            ))
 
-                    for group in groups:
-                        for obj in group:
-                            part_type_str = f"{part_specs[obj][0]}(O{oi})"
-                            part_color_str = "" if part_specs[obj][1] is None \
-                                else f", hasColor(O{oi}, {part_specs[obj][1]})"
+                    if len(samples) > 0:
+                        samples_per_group[gi] = samples
 
-                            piece_strs.append(part_type_str + part_color_str)
-                            oi += 1
+                    ctl.assign_external(Function("resample_group", [Number(gi)]), False)
 
-                piece_strs += [f"O{oi} != O{oj}" for oi, oj in combinations(range(oi), 2)]
+                # Undo the sole rule violation constraint
+                ctl.release_external(Function("violate_one", [Number(ci)]))
+                ctl.cleanup()
 
-                alt_prg_str += f"remainder_preserved_{i} :- "
-                alt_prg_str += ", ".join(piece_strs)
-                alt_prg_str += f", active_{i}.\n"
-
-                alt_prg_str += f":- not remainder_preserved_{i}, active_{i}.\n"
-
-                # Manage solver control by appropriate processing of external atoms and
-                # grounding
-                if i > 0:
-                    ctl.release_external(Function(f"active_{i-1}", []))
-                    ctl.cleanup()
-                ctl.add(f"distractor_sampling_{i}", [], alt_prg_str)
-                ctl.ground([(f"distractor_sampling_{i}", [])])
-                ctl.assign_external(Function(f"active_{i}", []), True)
-
-                models = []
-                with ctl.solve(yield_=True) as solve_gen:
-                    for m in solve_gen:
-                        if len(models) > 1000: break
-                        models.append(m.symbols(atoms=True))
-
-                if len(models) == 0:
-                    # No possible sampling of distractor that violate exactly one rule
-                    i += 1
-                    continue
-
-                # Some rules have more violating distractor samples than others; sample
-                # by rule-basis, not model-basis
-                violated_constraints = [
-                    [atm.arguments[0].number for atm in m if atm.name == "rule_violated"][0]
-                    for m in models
-                ]
-                model_inds_by_constraint = {
-                    ci: [mi for mi, cj in enumerate(violated_constraints) if ci==cj]
-                    for ci in range(len(constraints))
-                }
-                sampled_violated_constraint = random.sample([
-                    ci for ci, (_, _, _, can_violate) in enumerate(constraints)
-                    if can_violate and len(model_inds_by_constraint[ci]) > 0
-                ], 1)[0]
-                sampled_model = random.sample(
-                    model_inds_by_constraint[sampled_violated_constraint]
-                , 1)[0]
-                sampled_model = models[sampled_model]
-
-                # Filter out unnecessary atoms, to extract atomic parts and colors sampled
-                types_to_collect = sum(part_groups_by_type[gi], [])
-                for atm in sampled_model:
-                    # Collate part types in resampled group
-                    if atm.name == "atomic":
-                        part_supertype = all_subtypes_inv_map[atm.arguments[1].name]
-                        if part_supertype in types_to_collect:
-                            dtr_parts_by_fname[atm.arguments[0].name] = (
-                                atm.arguments[1].name, part_supertype
-                            )
-                for atm in sampled_model:
-                    # Then fetch matching colors for colorable parts
-                    if atm.name == "hasColor" and atm.arguments[0].name in dtr_parts_by_fname:
-                        dtr_colors_by_fname[atm.arguments[0].name] = atm.arguments[1].name
-
-                i += 1
-                sampled_distractor_groups += part_groups_by_type[gi]
+                if len(samples_per_group) > 0:
+                    # Valid samples found. First sample a part group, then remove
+                    # self and any overlapping part groups from the pool
+                    gi_sampled = random.sample(sorted(samples_per_group), 1)[0]
+                    overlapping_groups = part_group_overlaps.get(gi_sampled, set())
+                    part_group_pool = [
+                        gi for gi in part_group_pool
+                        if gi != gi_sampled and gi not in overlapping_groups
+                    ]
+                    sampled_distractor_groups += part_groups_by_type[gi_sampled]
+                    # Finally, randomly select a sample for the group to use as
+                    # distractor
+                    parts_sampled = random.sample(samples_per_group[gi_sampled], 1)[0]
+                    sampled_distractors.update({
+                        fname: (subtype, color, ci)
+                        for fname, subtype, color in parts_sampled
+                    })
 
             dtr_objs_grouped_by_supertype = defaultdict(list)
-            for obj, (_, part_supertype) in dtr_parts_by_fname.items():
+            for obj, (part_subtype, _, _) in sampled_distractors.items():
+                part_supertype = all_subtypes_inv_map[part_subtype]
                 dtr_objs_grouped_by_supertype[part_supertype].append(obj)
             dtr_objs_grouped_by_supertype = dict(dtr_objs_grouped_by_supertype)
 
@@ -1096,25 +1141,35 @@ class SimulatedTeacher:
         sampled_inits = {}
         for obj, (part_subtype, part_supertype) in tgt_parts_by_fname.items():
             oi = tgt_objs_grouped_by_supertype[part_supertype].index(obj)
-            sampled_inits[f"{part_supertype}/type/t{oi}"] = \
-                all_subtypes[part_supertype].index(part_subtype)
+            subtype_ind = all_subtypes[part_supertype].index(part_subtype)
+            color_ind = all_subtypes["color"].index(tgt_colors_by_fname[obj]) \
+                if obj in tgt_colors_by_fname else None
 
-            if obj in tgt_colors_by_fname:
-                sampled_inits[f"{part_supertype}/color/t{oi}"] = \
-                    all_subtypes["color"].index(tgt_colors_by_fname[obj])
+            sampled_inits[f"{part_supertype}/t{oi}/type"] = subtype_ind
+            if color_ind is not None:
+                sampled_inits[f"{part_supertype}/t{oi}/color"] = color_ind
 
         if num_distractors > 0:
-            for i in range(min(num_distractors, len(sampled_distractor_groups))):
+            i = 0; num_added_distractor_groups = 0
+            while num_added_distractor_groups < num_distractors:
+                if i >= len(sampled_distractor_groups): break       # Seen all
                 dtr_group = sampled_distractor_groups[i]
+                i += 1
+
                 for part_supertype in dtr_group:
                     for oi, obj in enumerate(dtr_objs_grouped_by_supertype[part_supertype]):
-                        part_subtype = dtr_parts_by_fname[obj][0]
-                        sampled_inits[f"{part_supertype}/type/d{oi}"] = \
-                            all_subtypes[part_supertype].index(part_subtype)
+                        part_subtype, color, ci = sampled_distractors[obj]
+                        violated_constraint = constraints[ci]
+                        subtype_ind = all_subtypes[part_supertype].index(part_subtype)
+                        color_ind = all_subtypes["color"].index(color) \
+                            if color is not None else None
 
-                        if obj in dtr_colors_by_fname:
-                            sampled_inits[f"{part_supertype}/color/d{oi}"] = \
-                                all_subtypes["color"].index(dtr_colors_by_fname[obj])
+                        sampled_inits[f"{part_supertype}/d{oi}/type"] = subtype_ind
+                        if color_ind is not None:
+                            sampled_inits[f"{part_supertype}/d{oi}/color"] = color_ind
+                        sampled_inits[f"{part_supertype}/d{oi}/viol"] = violated_constraint
+
+                num_added_distractor_groups += 1
 
         return sampled_inits
 
@@ -1258,7 +1313,7 @@ class SimulatedTeacher:
             # For manual check of fender-wheel compatibility...
             if result.endswith("_fw_unit"):
                 obj_id = (f"{result[:2]}_fender", ("t", 0))
-                large_wheel_needed = sampled_parts[obj_id][0].startswith("large")
+                large_wheel_needed = sampled_parts[obj_id]["type"].startswith("large")
             else:
                 large_wheel_needed = None
 
@@ -1269,12 +1324,12 @@ class SimulatedTeacher:
             for action in act_seq:
                 if action[0].startswith("pick_up") and action[1][0] in atomic_supertypes:
                     compatible_parts = []
-                    for instance, (subtype, _) in sampled_parts.items():
+                    for instance, data in sampled_parts.items():
                         if instance[0] != action[1][0]: continue
                         if instance[1][0] != "t": continue      # Don't use distractors
                         if action[1][0] == "wheel" and large_wheel_needed is not None:
-                            if subtype != "large_wheel" and large_wheel_needed: continue
-                            if subtype == "large_wheel" and not large_wheel_needed: continue
+                            if data["type"] != "large_wheel" and large_wheel_needed: continue
+                            if data["type"] == "large_wheel" and not large_wheel_needed: continue
 
                         compatible_parts.append(instance)
 
@@ -1283,7 +1338,7 @@ class SimulatedTeacher:
                         action[0],
                         (f"{inst_id[0]}_{inst_supertype}_{inst_id[1]}", action[1][1])
                     )
-                    subtype, _ = sampled_parts.pop((inst_supertype, inst_id))
+                    subtype = sampled_parts.pop((inst_supertype, inst_id))["type"]
 
                     plan.append(grounded_action)
 

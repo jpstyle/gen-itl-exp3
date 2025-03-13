@@ -9,7 +9,7 @@
 part_groups:
     0: [cabin, quad_cabin, hemtt_cabin]
     1: [chassis_front]
-    2: [chassis_center, flat_chassis_center, spares_chassis_center, staircase_quad_chassis_center, staircase_hemtt_chassis_center]
+    2: [chassis_center, flat_chassis_center, spares_chassis_center, staircase_chassis_center]
     3: [chassis_back]
     4: [load, platform, dumper, ladder, rocket_launcher]
     5: [fl_fender, normal_fl_fender, large_fl_fender]

@@ -20,61 +20,61 @@ truck_front:
     parts:
         chassis_front: 1
         cabin: 1
-        front_left_fw_unit: 1
-        front_right_fw_unit: 1
+        fl_fw_unit: 1
+        fr_fw_unit: 1
         bolt: 2
 
 truck_back:
     parts:
         chassis_back: 1
         load: 1
-        back_left_fw_unit: 1
-        back_right_fw_unit: 1
+        bl_fw_unit: 1
+        br_fw_unit: 1
         bolt: 1
 
-normal_front_left_fw_unit:
+normal_fl_fw_unit:
     parts:
         normal_fl_fender: 1
         normal_wheel: 1
         bolt: 1
 
-normal_front_right_fw_unit:
+normal_fr_fw_unit:
     parts:
         normal_fr_fender: 1
         normal_wheel: 1
         bolt: 1
 
-normal_back_left_fw_unit:
+normal_bl_fw_unit:
     parts:
         normal_bl_fender: 1
         normal_wheel: 1
         bolt: 1
 
-normal_back_right_fw_unit:
+normal_br_fw_unit:
     parts:
         normal_br_fender: 1
         normal_wheel: 1
         bolt: 1
 
-large_front_left_fw_unit:
+large_fl_fw_unit:
     parts:
         large_fl_fender: 1
         large_wheel: 1
         bolt: 1
 
-large_front_right_fw_unit:
+large_fr_fw_unit:
     parts:
         large_fr_fender: 1
         large_wheel: 1
         bolt: 1
 
-large_back_left_fw_unit:
+large_bl_fw_unit:
     parts:
         large_bl_fender: 1
         large_wheel: 1
         bolt: 1
 
-large_back_right_fw_unit:
+large_br_fw_unit:
     parts:
         large_br_fender: 1
         large_wheel: 1

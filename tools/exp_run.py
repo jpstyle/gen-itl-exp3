@@ -181,6 +181,7 @@ def main(cfg):
 
         # Send the randomly initialized parameters to Unity
         for field, value in sampled_inits.items():
+            if "viol" in field: continue
             env_par_channel.set_float_parameter(field, value)
 
         if target_task == "build_truck_supertype":
@@ -188,7 +189,7 @@ def main(cfg):
             # the remaining episodes (except color attributes)
             occurring_subtypes = {
                 (f_spl[0], value) for field, value in sampled_inits.items()
-                if (f_spl := field.split("/"))[1] == "type"
+                if (f_spl := field.split("/"))[2] == "type"
             }
             occurring_subtypes = groupby(sorted(occurring_subtypes), lambda x: x[0])
             for supertype, sampled_subtypes in occurring_subtypes:
@@ -308,7 +309,7 @@ def main(cfg):
                                             ans_label = color_concs[ans_conc]
                                             inst = re.findall(r"([td])_(.*)_(\d+)$", obj["env_handle"])[0]
                                             inst = (inst[1], (inst[0], int(inst[2])))
-                                            gt_label = current_sample[inst][1]
+                                            gt_label = current_sample[inst].get("color")
                                             if gt_label is not None:
                                                 # Only tracking colorable parts
                                                 groundings.append((gt_label, ans_label))
@@ -483,6 +484,7 @@ def main(cfg):
                 # any fields not overwritten in the next initialization step
                 # will be ignored
                 for field, value in sampled_inits.items():
+                    if "viol" in field: continue
                     env_par_channel.set_float_parameter(field, -1)
 
                 break
