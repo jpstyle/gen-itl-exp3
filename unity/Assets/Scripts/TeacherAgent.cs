@@ -258,18 +258,18 @@ public class TeacherAgent : DialogueAgent
                     InstantiateFenders(
                         new List<int>
                         {
-                            distractorTypes[("fl_fender", "d0")],
-                            distractorTypes[("fr_fender", "d0")],
-                            distractorTypes[("bl_fender", "d0")],
-                            distractorTypes[("br_fender", "d0")]
+                            distractorTypes.GetValueOrDefault(("fl_fender", "d0"), -1),
+                            distractorTypes.GetValueOrDefault(("fr_fender", "d0"), -1),
+                            distractorTypes.GetValueOrDefault(("bl_fender", "d0"), -1),
+                            distractorTypes.GetValueOrDefault(("br_fender", "d0"), -1)
                         },
                         partition,
                         new List<int>
                         {
-                            distractorColors[("fl_fender", "d0")],
-                            distractorColors[("fr_fender", "d0")],
-                            distractorColors[("bl_fender", "d0")],
-                            distractorColors[("br_fender", "d0")]
+                            distractorColors.GetValueOrDefault(("fl_fender", "d0"), -1),
+                            distractorColors.GetValueOrDefault(("fr_fender", "d0"), -1),
+                            distractorColors.GetValueOrDefault(("bl_fender", "d0"), -1),
+                            distractorColors.GetValueOrDefault(("br_fender", "d0"), -1)
                         },
                         "d"
                     );
@@ -503,7 +503,7 @@ public class TeacherAgent : DialogueAgent
     {
         // Define positions & rotations w.r.t. partition coordinate
         var xRotations = new List<float> { 90f, -90f, 90f, -90f };
-        var zPositions = new List<float> {-0.09f, -0.03f, 0.03f, 0.09f};
+        var zPositions = new List<float> { -0.09f, -0.03f, 0.03f, 0.09f };
         var randomIndices = Enumerable.Range(0, 4).ToList();
         Shuffle(randomIndices);
         var wrapperPos = new List<Vector3>
@@ -525,19 +525,26 @@ public class TeacherAgent : DialogueAgent
         var rotY = 90f * Random.Range(0, 4) + Random.Range(-5f, 5f);
         var prtRot = new Vector3(0f, rotY, 0f);
 
-        var instantiateConfigs = new List<(GameObject, int, string, string)>
+        var fenderTypes = new List<List<GameObject>>
         {
-            (fenderFrontLeftTypes[typeIndices[0]], 0, $"{identifier}_fl_fender_0", "fl_fender"),
-            (fenderFrontRightTypes[typeIndices[1]], 1, $"{identifier}_fr_fender_0", "fr_fender"),
-            (fenderBackLeftTypes[typeIndices[2]], 2, $"{identifier}_bl_fender_0", "bl_fender"),
-            (fenderBackRightTypes[typeIndices[3]], 3, $"{identifier}_br_fender_0", "br_fender")
+            fenderFrontLeftTypes, fenderFrontRightTypes, fenderBackLeftTypes, fenderBackRightTypes
         };
+        var instantiateConfigs = new List<(int, string, string)>
+        {
+            (0, $"{identifier}_fl_fender_0", "fl_fender"),
+            (1, $"{identifier}_fr_fender_0", "fr_fender"),
+            (2, $"{identifier}_bl_fender_0", "bl_fender"),
+            (3, $"{identifier}_br_fender_0", "br_fender")
+        };
+        // Instantiate only those whose type index is not -1
         instantiateConfigs
+            .Where(config => typeIndices[config.Item1] != -1).ToList()
             .ForEach(config => 
                 InstantiateAtomicPrefab(
-                    config.Item1, colors[colorIndices[config.Item2]], partition,
-                    config.Item3, config.Item4,
-                    wrapperPos[config.Item2], wrapperRot[config.Item2], prtRot,
+                    fenderTypes[config.Item1][typeIndices[config.Item1]],
+                    colors[colorIndices[config.Item1]], partition,
+                    config.Item2, config.Item3,
+                    wrapperPos[config.Item1], wrapperRot[config.Item1], prtRot,
                     licenseSupertypeLabel
                 ));
     }
