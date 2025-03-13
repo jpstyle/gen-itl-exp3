@@ -108,8 +108,8 @@ public class TeacherAgent : DialogueAgent
         {
             var keyFields = key.Split("/");
             var partSupertype = keyFields[0];
-            var descriptor = keyFields[1];
-            var identifier = keyFields[2];
+            var identifier = keyFields[1];
+            var descriptor = keyFields[2];
 
             var groupType = partGroups[partSupertype];
 
