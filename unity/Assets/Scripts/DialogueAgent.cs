@@ -356,7 +356,7 @@ public class DialogueAgent : Agent
 
                     // Part instance name + subtype string identifier; the latter is used
                     // as `identifying codes` for language-less player types
-                    var nameWithType = req + "/" + foundEnt.licensedLabels[0]; 
+                    var nameWithType = req + "/" + foundEnt.licensedLabel; 
                     partStrings.Add(nameWithType);
 
                     var range = (stringPointer, stringPointer + nameWithType.Length);
@@ -616,7 +616,7 @@ public class DialogueAgent : Agent
             // to incorrect part type assumption.
             if (labelKey != "GT" && labelKey != "SA")
             {
-                if (!ent.licensedLabels.Contains(labelKey))
+                if (ent.licensedLabel != labelKey)
                 {
                     partRot = Random.rotationUniform;
                     partPos += Random.onUnitSphere * 0.1f;

@@ -168,12 +168,10 @@ public class TeacherAgent : DialogueAgent
             targetTypes[("cabin", "t0")],
             partitions[0], 
             targetColors[("cabin", "t0")],
-            "t",
-            distractorGroups.Count == 0
+            "t"
         );
         InstantiateLoad(
-            targetTypes[("load", "t0")], partitions[1], "t",
-            distractorGroups.Count == 0
+            targetTypes[("load", "t0")], partitions[1], "t"
         );
         InstantiateChassisFB(
             new List<int>
@@ -182,15 +180,13 @@ public class TeacherAgent : DialogueAgent
                 targetTypes[("chassis_back", "t0")]
             },
             partitions[2],
-            "t",
-            distractorGroups.Count == 0
+            "t"
         );
         InstantiateChassisC(
             targetTypes[("chassis_center", "t0")],
             partitions[3],
             targetColors[("chassis_center", "t0")],
-            "t",
-            distractorGroups.Count == 0
+            "t"
         );
         InstantiateFenders(
             new List<int>
@@ -208,8 +204,7 @@ public class TeacherAgent : DialogueAgent
                 targetColors[("bl_fender", "t0")],
                 targetColors[("br_fender", "t0")]
             },
-            "t",
-            distractorGroups.Count == 0
+            "t"
         );
         InstantiateWheels(
             targetTypes
@@ -217,16 +212,14 @@ public class TeacherAgent : DialogueAgent
                 .OrderBy(x => x.Key.Item2)
                 .Select(x => x.Value).ToList(),
             partitions[5],
-            "t",
-            distractorGroups.Count == 0
+            "t"
         );
         InstantiateBolts(targetTypes
                 .Where(x => x.Key.Item1 == "bolt")
                 .OrderBy(x => x.Key.Item2)
                 .Select(x => x.Value).ToList(),
             partitions[6],
-            "t",
-            distractorGroups.Count == 0
+            "t"
         );
 
         for (var i=0; i<distractorGroups.Count; i++)
@@ -342,9 +335,7 @@ public class TeacherAgent : DialogueAgent
 
     private static void InstantiateAtomicPrefab(
         GameObject prefab, string colorString, GameObject partition,
-        string wrapperName, string supertypeName,
-        Vector3 wrapperPos, Vector3 wrapperRot, Vector3 prtRot,
-        bool licenseSupertypeLabel
+        string wrapperName, Vector3 wrapperPos, Vector3 wrapperRot, Vector3 prtRot
     )
     {
         // Helper methods for initializing sampled parts on sampled locations
@@ -364,15 +355,6 @@ public class TeacherAgent : DialogueAgent
         // Instantiate provided cabin type with the name same as wrapperName
         var prefabInstance = Instantiate(prefab, wrapper.transform);
         prefabInstance.name = wrapperName;
-
-        // Add part supertype name to the list of licensed NL string names, if not
-        // already included
-        if (licenseSupertypeLabel)
-        {
-            var labelList = prefabInstance.GetComponent<EnvEntity>().licensedLabels;
-            if (!labelList.Contains(supertypeName))
-                labelList.Add(supertypeName);
-        }
 
         // Apply color to colorable meshes 
         foreach (var mesh in prefabInstance.GetComponentsInChildren<MeshRenderer>())
@@ -410,8 +392,7 @@ public class TeacherAgent : DialogueAgent
         partition.transform.eulerAngles = Vector3.zero;
     }
     private void InstantiateCabin(
-        int typeIndex, GameObject partition, int colorIndex, string identifier,
-        bool licenseSupertypeLabel = false
+        int typeIndex, GameObject partition, int colorIndex, string identifier
     )
     {
         // Define position w.r.t. partition coordinate
@@ -423,14 +404,12 @@ public class TeacherAgent : DialogueAgent
 
         InstantiateAtomicPrefab(
             cabinTypes[typeIndex], colors[colorIndex], partition,
-            $"{identifier}_cabin_0", "cabin",
-            wrapperPos, Vector3.zero, prtRot,
-            licenseSupertypeLabel
+            $"{identifier}_cabin_0",
+            wrapperPos, Vector3.zero, prtRot
         );
     }
     private void InstantiateLoad(
-        int typeIndex, GameObject partition, string identifier,
-        bool licenseSupertypeLabel = false
+        int typeIndex, GameObject partition, string identifier
     )
     {
         // Define position w.r.t. partition coordinate
@@ -442,14 +421,12 @@ public class TeacherAgent : DialogueAgent
 
         InstantiateAtomicPrefab(
             loadTypes[typeIndex], null, partition,
-            $"{identifier}_load_0", "load",
-            wrapperPos, Vector3.zero, prtRot,
-            licenseSupertypeLabel
+            $"{identifier}_load_0",
+            wrapperPos, Vector3.zero, prtRot
         );
     }
     private void InstantiateChassisFB(
-        List<int> typeIndices, GameObject partition, string identifier,
-        bool licenseSupertypeLabel = false
+        List<int> typeIndices, GameObject partition, string identifier
     )
     {
         // Define positions w.r.t. partition coordinate
@@ -464,22 +441,19 @@ public class TeacherAgent : DialogueAgent
         var prtRot = new Vector3(0f, rotY, 0f);
 
         // Create empty wrapper GameObjects representing 'singleton subassembly'
-        var instantiateConfigs = new List<(GameObject, int, string, string)>
+        var instantiateConfigs = new List<(GameObject, int, string)>
         {
-            (frontChassisTypes[typeIndices[0]], 0, $"{identifier}_chassis_front_0", "chassis_front"),
-            (backChassisTypes[typeIndices[1]], 1, $"{identifier}_chassis_back_0", "chassis_back")
+            (frontChassisTypes[typeIndices[0]], 0, $"{identifier}_chassis_front_0"),
+            (backChassisTypes[typeIndices[1]], 1, $"{identifier}_chassis_back_0")
         };
         instantiateConfigs
             .ForEach(config => InstantiateAtomicPrefab(
-                config.Item1, null, partition,
-                config.Item3, config.Item4,
-                wrapperPos[config.Item2], Vector3.zero, prtRot,
-                licenseSupertypeLabel
+                config.Item1, null, partition, config.Item3,
+                wrapperPos[config.Item2], Vector3.zero, prtRot
             ));
     }
     private void InstantiateChassisC(
-        int typeIndex, GameObject partition, int centerColorIndex, string identifier,
-        bool licenseSupertypeLabel = false
+        int typeIndex, GameObject partition, int centerColorIndex, string identifier
     )
     {
         // Define position w.r.t. partition coordinate
@@ -491,14 +465,12 @@ public class TeacherAgent : DialogueAgent
 
         InstantiateAtomicPrefab(
             centerChassisTypes[typeIndex], colors[centerColorIndex], partition,
-            $"{identifier}_chassis_center_0", "chassis_center",
-            wrapperPos, Vector3.zero, prtRot,
-            licenseSupertypeLabel
+            $"{identifier}_chassis_center_0",
+            wrapperPos, Vector3.zero, prtRot
         );
     }
     private void InstantiateFenders(
-        List<int> typeIndices, GameObject partition, List<int> colorIndices, string identifier,
-        bool licenseSupertypeLabel = false
+        List<int> typeIndices, GameObject partition, List<int> colorIndices, string identifier
     )
     {
         // Define positions & rotations w.r.t. partition coordinate
@@ -529,12 +501,12 @@ public class TeacherAgent : DialogueAgent
         {
             fenderFrontLeftTypes, fenderFrontRightTypes, fenderBackLeftTypes, fenderBackRightTypes
         };
-        var instantiateConfigs = new List<(int, string, string)>
+        var instantiateConfigs = new List<(int, string)>
         {
-            (0, $"{identifier}_fl_fender_0", "fl_fender"),
-            (1, $"{identifier}_fr_fender_0", "fr_fender"),
-            (2, $"{identifier}_bl_fender_0", "bl_fender"),
-            (3, $"{identifier}_br_fender_0", "br_fender")
+            (0, $"{identifier}_fl_fender_0"),
+            (1, $"{identifier}_fr_fender_0"),
+            (2, $"{identifier}_bl_fender_0"),
+            (3, $"{identifier}_br_fender_0")
         };
         // Instantiate only those whose type index is not -1
         instantiateConfigs
@@ -542,15 +514,12 @@ public class TeacherAgent : DialogueAgent
             .ForEach(config => 
                 InstantiateAtomicPrefab(
                     fenderTypes[config.Item1][typeIndices[config.Item1]],
-                    colors[colorIndices[config.Item1]], partition,
-                    config.Item2, config.Item3,
-                    wrapperPos[config.Item1], wrapperRot[config.Item1], prtRot,
-                    licenseSupertypeLabel
+                    colors[colorIndices[config.Item1]], partition, config.Item2,
+                    wrapperPos[config.Item1], wrapperRot[config.Item1], prtRot
                 ));
     }
     private void InstantiateWheels(
-        List<int> typeIndices, GameObject partition, string identifier,
-        bool licenseSupertypeLabel = false
+        List<int> typeIndices, GameObject partition, string identifier
     )
     {
         // Valid (x,z)-positions to sample from
@@ -576,15 +545,13 @@ public class TeacherAgent : DialogueAgent
 
             InstantiateAtomicPrefab(
                 wheelTypes[typeIndices[i]], null, partition,
-                $"{identifier}_wheel_{i}", "wheel",
-                wrapperPos, wrapperRot, prtRot,
-                licenseSupertypeLabel
+                $"{identifier}_wheel_{i}",
+                wrapperPos, wrapperRot, prtRot
             );
         }
     }
     private void InstantiateBolts(
-        List<int> typeIndices, GameObject partition, string identifier,
-        bool licenseSupertypeLabel = false
+        List<int> typeIndices, GameObject partition, string identifier
     )
     {
         // Valid (x,z)-positions to sample from
@@ -612,9 +579,8 @@ public class TeacherAgent : DialogueAgent
 
             InstantiateAtomicPrefab(
                 boltTypes[typeIndices[i]], null, partition,
-                $"{identifier}_bolt_{i}", "bolt",
-                wrapperPos, wrapperRot, prtRot,
-                licenseSupertypeLabel
+                $"{identifier}_bolt_{i}",
+                wrapperPos, wrapperRot, prtRot
             );
         }
     }

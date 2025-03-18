@@ -15,7 +15,7 @@ public class EnvEntity : MonoBehaviour
     // List of natural language labels with which dialogue participants are allowed
     // to refer to EnvEntity instances of the type. Defined only for atomic part
     // objects.
-    public List<string> licensedLabels = new();
+    public string licensedLabel;
     
     // Storage of segmentation masks, maintained as dictionary from target display
     // id to corresponding color32
