@@ -88,16 +88,6 @@ library = {
         }
     ],
 
-    # Resolve user's positive acknowledgement (assent) to agent's statement that reports
-    # agent's estimation
-    "address_acknowledgement": [
-        # Prepare answering utterance to generate
-        {
-            "action_method": Val(referrable=["comp_actions", "handle_acknowledgement"]),
-            "action_args_getter": lambda x: (Val(data=x),)
-        }
-    ],
-
     # After task execution is finished for an episode, run post-hoc analysis of
     # the final environment state to extract any learning signals
     "posthoc_episode_analysis": [

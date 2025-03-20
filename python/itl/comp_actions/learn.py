@@ -168,51 +168,6 @@ def identify_mismatch(agent, statement):
     return xb_updated
 
 
-def identify_acknowledgement(agent, rule, prev_statements, prev_context):
-    """
-    Check whether the agent reported its estimate of something by its utterance
-    and whether `rule` effectively acknowledges any of them positively or negatively.
-    We may treat "Correct.", silence or explicit repetition as positive acknowledgement.
-    Any conflicting statement from user would count as negative acknowledgement, as
-    well as "Incorrect." or "No.".
-    """
-    cons, ante = rule
-    rule_is_grounded = (cons is None or is_grounded(cons)) and \
-        (ante is None or is_grounded(ante))
-    rule_has_pred_referent = (cons is None or has_pred_referent(cons)) and \
-        (ante is None or has_pred_referent(ante))
-
-    if rule_is_grounded and not rule_has_pred_referent:
-        # Grounded event without constant predicate referents
-
-        if len(agent.vision.latest_inputs) == 1:
-            # Discussion about irrelevant contexts, can return early without doing anything
-            return
-
-        for (ti, ci), (speaker, (statement, _)) in prev_statements:
-            # Only interested in whether an agent's statement is acknowledged
-            if speaker != "Student": continue
-
-            # Entailment checks; cons vs. statement, and cons vs. ~statement
-            pos_entail_check, _ = Literal.entailing_mapping_btw(cons, statement)
-            neg_entail_check, _ = Literal.entailing_mapping_btw(cons, (list(statement),))
-                # Recall that a list of literals stands for the negation of the conjunction;
-                # wrap it in a tuple again to make it an iterable
-
-            pos_ack = pos_entail_check is not None and pos_entail_check >= 0
-            neg_ack = neg_entail_check is not None and neg_entail_check >= 0
-
-            if not (pos_ack or neg_ack): continue       # Nothing to do here
-
-            # Determine polarity of the acknowledgement, collect relevant visual embeddings
-            # from prev_scene, and then record
-            polarity = pos_ack
-            acknowledgement_data = (statement, polarity, prev_context)
-            agent.lang.dialogue.acknowledged_stms[("curr", ti, ci)] = acknowledgement_data
-                # "curr" indicates the acknowledgement is relevant to a statement in the
-                # ongoing dialogue record
-
-
 def identify_generics(agent, statement, prev_Qs, provenance):
     """
     For symbolic knowledge base expansion. Integrate the rule into KB by adding
@@ -314,129 +269,6 @@ def identify_generics(agent, statement, prev_Qs, provenance):
         )
 
     return kb_updated
-
-
-def handle_acknowledgement(agent, acknowledgement_info):
-    """
-    Handle (positive) acknowledgements to an utterance by the agent reporting its
-    estimation on some state of affairs. The learning process differs based on the
-    agent's strategy regarding how to extract learning signals from user's assents.
-    """
-    if agent.strat_assent == "doNotLearn": return       # Nothing further to do here
-
-    ack_ind, ack_data = acknowledgement_info
-    if ack_data is None: return         # Marked 'already processed'
-
-    statement, polarity, context = ack_data
-    vis_scene, pr_prog, kb_snap = context
-    if ack_ind[0] == "prev":
-        vis_raw = agent.vision.previous_input
-    else:
-        vis_raw = agent.vision.latest_inputs[-1]
-
-    if polarity != True:
-        # Nothing to do with negative acknowledgements
-        agent.lang.dialogue.acknowledged_stms[ack_ind] = None
-        return
-
-    # Vision-only (neural) estimations recognized
-    lits_from_vis = {
-        rule.body[0].as_atom(): r_pr[0] for rule, r_pr, _ in pr_prog.rules
-        if len(rule.head)==0 and len(rule.body)==2 and rule.body[0].naf
-    }
-
-    # Find literals to be considered as confirmed via user's assent; always include
-    # each literal in `statement`, and others if relevant via some rule in KB
-    lits_to_learn = set()
-    for main_lit in statement:
-        if main_lit.name.startswith("sp_"): continue
-
-        # Find relevant KB entries (except taxonomy entries) containing the main literal
-        relevant_kb_entries = [
-            kb_snap.entries[ei][0]
-            for ei in kb_snap.entries_by_pred[main_lit.name]
-            if kb_snap.entries[ei][3] != "taxonomy"
-        ]
-
-        # Into groups of literals to be recognized as learning signals
-        literal_groups = []
-        for cons, ante in relevant_kb_entries:
-            # Only consider rules with antecedents that don't have negated conjunction
-            # as conjunct, when learning from assents
-            if not all(isinstance(cnjt, Literal) for cnjt in ante): continue
-
-            # Only consider unnegated conjuncts in consequent
-            cons_pos = tuple(cnjt for cnjt in cons if isinstance(cnjt, Literal))
-
-            for conjunct in ante:
-                assert isinstance(conjunct, Literal)
-                if conjunct.name==main_lit.name:
-                    vc_map = {v: c for v, c in zip(conjunct.args, main_lit.args)}
-                    literal_groups.append((cons_pos, ante, vc_map))
-
-        for cons, ante, vc_map in literal_groups:
-            # Substitute and identify the set of unique args occurring
-            cons_subs = [l.substitute(terms=vc_map) for l in cons]
-            ante_subs = [l.substitute(terms=vc_map) for l in ante]
-            occurring_args = set.union(*[set(l.args) for l in cons_subs+ante_subs])
-
-            # Consider all assignments of constants to variables & skolem functions
-            # possible, and add viable cases to the set of acknowledged literals
-            possible_assignments = [
-                tuple(zip(occurring_args, prm))
-                for prm in permutations(vis_scene, len(occurring_args))
-            ]
-            for prm in possible_assignments:
-                # Skip this assignment if constant mismatch occurs
-                const_mismatch = any(
-                    arg_name!=cons and not (is_var or isinstance(arg_name, tuple))
-                    for (arg_name, is_var), cons in prm
-                )
-                if const_mismatch: continue
-
-                assig = {arg: (cons, False) for arg, cons in prm if arg[0]!=cons}
-                cons_subs_full = {l.substitute(terms=assig) for l in cons_subs}
-                ante_subs_full = {l.substitute(terms=assig) for l in ante_subs}
-
-                # Union the fully substituted consequent to `lits_to_learn` only if
-                # all the literals in the substituted antecedent can be found in visual
-                # scene; apply some value threshold according to the strategy choice.
-                if all(lit in lits_from_vis for lit in ante_subs_full):
-                    for lit in cons_subs_full | ante_subs_full:
-                        easy_positive = lit in lits_from_vis and lits_from_vis[lit] > 0.75
-                        if agent.strat_assent == "threshold" and easy_positive:
-                            # Adopting thresholding strategy, and estimated probability
-                            # is already high enough; opt out of adding this as exemplar
-                            continue
-
-                        lits_to_learn.add(lit)
-
-    # Add the instances represented by the literals as concept exemplars
-    objs_to_add = set(); pointers = defaultdict(set)
-    for lit in lits_to_learn:
-        conc_type, conc_ind = lit.name.split("_")
-        conc_ind = int(conc_ind)
-        if conc_type == "prel": continue         # Relations are not neurally predicted
-
-        pol = "pos" if not lit.naf else "neg"
-
-        if vis_scene[lit.args[0][0]]["exemplar_ind"] is None:
-            # New exemplar, mask & vector of the object should be added
-            objs_to_add.add(lit.args[0][0])
-            pointers[(conc_type, conc_ind, pol)].add(lit.args[0][0])
-        else:
-            # Exemplar present in storage, only add pointer
-            ex_ind = agent.vision.scene[lit.args[0][0]]["exemplar_ind"]
-            pointers[(conc_type, conc_ind, pol)].add(ex_ind)
-
-    objs_to_add = list(objs_to_add)         # Assign arbitrary ordering
-    _add_scene_and_exemplars_2d(
-        objs_to_add, pointers,
-        vis_scene, vis_raw, agent.lt_mem.exemplars
-    )
-
-    # Replace value with None to mark as 'already processed'
-    agent.lang.dialogue.acknowledged_stms[ack_ind] = None
 
 
 def handle_neologism(agent, novel_concepts, dialogue_state):
@@ -596,12 +428,13 @@ def analyze_demonstration(agent, demo_data):
     value_assignment = agent.lang.dialogue.value_assignment
 
     inspect_data = { "img": {}, "msk": {}, "pose": {} }
-            # Buffer of 3d object instance views from inspect_~ actions
+        # Buffer of 3d object instance views from inspect_~ actions
 
     # Sequentially process each demonstration step
     current_held = [None, None]; current_assembly_info = None
     nonatomic_subassemblies = set()
-    part_labeling = {}; sa_labeling = {}
+    part_supertype_labeling = {}; part_subtype_labeling = {}
+    sa_labeling = {}; hyp_rels = {}
     vision_2d_data = defaultdict(list); vision_3d_data = {}; assembly_sequence = []
     # Collecting scene image and masks at the initial setting, fecthed and organized
     # by env_handle fields in agent.vision.scene
@@ -758,17 +591,36 @@ def analyze_demonstration(agent, demo_data):
                                         flip_position_y(parse_floats(3))
                                     )
 
-                elif raw.startswith("Pick up a"):
-                    # NL description providing labeling of the atomic part just
-                    # picked up with a pick_up~ action
-                    part_labeling[current_held[left_or_right][0]] = \
-                        re.findall(r"Pick up a (.*)\.$", raw)[0]
+                elif raw.startswith("Pick up this"):
+                    # NL description providing labeling of the atomic (sub)type
+                    # just picked up with a pick_up~ action
+                    part_subtype_labeling[current_held[left_or_right][0]] = \
+                        re.findall(r"Pick up this (.*)\.$", raw)[0]
+
+                elif raw.startswith("Join "):
+                    # NL description providing (super)type requirement for an
+                    # atomic part slot in target structure, just partially
+                    # fulfilled with an assemble~ action
+                    _, target_l, _, target_r = \
+                        re.findall(r"Join (a|the) (.*) and (a|the) (.*)\.$", raw)[0]
+                    held_l = current_assembly_info[0][0][0]
+                    held_r = current_assembly_info[1][0][0]
+                    if held_l not in nonatomic_subassemblies:
+                        part_supertype_labeling[held_l] = target_l
+                    if held_r not in nonatomic_subassemblies:
+                        part_supertype_labeling[held_r] = target_r
 
                 elif raw.startswith("This is a"):
                     # NL description providing labeling of the subassembly just
                     # placed on the desk with a drop~ action
                     sa_labeling[lastly_dropped] = \
                         re.findall(r"This is a (.*)\.$", raw)[0]
+
+                elif any(lit.name == "sp_subtype" for lit in cons):
+                    # NL description of a hypernymy-hyponymy relation
+                    part_subtype, part_supertype = \
+                        re.findall(r"(.*) is a type of (.*)\.$", raw)[0]
+                    hyp_rels[part_subtype] = (part_supertype, raw)
 
             else:
                 # Quantified statement with antecedent; expecting a generic rule
@@ -804,7 +656,7 @@ def analyze_demonstration(agent, demo_data):
     # Tag each part instance with their visual concept index, registering any
     # new visual concepts & neologisms; we assume here all neologisms are nouns
     # (corresponding to 'pcls')
-    inst2conc_map = {}
+    inst2conc_map = {}; conc_supertypes = {}
     if agent.cfg.exp.player_type in ["bool", "demo"]:
         # No access to any NL labeling; first assign new concept indices for
         # part instances with vision_3d_data available (obtained from multi-
@@ -828,8 +680,8 @@ def analyze_demonstration(agent, demo_data):
     else:
         # Has access to NL labeling of part & subassembly instances, use them
         assert agent.cfg.exp.player_type in ["label", "full"]
-        for part_inst, part_type_name in part_labeling.items():
-            sym = ("n", part_type_name)
+        for part_inst, part_subtype_name in part_subtype_labeling.items():
+            sym = ("n", part_subtype_name)
             if sym in agent.lt_mem.lexicon:
                 # Already registered
                 _, conc_ind = agent.lt_mem.lexicon.s2d[sym][0]
@@ -843,13 +695,29 @@ def analyze_demonstration(agent, demo_data):
             # In whichever case, the symbol shouldn't be a 'unresolved neologism'
             if sym in agent.lang.unresolved_neologisms:
                 agent.lang.unresolved_neologisms.remove(sym)
-        # Also process any new subassembly concepts/neologisms
-        for sa_inst, sa_type_name in sa_labeling.items():
+        # Also process any remaining neologisms denoting hypernyms and holonyms
+        for part_supertype_name in part_supertype_labeling.values():
+            sym = ("n", part_supertype_name)
+            if sym not in agent.lt_mem.lexicon:
+                new_conc_ind = agent.vision.add_concept("pcls")
+                agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
+        for sa_type_name in sa_labeling.values():
             sym = ("n", sa_type_name)
             if sym not in agent.lt_mem.lexicon:
                 new_conc_ind = agent.vision.add_concept("pcls")
                 agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
-    
+        # Also process any hyper/hyponymy relations provided
+        for part_subtype, (part_supertype, raw) in hyp_rels.items():
+            subtype_conc = agent.lt_mem.lexicon.s2d[("n", part_subtype)][0][1]
+            supertype_conc = agent.lt_mem.lexicon.s2d[("n", part_supertype)][0][1]
+            agent.lt_mem.kb.add(
+                (
+                    [Literal(f"pcls_{subtype_conc}", wrap_args("X"))],
+                    [Literal(f"pcls_{supertype_conc}", wrap_args("X"))]
+                ),
+                U_IN_PR, raw, "taxonomy"
+            )
+            conc_supertypes[subtype_conc] = supertype_conc
 
     # Process 3D vision data, storing reconstructed structure data in XB    
     for part_inst, reconstruction in vision_3d_data.items():
@@ -1074,14 +942,17 @@ def analyze_demonstration(agent, demo_data):
             [part_inst_l, part_inst_r]
         )
         for obj, part_conc_ind, part_inst in lr_bundle:
-            if obj in part_labeling or obj in vision_2d_data:
-                # Atomic part if listed in part_labeling (for languageful
+            if obj in part_subtype_labeling or obj in vision_2d_data:
+                # Atomic part if listed in part_subtype_labeling (languageful
                 # player types) or vision_2d_data (fallback for languageless
                 # player types); create a new node
                 sa_graph = nx.Graph()
                 sa_graph.add_node(
                     obj, node_type="atomic",
-                    conc=part_conc_ind, part_paths={ part_inst: part_inst }
+                    conc=conc_supertypes.get(part_conc_ind, part_conc_ind),
+                        # Specify slot part types at supertype level (unless
+                        # there's no applicable hierarchy; e.g. bolt)
+                    part_paths={ part_inst: part_inst }
                 )
                 subassemblies.append(sa_graph)
                 connect_nodes.append(obj)
@@ -1223,8 +1094,8 @@ def posthoc_episode_analysis(agent):
     build_target = agent.planner.execution_state["plan_goal"][1]
     best_model = _goal_selection(agent, build_target)
     tabulated_results = _tabulate_goal_selection_result(best_model)
-    connection_graph, node_unifications, atomic_node_concs = \
-        tabulated_results[3:]
+    connection_graph, node_unifications = tabulated_results[3:5]
+    atomic_node_concs, _, hyp_rels = tabulated_results[5:]
 
     # As done in `.interact._plan_assembly` procedure, we could try to further
     # narrow down possible unification choices for the unbounded nodes
@@ -1233,7 +1104,8 @@ def posthoc_episode_analysis(agent):
         if len(sa_graph) > 1
     )
     possible_mappings = _match_existing_subassemblies(
-        connection_graph, node_unifications, atomic_node_concs, exec_state
+        connection_graph, node_unifications,
+        atomic_node_concs, hyp_rels, exec_state
     )
     for ism in possible_mappings[final_sa]:
         for n, ex_obj in ism.items():
@@ -1326,6 +1198,9 @@ def posthoc_episode_analysis(agent):
     pr_thres = 0.8                  # Threshold for adding exemplars
     exemplars = {}; pointers = defaultdict(set)
     for oi, best_conc in final_recognitions.items():
+        # Skip if supertype
+        if best_conc in hyp_rels.values(): continue
+
         # Add to the list of positive exemplars if the predicted probability
         # for the best type concept is lower than the threshold
         pred_prob = agent.vision.scene[oi]["pred_cls"][best_conc].item()
@@ -1369,25 +1244,27 @@ def posthoc_episode_analysis(agent):
                 }
                 pointers[("pcls", label1, "neg")].add(obj1)
 
-    # Get the very first scene image before any sort of manipulation took
-    # place
-    scene_img = next(
-        vis_inp for vis_inp in agent.vision.latest_inputs
-        if vis_inp is not None
-    )
-    # Reformat `exemplars` and `pointers`
-    obj_ordering = list(exemplars)
-    exemplars = [exemplars[oi] for oi in obj_ordering]
-    pointers = {
-        conc_dscr: [(True, obj_ordering.index(oi)) for oi in objs]
-        for conc_dscr, objs in pointers.items()
-        if len(objs) > 0
-    }
+    # Running below only when we have exemplars to add
+    if len(pointers) > 0:
+        # Get the very first scene image before any sort of manipulation took
+        # place
+        scene_img = next(
+            vis_inp for vis_inp in agent.vision.latest_inputs
+            if vis_inp is not None
+        )
+        # Reformat `exemplars` and `pointers`
+        obj_ordering = list(exemplars)
+        exemplars = [exemplars[oi] for oi in obj_ordering]
+        pointers = {
+            conc_dscr: [(True, obj_ordering.index(oi)) for oi in objs]
+            for conc_dscr, objs in pointers.items()
+            if len(objs) > 0
+        }
 
-    # Exemplar base update in batch
-    agent.lt_mem.exemplars.add_exs_2d(
-        scene_img=scene_img, exemplars=exemplars, pointers=pointers
-    )
+        # Exemplar base update in batch
+        agent.lt_mem.exemplars.add_exs_2d(
+            scene_img=scene_img, exemplars=exemplars, pointers=pointers
+        )
 
 def _add_scene_and_exemplar_2d(scene_id, scene_img, pointer, mask, f_vec, ex_mem):
     """

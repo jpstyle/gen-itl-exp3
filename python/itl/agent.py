@@ -462,23 +462,9 @@ class ITLAgent:
                         # of negative)
                         statement = (ante, cons)
                         xb_updated |= self.comp_actions.identify_mismatch(statement)
-                        # self.comp_actions.identify_acknowledgement(
-                        #     statement, prev_statements, prev_context
-                        # )
                         kb_updated |= self.comp_actions.identify_generics(
                             statement, prev_Qs, raw
                         )
-
-                # By default, treat lack of any negative acknowledgements to an agent's statement
-                # as positive acknowledgement
-                prev_or_curr = "prev" if new_env else "curr"
-                for (ti, ci), (speaker, statement) in prev_statements:
-                    if speaker != "Student": continue         # Not interested
-
-                    stm_ind = (prev_or_curr, ti, ci)
-                    if stm_ind not in self.lang.dialogue.acknowledged_stms:
-                        acknowledgement_data = (statement, True, prev_context)
-                        self.lang.dialogue.acknowledged_stms[stm_ind] = acknowledgement_data
 
                 # Handle neologisms
                 xb_updated |= self.comp_actions.handle_neologism(
@@ -523,8 +509,6 @@ class ITLAgent:
         # pending items in agenda
         for n in self.lang.unresolved_neologisms:
             self.planner.agenda.appendleft(("address_neologism", n))
-        for a in self.lang.dialogue.acknowledged_stms.items():
-            self.planner.agenda.appendleft(("address_acknowledgement", a))
         for ti, ci in self.lang.dialogue.unanswered_Qs:
             self.planner.agenda.appendleft(("address_unanswered_Q", (ti, ci)))
         for ti, ci in self.lang.dialogue.unexecuted_commands:

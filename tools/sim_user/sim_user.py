@@ -101,10 +101,10 @@ class SimulatedTeacher:
         """
         self.current_episode_record = {
             # Track state of ongoing assembly progress, either observed or demonstrated
-            "assembly_state": {
+            "episode_state": {
                 "left": None, "right": None, "subassemblies": {},
                 "joins_remaining": {frozenset(join) for join in VALID_JOINS},
-                "aliases": {}
+                "aliases": {}, "instructed_hyp_rels": set()
             },
             "metrics": {
                 "num_search_failure": 0,
@@ -241,8 +241,8 @@ class SimulatedTeacher:
         step_demonstrated = False
 
         # Shortcuts
-        assem_st = self.current_episode_record["assembly_state"]
-        subassems = assem_st["subassemblies"]
+        ep_st = self.current_episode_record["episode_state"]
+        subassems = ep_st["subassemblies"]
         sampled_parts = self.current_episode_record["sampled_parts"]
         ep_metrics = self.current_episode_record["metrics"]
 
@@ -308,7 +308,7 @@ class SimulatedTeacher:
                 act_str_prefix = f"# Action: {act_type}"
                 offset = len(act_str_prefix)
 
-                act_dscr = None
+                act_dscr = []
                 if act_type.startswith("pick_up"):
                     # For pick_up~ actions, provide demonstrative reference by string path
                     # to target GameObject (which will be converted into binary mask)
@@ -318,7 +318,7 @@ class SimulatedTeacher:
                         "utterance": f"{act_str_prefix}({target})",
                         "pointing": { crange: ("/" + act_params[0], True) }
                     }
-                    assem_st[side] = target
+                    ep_st[side] = target
                     if target not in subassems:
                         singleton_gr = nx.Graph()
                         singleton_gr.add_node(target)
@@ -326,18 +326,44 @@ class SimulatedTeacher:
 
                     if self.player_type in ["label", "full"]:
                         inst = re.findall(r"^t_(.*)_(\d+)$", target)
-                        inst = (inst[0][0], ("t", int(inst[0][1]))) if len(inst) == 1 else None
-                        if inst in sampled_parts:
-                            target_label = f"a {inst[0]}"
+                        if len(inst) == 1:
+                            inst = (inst[0][0], ("t", int(inst[0][1])))
                         else:
+                            inst = None
+
+                        if inst in sampled_parts:
+                            # Picking up an atomic part for the first time. Introduce
+                            # the new object by subtype name.
+                            part_subtype = sampled_parts[inst]["type"]
+                            target_label = f"this {part_subtype}"
+                            act_dscr.append({
+                                "utterance": f"Pick up {target_label}.",
+                                "pointing": {}
+                            })
+                            # Instruct hypernymy/hyponymy relation if not already taught
+                            # ---only if part_subtype, part_supertype are different
+                            part_supertype = inst[0]
+                            hyp_rel = (part_subtype, part_supertype)
+                            if hyp_rel not in ep_st["instructed_hyp_rels"] and \
+                                part_subtype != part_supertype:
+                                act_dscr.append({
+                                    "utterance": f"{part_subtype} is a type of {part_supertype}.",
+                                    "pointing": {}
+                                })
+                                ep_st["instructed_hyp_rels"].add(hyp_rel)
+                        else:
+                            # Picking up an existing subassembly. Refer to
+                            # the subassembly by either the umbrella term
+                            # 'subassembly' or the substructure name, depending
+                            # on the player type.
                             if self.player_type == "label":
                                 target_label = "the subassembly"
                             else:
                                 target_label = f"the {target}"
-                        act_dscr = {
-                            "utterance": f"Pick up {target_label}.",
-                            "pointing": {}
-                        }
+                            act_dscr.append({
+                                "utterance": f"Pick up {target_label}.",
+                                "pointing": {}
+                            })
 
                 elif act_type.startswith("drop"):
                     # No parameter info to communicate, just annotate action type
@@ -350,14 +376,14 @@ class SimulatedTeacher:
                     # types for holonymy/meronymy info involving meaningful units
                     # of substructures --- except the final product "truck", which
                     # must be provided for all player types
-                    dropped_sa = assem_st[side]
+                    dropped_sa = ep_st[side]
                     if self.player_type == "full" or dropped_sa == "truck":
-                        act_dscr = {
+                        act_dscr.append({
                             "utterance": f"This is a {dropped_sa}.",
                             "pointing": {
                                 (0, 4): (f"/Student Agent/*/{dropped_sa}", True)
                             }
-                        }
+                        })
 
                 elif act_type.startswith("assemble"):
                     # For assemble~ actions, provide contact point info, specified by
@@ -369,42 +395,49 @@ class SimulatedTeacher:
                     type_l, cp_l = target_l.split("/")
                     type_r, cp_r = target_r.split("/")
                     inst_l = next(
-                        inst for inst in subassems[assem_st["left"]] if type_l in inst
+                        inst for inst in subassems[ep_st["left"]] if type_l in inst
                     )
                     inst_r = next(
-                        inst for inst in subassems[assem_st["right"]] if type_r in inst
+                        inst for inst in subassems[ep_st["right"]] if type_r in inst
                     )
                     target_l = f"{inst_l}/{cp_l}"
                     target_r = f"{inst_r}/{cp_r}"
                     act_params = (subassembly, target_l, target_r)    # Rewrite params
                     # Building action spec description string
                     num_components = \
-                        len(subassems[assem_st["left"]]) + len(subassems[assem_st["right"]])
+                        len(subassems[ep_st["left"]]) + len(subassems[ep_st["right"]])
                     act_str = act_str_prefix
                     act_str += f"({subassembly},{target_l},{target_r},{num_components})"
                     act_anno = { "utterance": act_str, "pointing": {} }
+
+                    if self.player_type in ["label", "full"]:
+                        # Linguistic annotation; part (super)type with indefinite
+                        # article designates the atomic part category required in
+                        # the target structure
+                        article_l = "a" if len(subassems[ep_st["left"]]) == 1 else "the"
+                        article_r = "a" if len(subassems[ep_st["right"]]) == 1 else "the"
+                        target_label_l = f"{article_l} {type_l}"
+                        target_label_r = f"{article_r} {type_r}"
+                        act_dscr.append({
+                            "utterance": f"Join {target_label_l} and {target_label_r}.",
+                            "pointing": {}
+                        })
+
+                    # Accordingly update assembly state
                     subassems[subassembly] = nx.union(
-                        subassems.pop(assem_st["left"]), subassems.pop(assem_st["right"])
+                        subassems.pop(ep_st["left"]), subassems.pop(ep_st["right"])
                     )
                     subassems[subassembly].add_edge(
                         inst_l, inst_r, contact={
                             inst_l: (type_l, cp_l), inst_r: (type_r, cp_r)
                         }
                     )
-                    assem_st["left"] = subassembly if side == "left" else None
-                    assem_st["right"] = None if side == "left" else subassembly
-
-                    if self.player_type in ["label", "full"]:
-                        # Linguistic annotation (though this utterance doesn't provide
-                        # any additional learning signals in our scope)
-                        act_dscr = {
-                            "utterance": f"Join the {type_l} and the {type_r}.",
-                            "pointing": {}
-                        }
+                    ep_st["left"] = subassembly if side == "left" else None
+                    ep_st["right"] = None if side == "left" else subassembly
 
                 elif act_type.startswith("inspect"):
                     # For inspect~ actions, provide integer index of (relative) viewpoint
-                    ent_path = f"/Student Agent/{side.capitalize()} Hand/{assem_st[side]}"
+                    ent_path = f"/Student Agent/{side.capitalize()} Hand/{ep_st[side]}"
                     target, view_ind = act_params
                     crange = (offset+1, offset+1+len(target))
                     act_anno = {
@@ -421,8 +454,8 @@ class SimulatedTeacher:
                     if demo_type == "full":
                         # Provide additional action annotations
                         response.append(("generate", act_anno))
-                        if act_dscr is not None:
-                            response.append(("generate", act_dscr))
+                        for dscr in act_dscr:
+                            response.append(("generate", dscr))
 
             elif utt.startswith("# Action:"):
                 # Agent action intent; somewhat like reading into the agent's 'mind'
@@ -432,7 +465,7 @@ class SimulatedTeacher:
                     # component parts
                     _, params = re.findall(r"# Action: assemble_(.*)\((.*)\)$", utt)[0]
                     _, part_left, _, part_right, product_name = params.split(",")
-                    assem_st["join_intent"] = (part_left, part_right, product_name)
+                    ep_st["join_intent"] = (part_left, part_right, product_name)
 
                 response.append((None, None))       # Then no-op
 
@@ -447,22 +480,22 @@ class SimulatedTeacher:
                     obj_picked_up = effects.split(",")[0]
 
                     # Update ongoing execution state
-                    assem_st[side] = obj_picked_up
+                    ep_st[side] = obj_picked_up
                     if obj_picked_up not in subassems:
                         singleton_gr = nx.Graph()
                         singleton_gr.add_node(obj_picked_up)
                         subassems[obj_picked_up] = singleton_gr
 
                     pair_invalid = False
-                    if assem_st["left"] is not None and assem_st["right"] is not None:
+                    if ep_st["left"] is not None and ep_st["right"] is not None:
                         # Test if a valid join can be achieved with the two subassembly
                         # objects held in each hand
                         compatible_part_pairs = {
                             frozenset([type1, type2])
-                            for (type1, _), (type2, _) in assem_st["joins_remaining"]
+                            for (type1, _), (type2, _) in ep_st["joins_remaining"]
                         }
-                        sa_left = subassems[assem_st["left"]]
-                        sa_right = subassems[assem_st["right"]]
+                        sa_left = subassems[ep_st["left"]]
+                        sa_right = subassems[ep_st["right"]]
                         for part_left, part_right in product(sa_left, sa_right):
                             part_left = re.findall(r"t_(.*)_\d+$", part_left)[0]
                             part_right = re.findall(r"t_(.*)_\d+$", part_right)[0]
@@ -483,7 +516,7 @@ class SimulatedTeacher:
                     if pair_invalid:
                         # Interrupt agent and undo the last pick up (by dropping the
                         # object just picked up)
-                        assem_st[side] = None       # Pick-up undone
+                        ep_st[side] = None       # Pick-up undone
                         response += [
                             ("generate", { "utterance": "Stop.", "pointing": {} }),
                             (f"drop_{side}", { "parameters": () })
@@ -520,18 +553,18 @@ class SimulatedTeacher:
                 if utt.startswith("# Effect: drop"):
                     # Effect of drop action; no args, just update hand states
                     side = re.findall(r"# Effect: drop_(.*)\(\)$", utt)[0]
-                    assem_st[side] = None
+                    ep_st[side] = None
 
                 if utt.startswith("# Effect: assemble"):
                     # Effect of assemble action; interested in closest contact points
                     direction, effects = re.findall(r"# Effect: assemble_(.*)\((.*)\)$", utt)[0]
                     src_side, _, tgt_side = direction.split("_")
                     if tgt_side == "left":
-                        part_tgt, part_src, product_name = assem_st.pop("join_intent")
+                        part_tgt, part_src, product_name = ep_st.pop("join_intent")
                     else:
-                        part_src, part_tgt, product_name = assem_st.pop("join_intent")
-                    part_src = assem_st["aliases"][part_src]
-                    part_tgt = assem_st["aliases"][part_tgt]
+                        part_src, part_tgt, product_name = ep_st.pop("join_intent")
+                    part_src = ep_st["aliases"][part_src]
+                    part_tgt = ep_st["aliases"][part_tgt]
                     type_src = re.findall(r"t_(.*)_\d+$", part_src)[0]
                     type_tgt = re.findall(r"t_(.*)_\d+$", part_tgt)[0]
                     valid_joins = [
@@ -566,8 +599,8 @@ class SimulatedTeacher:
                     valid_pairs_achieved = set(cp_pairs) & set(valid_joins)
 
                     # Update ongoing execution state
-                    sa_left = assem_st["left"]
-                    sa_right = assem_st["right"]
+                    sa_left = ep_st["left"]
+                    sa_right = ep_st["right"]
                     graph_left = subassems[sa_left]
                     graph_right = subassems[sa_right]
 
@@ -638,10 +671,10 @@ class SimulatedTeacher:
                                 part_src: (type_src, cp_src), part_tgt: (type_tgt, cp_tgt)
                             }
                         )
-                        assem_st[src_side] = None
-                        assem_st[tgt_side] = product_name
+                        ep_st[src_side] = None
+                        ep_st[tgt_side] = product_name
                         # Check the achieved join off the set
-                        assem_st["joins_remaining"] -= valid_pairs_achieved
+                        ep_st["joins_remaining"] -= valid_pairs_achieved
 
                 if not interrupted:
                     # No interruption needs to be made, keep observing...
@@ -696,7 +729,7 @@ class SimulatedTeacher:
                 # Fetch list of matching instances and select one that hasn't
                 # been used yet (i.e., still on the tabletop)
                 matching_insts = [
-                    f"t_{supertype}_{inst_id[1]}"
+                    ((supertype, inst_id), f"{inst_id[0]}_{supertype}_{inst_id[1]}")
                     for (supertype, inst_id), info in sampled_parts.items()
                     if queried_type == supertype or queried_type == info["type"]
                 ]
@@ -705,24 +738,25 @@ class SimulatedTeacher:
                     if len(sa_graph) > 1
                 ]
                 available_insts = [
-                    inst for inst in matching_insts
-                    if inst not in consumed_insts or        # Not used in some subassembly, or
-                        len(subassems.get(inst, {})) == 1   # Picked up once but not consumed yet
+                    (inst, serialized_name) for inst, serialized_name in matching_insts
+                    if serialized_name not in consumed_insts or        # Not used in some subassembly, or
+                        len(subassems.get(serialized_name, {})) == 1   # Picked up once but not consumed yet
                 ]
-                selected_inst = random.sample(available_insts, 1)[0]
+                inst, serialized_name = random.sample(available_insts, 1)[0]
+                inst_subtype = sampled_parts[inst]["type"]
 
                 # Selected instance may already have been picked up and held
                 # in left or right hand
-                if selected_inst == assem_st["left"]:
-                    ent_path = f"/Student Agent/Left Hand/{selected_inst}"
-                elif selected_inst == assem_st["right"]:
-                    ent_path = f"/Student Agent/Right Hand/{selected_inst}"
+                if serialized_name == ep_st["left"]:
+                    ent_path = f"/Student Agent/Left Hand/{serialized_name}"
+                elif serialized_name == ep_st["right"]:
+                    ent_path = f"/Student Agent/Right Hand/{serialized_name}"
                 else:
-                    ent_path = f"/{selected_inst}"
+                    ent_path = f"/{serialized_name}"
                 response.append((
                     "generate",
                     {
-                        "utterance": f"This is a {queried_type}.",
+                        "utterance": f"This is a {inst_subtype}.",
                         "pointing": { (0, 4): (ent_path, False) }
                             # `False`: Pass by string name instead of seg mask
                     }
@@ -736,21 +770,14 @@ class SimulatedTeacher:
                     inst = re.findall(r"([td])_(.*)_(\d+)$", inst_name)[0]
                     inst = (inst[1], (inst[0], int(inst[2])))
                     reported_grounding = utt[slice(*crange)]
-
-                    # Determine correctness according to the expected knowledge level
-                    # (i.e., specificity between supertype vs. subtype), as determined
-                    # by the current task
-                    if self.target_task == "build_truck_supertype":
-                        gt_type = inst[0]
-                    else:
-                        gt_type = sampled_parts[inst]["type"]
+                    gt_type = sampled_parts[inst]["type"]
                     if reported_grounding == gt_type: continue
 
                     # For incorrect groundings results, provide appropriate corrective
                     # feedback
-                    if inst_name in subassems.get(assem_st["left"], set()):
+                    if inst_name in subassems.get(ep_st["left"], set()):
                         ent_path = f"/Student Agent/Left Hand/*/{inst_name}"
-                    elif inst_name in subassems.get(assem_st["right"], set()):
+                    elif inst_name in subassems.get(ep_st["right"], set()):
                         ent_path = f"/Student Agent/Right Hand/*/{inst_name}"
                     else:
                         ent_path = f"/*/{inst_name}"        # On tabletop
@@ -1384,8 +1411,8 @@ class SimulatedTeacher:
         """
         # Shortcut vars
         sampled_parts = self.current_episode_record["sampled_parts"]
-        assem_st = self.current_episode_record["assembly_state"]
-        subassems = assem_st["subassemblies"]
+        ep_st = self.current_episode_record["episode_state"]
+        subassems = ep_st["subassemblies"]
 
         # Figure out a valid joining plan in the form of partial order plan,
         # using the same procedure adopted by the agent. First prepare
@@ -1521,8 +1548,8 @@ class SimulatedTeacher:
             for join_res in available_joins
         ]
 
-        current_held = (assem_st["left"], assem_st["right"])
-        if assem_st["left"] is not None or assem_st["right"] is not None:
+        current_held = (ep_st["left"], ep_st["right"])
+        if ep_st["left"] is not None or ep_st["right"] is not None:
             # If holding anything, see if any of the available joins can be
             # demonstrated without dropping them
             available_without_dropping = [
@@ -1535,45 +1562,45 @@ class SimulatedTeacher:
             else:
                 # No such joins possible, drop currently handheld objects
                 # and just randomly pick a join
-                if assem_st["left"] is not None:
-                    assem_st["left"] = None
+                if ep_st["left"] is not None:
+                    ep_st["left"] = None
                     demo_frag.append(("drop_left", ()))
-                if assem_st["right"] is not None:
-                    assem_st["right"] = None
+                if ep_st["right"] is not None:
+                    ep_st["right"] = None
                     demo_frag.append(("drop_right", ()))
 
         # Specifying objects to be held (or already held) in left and right
         # hand, respectively
         next_join = available_joins[0]
-        if assem_st["left"] is None and assem_st["right"] is None:
+        if ep_st["left"] is None and ep_st["right"] is None:
             # Both of agent's hands are currently empty, user can arbitrarily
             # choose a valid join to demonstrate among remaining ones
             join_res, obj_left, obj_right = next_join
 
-        elif assem_st["left"] is not None and assem_st["right"] is not None:
+        elif ep_st["left"] is not None and ep_st["right"] is not None:
             # Both of agent's hands are currently occupied, and the next
             # join to demonstrate can be achieved immediately
             join_res = next_join[0]
-            obj_left = assem_st["left"]
-            obj_right = assem_st["right"]
+            obj_left = ep_st["left"]
+            obj_right = ep_st["right"]
 
         else:
             # Either of agent's hands is empty and need to pick up the other
             # object
             join_res = next_join[0]
-            if assem_st["left"] in next_join:
-                obj_left = assem_st["left"]
+            if ep_st["left"] in next_join:
+                obj_left = ep_st["left"]
                 obj_right = next_join[2] if obj_left == next_join[1] else next_join[1]
             else:
-                assert assem_st["right"] in next_join
-                obj_right = assem_st["right"]
+                assert ep_st["right"] in next_join
+                obj_right = ep_st["right"]
                 obj_left = next_join[2] if obj_right == next_join[1] else next_join[1]
 
         # Pick up each object with left and right hand resp. as needed
-        if assem_st["left"] is None:
+        if ep_st["left"] is None:
             label_key_left = "SA" if len(subassems.get(obj_left, {})) > 1 else "GT"
             demo_frag.append(("pick_up_left", (obj_left, label_key_left)))
-        if assem_st["right"] is None:
+        if ep_st["right"] is None:
             label_key_right = "SA" if len(subassems.get(obj_right, {})) > 1 else "GT"
             demo_frag.append(("pick_up_right", (obj_right, label_key_right)))
 
