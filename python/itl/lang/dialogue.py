@@ -37,8 +37,11 @@ class DialogueManager:
         # and clauses in the turn
         self.record = []
 
+        # Track unanswered questions as set of pointers
         self.unanswered_Qs = set()
-        self.unexecuted_commands = set()
+        # Track unexecuted commands as dict from pointer to whether it is
+        # addressed
+        self.unexecuted_commands = {}
 
         # Buffer of utterances to generate
         self.to_generate = []

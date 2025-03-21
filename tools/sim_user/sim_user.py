@@ -254,20 +254,49 @@ class SimulatedTeacher:
                 # parts by sampling and executing a work plan. If target concept
                 # is a fine-grained subtype of truck, provide NL definition.
                 reported_neologism = re.findall(r"I don't know what '(.*)' means\.$", utt)[0]
-                assert reported_neologism == self.target_concept
 
-                # Sample a valid workplan for demonstration and load for execution
-                sampled_plan = self._sample_demo_plan()
-                self.ongoing_demonstration = ("full", sampled_plan)
+                if reported_neologism == self.target_concept:
+                    # Truck supertype or a subtype
+                    if self.player_type in ["bool", "demo"] \
+                        or self.target_concept not in self.domain_knowledge["definitions"]:
+                        # Need to demonstrate either if truck supertype is target concept
+                        # or language-less player type (even for truck subtypes as well)
 
-                # Notify agent that user will demonstrate how to build one
-                response.append((
-                    "generate",
-                    {
-                        "utterance": f"I will demonstrate how to build a {self.target_concept}.",
-                        "pointing": {}
-                    }
-                ))
+                        # Sample a valid workplan for demonstration and load for execution
+                        sampled_plan = self._sample_demo_plan()
+                        self.ongoing_demonstration = ("full", sampled_plan)
+
+                        # Notify agent that user will demonstrate how to build one
+                        response.append((
+                            "generate",
+                            {
+                                "utterance": f"I will demonstrate how to build a {self.target_concept}.",
+                                "pointing": {}
+                            }
+                        ))
+                    else:
+                        # Truck subtype for languageful agents, can provide definitional
+                        # property by required part subtypes
+                        definition = self.domain_knowledge["definitions"][self.target_concept]
+                        supertype = definition["supertype"]
+                        required_parts = " and ".join(
+                            f"a {part_supertype}"
+                            for part_supertype in definition["parts"].values()
+                        )
+
+                        # Provide textual definition
+                        response.append((
+                            "generate",
+                            {
+                                "utterance": f"A {self.target_concept} is a {supertype} " \
+                                    f"with {required_parts}.",
+                                "pointing": {}
+                            }
+                        ))
+                else:
+                    # Non-target concept, most likely referring to some unknown part
+                    # subtype concept; teach new concept by exemplification
+                    print(0)
 
             elif utt == "# Observing":
                 # Agent has signaled it is paying attention to user's action

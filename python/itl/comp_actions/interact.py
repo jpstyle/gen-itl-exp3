@@ -269,6 +269,7 @@ def attempt_command(agent, utt_pointer):
     (_, _, _, cons), raw, _ = dialogue_record[ti][1][ci]
 
     command_executable = True
+    addressed_before = agent.lang.dialogue.unexecuted_commands[utt_pointer]
 
     action_lit = [lit for lit in cons if lit.name.startswith("arel_")][0]
     action_type = int(action_lit.name.replace("arel_", ""))
@@ -291,13 +292,23 @@ def attempt_command(agent, utt_pointer):
     if command_executable:
         # Schedule to generate plan & execute towards fulfilling the command
         agent.planner.agenda.appendleft(("execute_command", (action_type, action_params)))
-        agent.lang.dialogue.unexecuted_commands.remove(utt_pointer)
+        del agent.lang.dialogue.unexecuted_commands[utt_pointer]
+        return
+
+    elif addressed_before:
+        # Value true only if the command was attempted before but proven unable
+        # to be executed, then verbally reported to user. Do not report again,
+        # silently skipping.
         return
 
     else:
-        # Command cannot be executed for some reason; report inability and dismiss
-        # the command
-        ri_command = f"t{ti}c{ci}"                      # Denotes original request
+        # Command proven to be not executable; report inability, only if never
+        # addressed before
+
+        # Mark 'addressed'
+        agent.lang.dialogue.unexecuted_commands[utt_pointer] = True
+
+        ri_command = f"t{ti}c{ci}"                  # Denotes original request
 
         # NL surface form and corresponding logical form
         surface_form = f"I am unable to {raw[0].lower()}{raw[1:]}"
@@ -315,7 +326,6 @@ def attempt_command(agent, utt_pointer):
         }
         predicates = { "pc0": (("sp", "unable"), "sp_unable") }
 
-        agent.lang.dialogue.unexecuted_commands.remove(utt_pointer)
         agent.lang.dialogue.to_generate.append(
             (logical_form, surface_form, referents, predicates, {})
         )

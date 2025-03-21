@@ -22,7 +22,7 @@ class SemanticParser:
         #       literals.
         #    `referents`: dict with discourse referent and event variables as keys
         #       and their associated information as values.
-        #   `events`: dict with event variables as keys and natural-language
+        #   `source`: dict with event variables as keys and natural-language
         #       provenances as values.
         parses = []       # Return value
         for utt, dem_refs in zip(usr_in, pointing):
@@ -40,6 +40,7 @@ class SemanticParser:
             #   10) "# Observing"
             #   11) "What were you trying to do?"
             #   12) "Stop." & "Continue."
+            #   13) "A {truck_subtype} is a truck with {part_subtypes}."
             if re.match(r"Build a (.*)\.$", utt):
                 # Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -263,6 +264,7 @@ class SemanticParser:
                 # 'slot' in the target structure for the first time
                 _, target_l, _, target_r = \
                     re.findall(r"Join (a|the) (.*) and (a|the) (.*)\.$", utt)[0]
+
                 clauses = clauses = {
                     "e0": (
                         None, set(), [],
@@ -288,6 +290,7 @@ class SemanticParser:
                 # as a lifted rule and stored in KB later.
                 part_subtype, part_supertype = \
                     re.findall(r"(.*) is a type of (.*)\.$", utt)[0]
+
                 clauses = {
                     "e0": (
                         None, set(), [],
@@ -335,6 +338,19 @@ class SemanticParser:
 
             elif utt == "Stop." or utt == "Continue.":
                 # Raw form has all necessary info, null logical form
+                clauses = {}
+                referents = {}
+                source = { "e0": utt }
+
+            elif re.match(r"A (.*) is a truck with (.*)\.$", utt):
+                # Providing verbal definition of a truck subtype by
+                # necessary parts
+                truck_subtype, part_subtypes = \
+                    re.findall(r"A (.*) is a truck with (.*)\.$", utt)[0]
+                part_subtypes = [
+                    subtype.strip("a ") for subtype in part_subtypes.split(" and ")
+                ]
+
                 clauses = {}
                 referents = {}
                 source = { "e0": utt }

@@ -161,7 +161,7 @@ class LanguageModule:
                             # Commands
                             
                             # Record turn-clause index of unexecuted command
-                            self.dialogue.unexecuted_commands.add((ti, se2ci[(si, ev_id)]))
+                            self.dialogue.unexecuted_commands[(ti, se2ci[(si, ev_id)])] = False
                     
                         case _:
                             # ???
