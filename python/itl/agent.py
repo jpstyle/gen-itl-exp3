@@ -203,14 +203,6 @@ class ITLAgent:
         # Lasting storage of pointing info
         if pointing is None: pointing = {}
 
-        # Translated dialogue record and visual context from currently stored values
-        # (scene may or may not change)
-        prev_record = self.lang.dialogue.export_resolved_record()
-        prev_vis_scene = self.vision.scene
-        prev_pr_prog = self.symbolic.concl_vis[1][1] if self.symbolic.concl_vis else None
-        prev_kb = self.kb_snap
-        prev_context = (prev_vis_scene, prev_pr_prog, prev_kb)
-
         # Some cleaning steps needed whenever visual context changes
         if new_env:
             # Refresh agent states to prepare for new episode
@@ -226,10 +218,6 @@ class ITLAgent:
 
         # Index of latest dialogue turn
         ti_last = len(self.lang.dialogue.record)
-
-        # Set of new visual concepts (equivalently, neologisms) newly registered
-        # during the loop
-        novel_concepts = set()
 
         exemplars = self.lt_mem.exemplars       # Shortcut var
 
@@ -307,6 +295,13 @@ class ITLAgent:
                 # Reference & word sense resolution to connect vision & discourse
                 self.lang.dialogue.resolve_symbol_semantics(self.lt_mem.lexicon)
 
+            # Resetting flags
+            xb_updated = False
+            kb_updated = False
+
+            # Handle any neologisms
+            xb_updated |= self.comp_actions.handle_neologism(self.lang.dialogue)
+
             # Translate dialogue record into processable format based on the result
             # of lang.resolve_symbol_semantics
             resolved_record = self.lang.dialogue.export_resolved_record()
@@ -320,7 +315,7 @@ class ITLAgent:
                 # First recognize any future indicative 'demonstrate how' by user
                 speaker, turn_clauses = resolved_record[-1]; ti = len(resolved_record)-1
                 for ci, ((_, _, _, cons), _, clause_info) in enumerate(turn_clauses):
-                    if cons is None: break
+                    if len(cons) == 0: break
 
                     demo_lit = [lit for lit in cons if lit.name=="sp_demonstrate"]
                     if len(demo_lit) == 0: break
@@ -386,11 +381,8 @@ class ITLAgent:
                     demo_vis = [img for img in self.vision.latest_inputs if img is not None]
                     demo_ti = self.observed_demo[1][0]
                     aligned_demo_data = [
-                        (img, contents, env_refs)
-                        for (ti, contents), img, env_refs in zip(
-                            user_annotations, demo_vis,
-                            self.lang.dialogue.referents["env"],
-                        )
+                        (img, contents)
+                        for (ti, contents), img in zip(user_annotations, demo_vis)
                         if ti >= demo_ti
                     ]
 
@@ -429,28 +421,6 @@ class ITLAgent:
                 ##           Identify & exploit learning opportunities           ##
                 ###################################################################
 
-                # Resetting flags
-                xb_updated = False
-                kb_updated = False
-
-                # Collect previous factual statements and questions made during this
-                # dialogue
-                prev_statements = []; prev_Qs = []
-                for ti, (speaker, turn_clauses) in enumerate(prev_record):
-                    for ci, clause in enumerate(turn_clauses):
-                        (gq, bvars, ante, cons), raw, clause_info = clause
-                        if cons is None: continue
-                        if raw.startswith("#"): continue
-
-                        mood = clause_info["mood"]
-                        # Factual statement
-                        if mood == "." and ante is None and len(cons) == 1:
-                            prev_statements.append(((ti, ci), (speaker, cons)))
-                        # Question
-                        if mood == "?":
-                            # Here, `rule` represents presuppositions included in `ques`
-                            prev_Qs.append(((ti, ci), (speaker, bvars, ante, cons, raw)))
-
                 # Process translated dialogue record to do the following:
                 #   - Identify recognition mismatch btw. user provided vs. agent
                 #   - Identify new generic rules to be integrated into KB
@@ -459,7 +429,7 @@ class ITLAgent:
                     if ti < ti_last: continue           # Already examined
 
                     for ci, clause in enumerate(turn_clauses):
-                        (gq, bvars, ante, cons), raw, clause_info = clause
+                        statement, raw, clause_info = clause
 
                         # Skip any non-indicative statements (or presuppositions)
                         if clause_info["mood"] != ".": continue
@@ -467,27 +437,23 @@ class ITLAgent:
                         if raw.startswith("# "): continue
 
                         # Identify learning opportunities; i.e., any deviations from the
-                        # agent's estimated states of affairs, generic rules delivered
-                        # via NL generic statements, or acknowledgements (positive or lack
-                        # of negative)
-                        statement = (ante, cons)
+                        # agent's estimated states of affairs or generic rules delivered
+                        # via NL generic statements
                         xb_updated |= self.comp_actions.identify_mismatch(statement)
-                        kb_updated |= self.comp_actions.identify_generics(
-                            statement, prev_Qs, raw
-                        )
-
-                # Handle neologisms
-                xb_updated |= self.comp_actions.handle_neologism(
-                    novel_concepts, self.lang.dialogue
-                )
+                        kb_updated |= self.comp_actions.identify_generics(statement, raw)
 
                 if xb_updated or kb_updated:
                     # Agent's knowledge state is somehow updated, flag that
                     # re-planning is in order before execution
-                    self.planner.execution_state["replanning_needed"] = True
+                    if "replanning_needed" in self.planner.execution_state:
+                        self.planner.execution_state["replanning_needed"] = True
                 else:
                     # Terminate the loop when 'equilibrium' is reached
                     break
+
+        # Examine and update the current set of unresolved neologisms based
+        # on agent's current knowledge state
+        self.comp_actions.resolve_neologisms()
 
     def _act(self):
         """

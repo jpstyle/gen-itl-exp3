@@ -30,7 +30,8 @@ def query(reg_gr, q_vars, event, restrictors=None):
     restrictors = restrictors or {}
 
     event = sum([
-        flatten_ante_cons(ev_ante, ev_cons) for ev_ante, ev_cons in event
+        flatten_ante_cons(ev_ante, ev_cons)
+        for _, _, ev_ante, ev_cons in event
     ], [])
     event = set(sum([
         [Rule(head=l) for l in ev_cons] if len(ev_cons) > 0 else [Rule(body=ev_ante)]

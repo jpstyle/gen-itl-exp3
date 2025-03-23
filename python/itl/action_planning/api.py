@@ -19,7 +19,11 @@ class ActionPlannerModule:
 
         # For storing whichever state values that need to be tracked along execution
         # of some plan consisting of multiple to-dos
-        self.execution_state = {}
+        self.execution_state = {
+            "manipulator_states": [(None, None, None), (None, None, None)],
+                # Resp. left & right held object, manipulator pose, component poses
+            "action_history": []
+        }
 
     def refresh(self):
         self.__init__()

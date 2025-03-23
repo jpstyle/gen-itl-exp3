@@ -9,26 +9,20 @@ node_atomic(n(N,NS),P) :- node_sa_template(N,S,I), req_atomic(S,I,NS,P).
 node_sa_template(n(N,NS),S2,I2) :-
     node_sa_template(N,S1,I1), req_template(S1,I1,NS,S2,I2).
 
-% An object that may be an instance of atomic part type P can be considered and
-% used as one, but an object cannot be used as more than one atomic part type
-% (mentioned in some subassembly template) at the same time
-may_consider(O,P,PR) :- type_likely(O,P,PR), PR >= 5, not ext_node(O,_), not ext_node(O).
-{ use_as(O,P,PR) } :- may_consider(O,P,PR), slot_type(P).
-:- type_likely(O,_,_), #count { P : use_as(O,P,_) } > 1.
+% An object that is likely to be an instance of a type may fill an atomic node
+% with matching type. Each object can fill up to one atomic node, and each
+% atomic node can be filled by up to one object.
+{ fill_node(O,N,PR) } :- node_atomic(N,P), type_likely(O,P,PR), PR >= 5.
+:- type_likely(O,_,_), #count { N : fill_node(O,N,_) } > 1.
+:- node_atomic(N,_), #count { O : fill_node(O,N,_) } > 1.
 
 % Potential subtype usage transfers to potential supertype usage
-may_consider(O,P2,PR) :- may_consider(O,P1,PR), subtype_of(P1,P2).
-
-% Usage should not exceed demand
-part_demand(P,DM) :- slot_type(P), DM = #count { N : node_atomic(N,P) }.
-part_usage(P,PU) :- slot_type(P), PU = #count { O : use_as(O,P,_) }.
-:- part_demand(P,DM), part_usage(P,PU), PU > DM.
+type_likely(O,P2,PR) :- type_likely(O,P1,PR), subtype_of(P1,P2).
 
 % Do not allow any idle objects when they can be employed
-unmet_demand(P,DM-PU) :- part_demand(P,DM), part_usage(P,PU).
-ununsed_supply(P,US) :- slot_type(P),
-    US = #count { O : may_consider(O,P,_), not use_as(O,_,_) }.
-:- unmet_demand(P,UD), ununsed_supply(P,US), UD > 0, US > 0.
+node_unfilled(N) :- node_atomic(N,_), not fill_node(_,N,_).
+:- node_atomic(N,P), node_unfilled(N),
+    #count { O : type_likely(O,P,PR), PR >= 5, not fill_node(O,_,_) } > 0.
 
 % For tracking which nodes will have to be connected at which contact points
 to_connect(D1,D2,CP1,CP2) :-
@@ -72,11 +66,11 @@ may_unify(O1,N1) :- must_unify(O2,N2), ext_node(O1), ext_edge(O1,O2),
     to_connect(N1,N2,_,_).
 % Different objects cannot be forced to unify with the same node
 :- must_unify(O1,N1), must_unify(O2,N2), O1 != O2, N1 = N2.
-% Count as part usage if must_unify
-use_as(O,P,20) :- must_unify(O,N), ext_node(N,P), slot_type(P).
-% Connections between uniquely unified objects enforce node connections
-:- must_unify(O1,N1), must_unify(O2,N2), ext_edge(O1,O2),
-    not to_connect(N1,N2,_,_).
+% Observe must_unify relations
+:- must_unify(O,N), not fill_node(O,N,_).
+% Observe ext_edge relations
+:- ext_edge(O1,O2,_,_), must_unify(O1,N1,_), must_unify(O2,N2,_), not to_connect(N1,N2,_,_).
+:- ext_edge(O1,O2), must_unify(O1,N1,_), must_unify(O2,N2,_), not to_connect(N1,N2,_,_).
 
 % Supertype-subtype relations for ext_nodes
 ext_node(O,P2) :- ext_node(O,P1), subtype_of(P1,P2).
@@ -87,7 +81,7 @@ ext_edge(O2,O1,CP2,CP1) :- ext_edge(O1,O2,CP1,CP2).
 ext_edge(O2,O1) :- ext_edge(O1,O2).
 
 % Compute final compatibility score by taking average across all atomic nodes
-total_score(TS) :- TS = #sum { PR,O : use_as(O,P,PR) }.
+total_score(TS) :- TS = #sum { PR,O : fill_node(O,N,PR) }.
 avg_score(TS/NN) :-
     total_score(TS), NN = #count { N : node_atomic(N,_) }, NN != 0.
 

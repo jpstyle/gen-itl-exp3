@@ -18,6 +18,7 @@ import networkx as nx
 from numpy.linalg import inv
 from clingo import Control, SymbolType, Number, Function
 
+from .utils import rle_decode
 from ..vision.utils import (
     xyzw2wxyz, flip_position_y, flip_quaternion_y, rmat2quat, transformation_matrix
 )
@@ -72,8 +73,15 @@ def attempt_Q(agent, utt_pointer):
             if cl_ind not in clauses_covered
         }
 
-    if "sp_neologism" in predicates_mentioned:
-        # Question cannot be answered for spme relevant clause(s) include
+    pred_concs = {
+        ((pred_spl := pred.split("_"))[0], int(pred_spl[1]))
+        for pred in predicates_mentioned
+    }
+    if any(
+        agent.lt_mem.lexicon.d2s[conc][0] in agent.lang.unresolved_neologisms
+        for conc in pred_concs
+    ):
+        # Question cannot be answered for some relevant clause(s) include
         # neologism unknown to agent
         return
     else:
@@ -117,7 +125,7 @@ def prepare_answer_Q(agent, utt_pointer):
 
         # For now, can only process simple (antecedent-free) intentions
         # where the action predicate is 'join'
-        assert intended_ante is None and len(intended_cons) > 0
+        assert len(intended_ante) == 0 and len(intended_cons) > 0
         join_conc = agent.lt_mem.lexicon.s2d[("va", "join")][0][1]
         assert {lit.name for lit in intended_cons} == {f"arel_{join_conc}"}
 
@@ -155,7 +163,7 @@ def prepare_answer_Q(agent, utt_pointer):
         # NL surface forms and corresponding logical forms
         surface_form_0 = f"I was trying to join this {sym_left} and this {sym_right}."
         surface_form_1 = f"# to-infinitive phrase ('to join this {sym_left} and this {sym_right}')"
-        gq_0 = gq_1 = None; bvars_0 = bvars_1 = set(); ante_0 = ante_1 = []
+        gq_0 = gq_1 = (); bvars_0 = bvars_1 = (); ante_0 = ante_1 = []
         cons_0 = [
             ("sp", "intend", [("e", 0), "x0", ("e", 1)]),
             ("sp", "pronoun1", ["x0"]),
@@ -280,7 +288,14 @@ def attempt_command(agent, utt_pointer):
         if agent.lang.dialogue.referents["dis"][arg[0]].get("is_pred"):
             # Referent denotes a predicate category
             action_params[arg[0]] = [lit.name for lit in arg_describing_lits]
-            if any(pred == "sp_neologism" for pred in action_params[arg[0]]):
+            pred_concs = {
+                ((pred_spl := pred.split("_"))[0], int(pred_spl[1]))
+                for pred in action_params[arg[0]]
+            }
+            if any(
+                agent.lt_mem.lexicon.d2s[conc][0] in agent.lang.unresolved_neologisms
+                for conc in pred_concs
+            ):
                 # Neologism included in action parameter config, cannot execute
                 # (neologism will be separately handled by `report_neologism` method)
                 command_executable = False
@@ -291,7 +306,7 @@ def attempt_command(agent, utt_pointer):
 
     if command_executable:
         # Schedule to generate plan & execute towards fulfilling the command
-        agent.planner.agenda.appendleft(("execute_command", (action_type, action_params)))
+        agent.planner.agenda.append(("execute_command", (action_type, action_params)))
         del agent.lang.dialogue.unexecuted_commands[utt_pointer]
         return
 
@@ -312,7 +327,7 @@ def attempt_command(agent, utt_pointer):
 
         # NL surface form and corresponding logical form
         surface_form = f"I am unable to {raw[0].lower()}{raw[1:]}"
-        gq = None; bvars = set(); ante = []
+        gq = (); bvars = (); ante = []
         cons = [
             ("sp", "unable", [("e", 0), "x0", ri_command]),
             ("sp", "pronoun1", ["x0"])
@@ -372,9 +387,8 @@ def execute_command(agent, action_spec):
             (lit.args[0][0], int(lit.name.strip("pcls_")))
             for spk, turn_clauses in resolved_record
             for ((_, _, _, cons), _, clause_info) in turn_clauses
-            if cons is not None
             for lit in cons
-            if spk == "Teacher" and clause_info["mood"] == "." \
+            if len(cons) > 0 and spk == "Teacher" and clause_info["mood"] == "." \
                 and lit.name.startswith("pcls")
         ]
         labeling_map = dict(labeling_feedback)
@@ -416,10 +430,9 @@ def execute_command(agent, action_spec):
         # are to be executed---that is, signaled to Unity environment---immediately
 
         # Record the spec of action being executed
-        if "action_history" in exec_state:
-           exec_state["action_history"].append(
-               (action_type, action_params, "Student")
-            )
+        exec_state["action_history"].append(
+            (action_type, action_params, "Student")
+        )
 
         action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
         match action_name:
@@ -436,6 +449,9 @@ def execute_command(agent, action_spec):
 
             case "assemble_right_to_left" | "assemble_left_to_right":
                 return _execute_assemble(agent, action_name, action_params)
+
+            case "inspect_left" | "inspect_right":
+                return _execute_inspect(agent, action_name, action_params)
 
 def _execute_build(agent, action_params):
     """
@@ -454,14 +470,11 @@ def _execute_build(agent, action_params):
             sequence of atomic actions to agenda
     """
     # Initialize plan execution state tracking dict
-    agent.planner.execution_state = {
+    agent.planner.execution_state |= {
         "plan_goal": ("build", action_params),
-        "manipulator_states": [(None, None, None), (None, None, None)],
-            # Resp. left & right held object, manipulator pose, component masks
         "connection_graphs": {},
         "recognitions": {},
         "replanning_needed": False,
-        "action_history": [],
         "metrics": {
             "num_planning_attempts": 0,
             "num_collision_queries": 0
@@ -484,7 +497,7 @@ def _execute_build(agent, action_params):
         agent.planner.agenda.append(("posthoc_episode_analysis", ()))
         agent.planner.agenda.append(("utter_simple", ("Done.", { "mood": "." })))
     else:
-        agent.planner.agenda.append(("report_planning_failure"), ())
+        agent.planner.agenda.append(("report_planning_failure", ()))
 
 def _plan_assembly(agent, build_target):
     """
@@ -539,7 +552,7 @@ def _plan_assembly(agent, build_target):
     else:
         # Compile the optimal solution into appropriate data structures
         tabulated_results = _tabulate_goal_selection_result(best_model)
-        assembly_hierarchy, part_candidates = tabulated_results[:2]
+        assembly_hierarchy, obj2node_map = tabulated_results[:2]
         connect_edges, connection_graph = tabulated_results[2:4]
         node_unifications, atomic_node_concs = tabulated_results[4:6]
         vis_scores, hyp_rels = tabulated_results[6:]
@@ -570,8 +583,13 @@ def _plan_assembly(agent, build_target):
         # nodes as long as they don't uniquely unify with some other object, but that
         # still would be too broad. We could eliminate many options by means of graph
         # matching algorithm.
+        obj2sa_map = {
+            ex_obj: sa
+            for sa, sa_graph in exec_state["connection_graphs"].items()
+            for ex_obj in sa_graph if len(sa_graph) > 1
+        }
         possible_mappings = _match_existing_subassemblies(
-            connection_graph, node_unifications,
+            connection_graph, obj2sa_map, node_unifications,
             atomic_node_concs, hyp_rels, exec_state
         )
         covered_objs = {
@@ -665,7 +683,7 @@ def _plan_assembly(agent, build_target):
         unification_scenarios = product(*[
             isms for _, isms in possible_mappings.items()
         ])
-        valid_scenarios = []; obj2sa_mapping = {}
+        valid_scenarios = []; obj2sa_map = {}
         for scenario in unification_scenarios:
             # Merge the per-group isomorphic mappings into a single mapping,
             # while fetching object-to-subassembly affiliations as well
@@ -674,7 +692,7 @@ def _plan_assembly(agent, build_target):
                 for n, ex_obj in mapping.items():
                     for sa, sa_graph in exec_state["connection_graphs"].items():
                         if ex_obj not in sa_graph: continue
-                        obj2sa_mapping[ex_obj] = sa
+                        obj2sa_map[ex_obj] = sa
                         combined_mapping[ex_obj] = n
 
             if len(set(combined_mapping.values())) != len(combined_mapping):
@@ -734,10 +752,6 @@ def _plan_assembly(agent, build_target):
 
             # Try solving the planning problem with the unification premise
             # encoded in `unification_choice`
-            unification_choice_fmt = {
-                f"{obj2sa_mapping[ex_obj]}_{ex_obj}": n
-                for ex_obj, n in unification_choice.items()
-            }       # Formatted into compatible form
             unification_choice_inv = {
                 n: ex_obj for ex_obj, n in unification_choice.items()
             }
@@ -745,7 +759,7 @@ def _plan_assembly(agent, build_target):
                 _divide_and_conquer(
                     compression_sequence, connection_graph, exec_state["recognitions"],
                     atomic_node_concs, connect_edges, part_names, cp_names,
-                    (exec_state["connection_graphs"], unification_choice_fmt),
+                    (exec_state["connection_graphs"], unification_choice),
                     scope_entailments, verified_joins,
                     agent.cfg.paths.assets_dir, agent.cfg.seed
                 )
@@ -760,7 +774,7 @@ def _plan_assembly(agent, build_target):
                 if all(n in unification_choice_inv for n in ante | {cons})
             }
             if join_tree is not None:
-                valid_join_trees.append((join_tree, unification_choice_fmt))
+                valid_join_trees.append((join_tree, unification_choice))
 
         if len(valid_join_trees) == 0:
             # None of the scenarios resulted in valid join trees, which shouldn't
@@ -864,7 +878,7 @@ def _plan_assembly(agent, build_target):
         action_sequence, node2obj_map = _linearize_join_tree(
             copy.deepcopy(tree_intersection), exec_state, connection_graph,
             connect_edges, atomic_node_concs, safe_unification_choice,
-            part_candidates, (pick_up_actions, drop_actions, assemble_actions)
+            obj2node_map, (pick_up_actions, drop_actions, assemble_actions)
         )       # The valid `unification_choice` obtained above is passed as well
 
         plan_dscr = "Full" if plan_complete else "Partial"
@@ -965,7 +979,6 @@ def _goal_selection(agent, build_target):
             for n, data in template.nodes(data=True):
                 if data["node_type"] == "atomic":
                     conc_ind = data["conc"]
-                    assembly_pieces.add(Literal("slot_type", wrap_args(conc_ind)))
                     assembly_pieces.add(Literal(
                         "req_atomic", wrap_args(sa_conc, ti, n, conc_ind)
                     ))
@@ -995,8 +1008,8 @@ def _goal_selection(agent, build_target):
                 assembly_pieces.add(conn_sgn_lit)
 
     # Retrieve and encode hyper/hyponymy relations
-    for (ante, cons), _, _, rule_type in agent.lt_mem.kb.entries:
-        if rule_type != "taxonomy": continue
+    for (ante, cons), _, _, knowledge_type in agent.lt_mem.kb.entries:
+        if knowledge_type != "taxonomy": continue
         subtype_conc = int(ante[0].name.strip("pcls_"))
         supertype_conc = int(cons[0].name.strip("pcls_"))
         assembly_pieces.add(
@@ -1009,6 +1022,9 @@ def _goal_selection(agent, build_target):
     # goal structure
     ext_info = set()
     for sa_name, sa_graph in exec_state["connection_graphs"].items():
+        # Dismiss singletons as they do not provide any additional constraints
+        if len(sa_graph) == 1: continue
+
         # Adding each existing part along with committed recognition
         for ext_node in sa_graph.nodes:
             if ext_node in exec_state["recognitions"]:
@@ -1016,17 +1032,14 @@ def _goal_selection(agent, build_target):
                 # was recognized and picked up by agent
                 ext_conc = exec_state["recognitions"][ext_node]
                 ext_node_lit = Literal(
-                    "ext_node",
-                    wrap_args(f"{sa_name}_{ext_node}", ext_conc)
+                    "ext_node", wrap_args(ext_node, ext_conc)
                 )
             else:
                 # Atomic part type info not available, most likely because
                 # the type of the atomic part is not recognized by agent;
                 # instead, the part instance is picked up during demo
                 # fragment by user
-                ext_node_lit = Literal(
-                    "ext_node", wrap_args(f"{sa_name}_{ext_node}")
-                )
+                ext_node_lit = Literal("ext_node", wrap_args(ext_node))
             ext_info.add(ext_node_lit)
         # Adding each connection between existing parts
         for ext_node1, ext_node2, cps in sa_graph.edges(data="cps"):
@@ -1034,16 +1047,14 @@ def _goal_selection(agent, build_target):
                 # Contact point info available, list all info
                 ext_edge_lit = Literal(
                     "ext_edge", wrap_args(
-                        f"{sa_name}_{ext_node1}", f"{sa_name}_{ext_node2}",
+                        ext_node1, ext_node2,
                         f"p_{cps[ext_node1]}", f"p_{cps[ext_node2]}"
                     )
                 )
             else:
                 # Contact point info not available, just include objects
                 ext_edge_lit = Literal(
-                    "ext_edge", wrap_args(
-                        f"{sa_name}_{ext_node1}", f"{sa_name}_{ext_node2}"
-                    )
+                    "ext_edge", wrap_args(ext_node1, ext_node2)
                 )
             ext_info.add(ext_edge_lit)
 
@@ -1122,7 +1133,7 @@ def _tabulate_goal_selection_result(model):
         else f"{serialize_node(n.arguments[0])}_{n.arguments[1]}"
 
     assembly_hierarchy = nx.DiGraph()
-    part_candidates = defaultdict(set)
+    obj2node_map = {}
     connect_edges = {}; connection_graph = nx.Graph()
     node_unifications = defaultdict(set)
     vis_scores = {}; hyp_rels = {}
@@ -1160,12 +1171,15 @@ def _tabulate_goal_selection_result(model):
                 supertype_conc = atm.arguments[1].number
                 hyp_rels[subtype_conc] = supertype_conc
 
-            case "use_as":
+            case "fill_node":
                 # Decision as to use which recognized object to fill which
-                # atomic part slot in the assembly hierarchy graph
+                # atomic node in the assembly hierarchy graph. This mapping
+                # is tentative, as assignments may be interchanged within
+                # same types later for prioritizing joins of filled nodes
+                # over unfilled nodes.
                 obj_name = atm.arguments[0].name
-                part_conc = atm.arguments[1].number
-                part_candidates[part_conc].add(obj_name)
+                node_rn = serialize_node(atm.arguments[1])
+                obj2node_map[obj_name] = node_rn
 
             case "to_connect":
                 # Derived assembly connection to make between nodes
@@ -1196,13 +1210,13 @@ def _tabulate_goal_selection_result(model):
     }
 
     tabulated_results = (
-        assembly_hierarchy, part_candidates, connect_edges, connection_graph,
+        assembly_hierarchy, obj2node_map, connect_edges, connection_graph,
         node_unifications, atomic_node_concs, vis_scores, hyp_rels
     )
     return tabulated_results
 
 def _match_existing_subassemblies(
-    connection_graph, unification_options,
+    connection_graph, obj2sa_map, unification_options,
     atomic_node_concs, hyp_rels, exec_state
 ):
     """
@@ -1218,15 +1232,13 @@ def _match_existing_subassemblies(
 
     possible_mappings = defaultdict(list)
     uniquely_unified = {
-        re.findall(r"(s\d+)_(o\d+)", ex_obj)[0]: list(nodes)[0]
-        for ex_obj, nodes in unification_options.items()
-        if len(nodes) == 1 and re.match(r"(s\d+)_(o\d+)", ex_obj)
-            # Ignore any singletons, which are in `oXX_oXX` form
+        ex_obj: list(nodes)[0] for ex_obj, nodes in unification_options.items()
+        if len(nodes) == 1
     }
 
     anchored_sas = {
-        sa for sa, _ in uniquely_unified
-        if len(exec_state["connection_graphs"][sa]) > 1
+        sa for ex_obj in uniquely_unified
+        if len(exec_state["connection_graphs"][(sa := obj2sa_map[ex_obj])]) > 1
     }
     lifted_sas = {
         sa for sa in set(exec_state["connection_graphs"]) - anchored_sas
@@ -1241,8 +1253,8 @@ def _match_existing_subassemblies(
     for sa in anchored_sas:
         sa_graph_match = exec_state["connection_graphs"][sa].to_undirected()
         for ex_obj in sa_graph_match:
-            if (sa, ex_obj) in uniquely_unified:
-                unified_node = uniquely_unified[(sa, ex_obj)]
+            if ex_obj in uniquely_unified:
+                unified_node = uniquely_unified[ex_obj]
                 sa_graph_match.nodes[ex_obj]["unif"] = unified_node
         matcher = nx.isomorphism.ISMAGS(
             conn_graph_match, sa_graph_match,
@@ -1292,15 +1304,13 @@ def _divide_and_conquer(
     # and the history of current episode; in particular, if the premise
     # would enforce a join that's proven invalid by teacher
     unification_choice_inv = {
-        n: re.findall(r"(s\d+)_(o\d+)", ex_obj)[0]
-        for ex_obj, n in current_progress[1].items()
-        if re.match(r"(s\d+)_(o\d+)", ex_obj)
+        n: ex_obj for ex_obj, n in current_progress[1].items()
     }
     for u, v in connection_graph.edges:
         if u not in unification_choice_inv: continue
         if v not in unification_choice_inv: continue
-        obj_u = unification_choice_inv[u][1]
-        obj_v = unification_choice_inv[v][1]
+        obj_u = unification_choice_inv[u]
+        obj_v = unification_choice_inv[v]
         conc_u = atomic_node_concs[u]
         conc_v = atomic_node_concs[v]
         if recognitions.get((obj_u, obj_v)) == (-conc_u, -conc_v) or \
@@ -1702,9 +1712,7 @@ def _planning_subproblems(
     compression_sequence = copy.deepcopy(compression_sequence)
     connection_status, node_unifications = current_progress
     chunks_status = {
-        sa: {
-            node_unifications[f"{sa}_{ex_obj}"] for ex_obj in sa_graph
-        }
+        sa: {node_unifications[ex_obj] for ex_obj in sa_graph}
         for sa, sa_graph in connection_status.items()
         if len(sa_graph) > 1            # Dismiss singletons
     }                       # Node grouping state tracker across sequence
@@ -2140,7 +2148,7 @@ class _PhysicalAssemblyPropagator:
 
 def _linearize_join_tree(
     join_tree, exec_state, connection_graph, contacts,
-    atomic_node_concs, node_unifications, part_candidates, action_inds
+    atomic_node_concs, node_unifications, obj2node_map, action_inds
 ):
     """
     Helper method factored out for finding the best linearization of the
@@ -2151,7 +2159,9 @@ def _linearize_join_tree(
     """
     pick_up_actions, drop_actions, assemble_actions = action_inds
 
-    action_sequence = []        # Return value
+    # Return values
+    action_sequence = []
+    node2obj_map = {}
 
     if len(join_tree) == 0:
         # If empty join tree was provided, it means all necessary joins
@@ -2163,14 +2173,18 @@ def _linearize_join_tree(
 
         return action_sequence, {}
 
+    # Collect parts by type to allow flexible switching of object assignments
+    part_type_pool = defaultdict(set)
+    for obj, n in obj2node_map.items():
+        part_type_pool[atomic_node_concs[n]].add(obj)
+
     # First stipulate any unified node-to-object mappings
-    node2obj_map = {}
     for sa, sa_graph in exec_state["connection_graphs"].items():
         if len(sa_graph) == 1: continue     # Dismiss singletons
         for obj in sa_graph.nodes:
             # Atomic parts already used in some subassembly shouldn't
             # be considered as candidate again
-            for cnd_objs in part_candidates.values():
+            for cnd_objs in part_type_pool.values():
                 if obj in cnd_objs: cnd_objs.remove(obj)
             # Account for any applicable pairwise negative label info
             for objs, labels in exec_state["recognitions"].items():
@@ -2178,14 +2192,14 @@ def _linearize_join_tree(
                 if obj not in objs: continue
                 obj1, obj2 = objs
                 label1, label2 = -labels[0], -labels[1]
-                if obj == obj1 and obj2 in part_candidates.get(label2, {}):
-                    part_candidates[label2].remove(obj2)
-                if obj == obj2 and obj1 in part_candidates.get(label1, {}):
-                    part_candidates[label1].remove(obj1)
+                if obj == obj1 and obj2 in part_type_pool.get(label2, {}):
+                    part_type_pool[label2].remove(obj2)
+                if obj == obj2 and obj1 in part_type_pool.get(label1, {}):
+                    part_type_pool[label1].remove(obj1)
 
             # Collect specified obj-to-node unifications
-            if f"{sa}_{obj}" not in node_unifications: continue
-            unified_node = node_unifications[f"{sa}_{obj}"]
+            if obj not in node_unifications: continue
+            unified_node = node_unifications[obj]
             conc_n = atomic_node_concs[unified_node]
             node2obj_map[unified_node] = (obj, conc_n)
 
@@ -2243,7 +2257,7 @@ def _linearize_join_tree(
             n for n in available_joins
             if all(
                 u not in atomic_node_concs or 
-                    len(part_candidates[atomic_node_concs[u]]) > 0
+                    len(part_type_pool[atomic_node_concs[u]]) > 0
                 for u, _ in join_tree.in_edges(n)
             )
         ]
@@ -2270,18 +2284,18 @@ def _linearize_join_tree(
         for n in [a1, a2]:
             if n in atomic_node_concs and n not in node2obj_map:
                 conc_n = atomic_node_concs[n]
-                if len(part_candidates[conc_n]) > 0:
-                    obj = part_candidates[conc_n].pop()
+                if len(part_type_pool[conc_n]) > 0:
+                    obj = part_type_pool[conc_n].pop()
                     # Account for any applicable pairwise negative label info
                     for objs, labels in exec_state["recognitions"].items():
                         if not isinstance(objs, tuple): continue
                         if obj not in objs: continue
                         obj1, obj2 = objs
                         label1, label2 = -labels[0], -labels[1]
-                        if obj == obj1 and obj2 in part_candidates.get(label2, {}):
-                            part_candidates[label2].remove(obj2)
-                        if obj == obj2 and obj1 in part_candidates.get(label1, {}):
-                            part_candidates[label1].remove(obj1)
+                        if obj == obj1 and obj2 in part_type_pool.get(label2, {}):
+                            part_type_pool[label2].remove(obj2)
+                        if obj == obj2 and obj1 in part_type_pool.get(label1, {}):
+                            part_type_pool[label1].remove(obj1)
                 else:
                     obj = f"n{nonobj_ind}"
                     nonobj_ind += 1
@@ -2403,7 +2417,7 @@ def _linearize_join_tree(
         can_continue = len(join_tree.in_edges(other)) == 0 and (
             len(available_joins_without_nonobjs) == 0 or (
                 other not in atomic_node_concs or
-                len(part_candidates[atomic_node_concs[other]]) > 0
+                len(part_type_pool[atomic_node_concs[other]]) > 0
             )
         )
         if can_continue:
@@ -2447,12 +2461,25 @@ def _execute_pick_up(agent, action_name, action_params):
     if "env_handle" in target_info:
         # Existing atomic object, provide the environment side name
         env_handle = target_info["env_handle"]
-        estim_type = exec_state["recognitions"][target]
-        if agent.cfg.exp.player_type in ["bool", "demo"]:
-            estim_type = agent.lt_mem.lexicon.codesheet[estim_type]
+
+        # Handle differently depending on whether next action is 3D structure
+        # inspection
+        next_action = agent.planner.agenda[0][1][0]
+        next_action = agent.lt_mem.lexicon.d2s[("arel", next_action)][0][1]
+        if "inspect" in next_action:
+            # Picking up for 3D structure inspection, not making any type
+            # assumption; do not introduce random pose perturbation, providing
+            # the skeleton key "GT" as param
+            estim_type = "GT"
         else:
-            assert agent.cfg.exp.player_type in ["label", "full"]
-            estim_type = agent.lt_mem.lexicon.d2s[("pcls", estim_type)][0][1]
+            # Whether the agent has estimated the type of the target object
+            # is important
+            estim_type = exec_state["recognitions"][target]
+            if agent.cfg.exp.player_type in ["bool", "demo"]:
+                estim_type = agent.lt_mem.lexicon.codesheet[estim_type]
+            else:
+                assert agent.cfg.exp.player_type in ["label", "full"]
+                estim_type = agent.lt_mem.lexicon.d2s[("pcls", estim_type)][0][1]
         agent_action = [
             (action_name, {
                 "parameters": (f"str|{env_handle}", f"str|{estim_type}"),
@@ -2463,9 +2490,10 @@ def _execute_pick_up(agent, action_name, action_params):
         manip_ind = 0 if action_name.endswith("left") else 1
         exec_state["manipulator_states"][manip_ind] = \
             (action_params[0], None, None)
-        singleton_gr = nx.DiGraph()
-        singleton_gr.add_node(target)
-        exec_state["connection_graphs"][target] = singleton_gr
+        if "connection_graphs" in exec_state:
+            singleton_gr = nx.DiGraph()
+            singleton_gr.add_node(target)
+            exec_state["connection_graphs"][target] = singleton_gr
 
     # This condition should be tested after the "env_handle" key test above
     # since singletons may also be recorded in "connection_graphs" field
@@ -2499,7 +2527,7 @@ def _execute_pick_up(agent, action_name, action_params):
 
             # NL surface form and corresponding logical form
             surface_form = "I cannot find a part I need on the table."
-            gq = "forall"; bvars = {"x0"}
+            gq = ("forall",); bvars = ("x0",)
             ante = [("n", "_needed_part", ["x0"])]
                 # Not a proper vocabulary... Does not matter for now, though
             cons = []
@@ -2528,7 +2556,7 @@ def _execute_pick_up(agent, action_name, action_params):
 
             # NL surface form and corresponding logical form
             surface_form = f"Is there a {target_sym}?"
-            gq = None; bvars = {"x0"}; ante = []
+            gq = ("Q",); bvars = ("x0",); ante = []
             cons = [("n", target_sym, ["x0"])]
             logical_form = (gq, bvars, ante, cons)
 
@@ -2715,6 +2743,25 @@ def _execute_assemble(agent, action_name, action_params):
 
     return agent_action
 
+def _execute_inspect(agent, action_name, action_params):
+    """
+    Inspect the target object, currently held in manipulator, at the designated
+    viewpoint for 3D structure extraction. Not a lot of complications, just
+    relay the target object's env_handle and the viewing angle index.
+    """
+    target = action_params[0]
+    target = agent.vision.scene[target]["env_handle"]
+    view_ind = action_params[1]
+
+    agent_action = [
+        (action_name, {
+            "parameters": (f"str|{target}", f"int|{view_ind}"),
+            "pointing": {}
+        })
+    ]
+
+    return agent_action
+
 def report_planning_failure(agent):
     """
     Agent wasn't able to plan till the end product because some of the part
@@ -2734,7 +2781,7 @@ def report_planning_failure(agent):
     # NL surface forms and corresponding logical forms
     surface_form_0 = f"I couldn't plan further to build a {target_name}."
     surface_form_1 = f"# to-infinitive phrase ('to build a {target_name}')"
-    gq_0 = gq_1 = None; bvars_0 = bvars_1 = set(); ante_0 = ante_1 = []
+    gq_0 = gq_1 = (); bvars_0 = bvars_1 = (); ante_0 = ante_1 = []
     cons_0 = [
         ("sp", "unable", [("e", 0), "x0", ("e", 1)]),
         ("sp", "pronoun1", ["x0"]),
@@ -3097,3 +3144,40 @@ def handle_action_effect(agent, effect, actor):
             del exec_state["recognitions"][atomic_left]
             del exec_state["recognitions"][atomic_right]
             agent.interrupted = False        # Disable flag
+
+    if action_name.startswith("inspect"):
+        # Inspect action effects: pose of the inspection target object in the
+        # camera coordinate, keep collecting the pose along with the latest
+        # visual input (raw scene image and mask) until the end of the inspection
+        # action series (signaled by view angle index of 24). Afterwards, extract
+        # the 3D structure from the aggregated data.
+
+        # Making temporary data storage field if not present
+        if "3d_inspection_data" not in exec_state:
+            exec_state["3d_inspection_data"] = { "img": {}, "msk": {}, "pose": {} }
+
+        # Aggregate data
+        view_ind = exec_state["action_history"][-1][1][1]
+        scene_img = agent.vision.latest_inputs[-1]
+        part_pose = (
+            flip_quaternion_y(xyzw2wxyz(parse_floats(2))),
+            flip_position_y(parse_floats(3))
+        )
+        raw_mask = np.array(rle_decode(
+            [int(v) for v in referents["dis"][effect_lit.args[4][0]]["name"].split("/")]
+        ))
+        raw_mask = raw_mask.reshape(scene_img.height, scene_img.width).astype(bool)
+        if view_ind < 24:
+            exec_state["3d_inspection_data"]["img"][view_ind] = scene_img
+            exec_state["3d_inspection_data"]["pose"][view_ind] = part_pose
+        if view_ind > 0:
+            # Object mask passed as inspection action effect falls behind
+            # by one step
+            exec_state["3d_inspection_data"]["msk"][view_ind-1] = raw_mask
+
+        if view_ind == 24:
+            # All necessary data collected, extract the 3D structure
+            print(0)
+
+            # Remove the temporary data storage field
+            del exec_state["3d_inspection_data"]

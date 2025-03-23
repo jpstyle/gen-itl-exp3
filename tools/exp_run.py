@@ -180,7 +180,7 @@ def main(cfg):
         # Sample for the easier supertype task problem initialization
         # if target task is "build_truck_supertype" (of course) or
         # "build_truck_subtype" for the first 10 episodes
-        if target_task == "build_truck_subtype" and ep_i < 15:
+        if target_task == "build_truck_subtype" and ep_i < 0:
             episode_task = "build_truck_supertype"
         else:
             episode_task = target_task

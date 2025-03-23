@@ -28,12 +28,14 @@ class CompositeActions:
         return handle_action_effect(self.agent, effect, actor)
 
     # Cognitive actions
-    def identify_mismatch(self, rule):
-        return identify_mismatch(self.agent, rule)
-    def identify_generics(self, rule, prev_Qs, provenance):
-        return identify_generics(self.agent, rule, prev_Qs, provenance)
-    def handle_neologism(self, novel_concepts, dialogue_state):
-        return handle_neologism(self.agent, novel_concepts, dialogue_state)
+    def identify_mismatch(self, statement):
+        return identify_mismatch(self.agent, statement)
+    def identify_generics(self, statement, provenance):
+        return identify_generics(self.agent, statement, provenance)
+    def handle_neologism(self, dialogue_state):
+        return handle_neologism(self.agent, dialogue_state)
+    def resolve_neologisms(self):
+        return resolve_neologisms(self.agent)
     def report_neologism(self, neologism):
         return report_neologism(self.agent, neologism)
     def analyze_demonstration(self, demo):

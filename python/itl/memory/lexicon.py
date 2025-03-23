@@ -9,6 +9,8 @@ class Lexicon:
     # Special reserved symbols; any predicates that are not straightforward to
     # represent as lexicon entry
     RESERVED = [
+        # Invokes predicate equality check
+        ("sp", "equal"),
         # Invokes concept instance (i.e., set element) check
         ("sp", "isinstance"),
         # Invokes supertype-subtype check (against taxonomy KB)

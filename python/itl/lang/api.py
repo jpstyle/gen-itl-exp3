@@ -15,7 +15,7 @@ class LanguageModule:
         self.semantic = SemanticParser()
         self.dialogue = DialogueManager()
 
-        self.unresolved_neologisms = set()
+        self.unresolved_neologisms = {}
 
     def situate(self, vis_scene):
         """
@@ -132,18 +132,20 @@ class LanguageModule:
                         # any literals that do not involve bound variables specified by
                         # `bvars`
                         presup = [
-                            l for l in ante if len(bvars & set(l[2])) == 0
+                            l for l in ante if len(set(bvars) & set(l[2])) == 0
                         ] + [
-                            l for l in cons if len(bvars & set(l[2])) == 0
+                            l for l in cons if len(set(bvars) & set(l[2])) == 0
                         ]
-                        ante = [l for l in ante if len(bvars & set(l[2])) > 0]
-                        cons = [l for l in cons if len(bvars & set(l[2])) > 0]
+                        ante = [l for l in ante if len(set(bvars) & set(l[2])) > 0]
+                        cons = [l for l in cons if len(set(bvars) & set(l[2])) > 0]
                     else:
                         # No bound variables (not any type of quantification)
-                        assert gq is None
+                        assert len(gq) == 0
                         presup = []
 
-                    formatted_data = _map_and_format((bvars, ante, cons), referents, r2i)
+                    bvars = tuple(r2i[v] for v in bvars)
+                    ante = [(pos, sym, [r2i[a] for a in args]) for pos, sym, args in ante]
+                    cons = [(pos, sym, [r2i[a] for a in args]) for pos, sym, args in cons]
 
                     clause_info = referents[ev_id]
                     match clause_info["mood"]:
@@ -167,7 +169,7 @@ class LanguageModule:
                             # ???
                             raise ValueError("Invalid sentence mood")
 
-                    new_record.append(((gq,)+formatted_data, source[ev_id]))
+                    new_record.append(((gq, bvars, ante, cons), source[ev_id]))
                     self.dialogue.clause_info[r2i[ev_id]] = clause_info
 
                     if len(presup) > 0:
@@ -258,33 +260,3 @@ class LanguageModule:
         self.dialogue.to_generate = []
 
         return return_val
-
-
-def _map_and_format(data, referents, r2i):
-    # Map MRS referents to ASP terms and format
-
-    def fmt(rf):
-        assert type(rf) == str
-        if rf.startswith("x"):
-            # Instance referents, may be variable or constant for now
-            is_var = referents[rf].get('gen_quantified') or \
-                referents[rf].get('wh_quantified')
-
-            if is_var:
-                return r2i[rf].capitalize()
-            else:
-                return r2i[rf]
-        else:
-            # Eventuality referents, always constant, referring to clauses that
-            # already took place and are part of dialogue records
-            assert rf.startswith("e")
-            return r2i[rf]
-
-    def process_conjuncts(conjuncts):
-        return [
-            (cnjt[0], cnjt[1], [fmt(arg) for arg in cnjt[2]]) for cnjt in conjuncts
-        ]
-
-    bvars, ante, cons = data
-
-    return ({fmt(v) for v in bvars}, process_conjuncts(ante), process_conjuncts(cons))

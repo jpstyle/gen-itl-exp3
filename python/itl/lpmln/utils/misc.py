@@ -60,8 +60,7 @@ def flatten_ante_cons(ante, cons):
     """
     from .. import Literal
 
-    ante = list(ante) if ante is not None else []
-    cons = list(cons) if cons is not None else []
+    ante = list(ante); cons = list(cons)
 
     flattened = [(ante, cons)]
     while any(

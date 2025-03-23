@@ -5,8 +5,7 @@ referring to belief updates that modify long-term memory
 import re
 import math
 import torch
-from itertools import permutations
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, deque
 
 import open3d as o3d
 import numpy as np
@@ -20,6 +19,7 @@ from .interact import (
     _goal_selection, _tabulate_goal_selection_result,
     _match_existing_subassemblies
 )
+from .utils import rle_decode
 from ..vision.utils import (
     blur_and_grayscale, visual_prompt_by_mask, rmat2quat, xyzw2wxyz,
     flip_position_y, flip_quaternion_y, transformation_matrix
@@ -50,17 +50,6 @@ for i in range(8):
 # all descriptors---even in reduced dimensionalities---would take too much)
 STORE_VP_INDS = [0, 2, 4, 6, 16, 18, 20, 22]
 
-# Recursive helper methods for checking whether rule cons/ante is grounded (variable-
-# free), lifted (all variables), contains any predicate referent as argument, or uses
-# a reserved (pred type *) predicate 
-is_grounded = lambda cnjt: all(not is_var for _, is_var in cnjt.args) \
-    if isinstance(cnjt, Literal) else all(is_grounded(nc) for nc in cnjt)
-is_lifted = lambda cnjt: all(is_var for _, is_var in cnjt.args) \
-    if isinstance(cnjt, Literal) else all(is_lifted(nc) for nc in cnjt)
-has_reserved_pred = \
-    lambda cnjt: cnjt.name.startswith("sp_") \
-        if isinstance(cnjt, Literal) else any(has_reserved_pred(nc) for nc in cnjt)
-
 
 def identify_mismatch(agent, statement):
     """
@@ -72,26 +61,59 @@ def identify_mismatch(agent, statement):
     """
     xb_updated = False          # Return value
 
-    ante, cons = statement
-    stm_is_grounded = (cons is None or is_grounded(cons)) and \
-        (ante is None or is_grounded(ante))
+    gq, bvars, ante, cons = statement
 
-    # Proceed only when we have a grounded event & vision-only sensemaking
-    # result has been obtained
-    if not stm_is_grounded or agent.symbolic.concl_vis is None:
+    # The code snippet commented out below is the legacy from the first and
+    # second chapter where inference of whole from parts played important roles.
+    # However, we don't do any part-based visual reference in this chapter,
+    # and it is pointless to undergo all those belief propagation, region graph
+    # querying kind of deals only to get to the same conclusion obtainable from
+    # just simply reading the corresponding probability scores off the chart
+    # in scene info. I will just take the simple shortcut for this chapter.
+    ####### OBSOLETE #######
+    # # Proceed only when we have a grounded event & vision-only sensemaking
+    # # result has been obtained
+    # stm_is_grounded = (len(ante) == 0 or len(cons) == 0) and \
+    #     not any(lit.name=="sp_subtype" for lit in cons)
+    # if not stm_is_grounded or agent.symbolic.concl_vis is None:
+    #     return False
+    #
+    # # Make a yes/no query to obtain the likelihood of content
+    # reg_gr_v, _ = agent.symbolic.concl_vis
+    # q_response, _ = agent.symbolic.query(reg_gr_v, None, statement)
+    # ev_prob = q_response[()]
+    ####### OBSOLETE #######
+
+    if len(ante) == 0 and len(cons) == 1:
+        # Positive labeling of an instance
+        atom = cons[0]
+        conc_type, conc_ind = atom.name.split("_")
+        conc_ind = int(conc_ind)
+        obj = atom.args[0][0]
+        if conc_ind in range(len(agent.vision.scene[obj]["pred_cls"])):
+            ev_prob = agent.vision.scene[obj]["pred_cls"][conc_ind]
+        else:
+            ev_prob = 0
+    elif len(ante) == 1 and len(cons) == 0:
+        # Negative labeling of an instance
+        atom = ante[0]
+        conc_type, conc_ind = atom.name.split("_")
+        conc_ind = int(conc_ind)
+        obj = atom.args[0][0]
+        if conc_ind in range(len(agent.vision.scene[obj]["pred_cls"])):
+            ev_prob = 1 - agent.vision.scene[obj]["pred_cls"][conc_ind]
+        else:
+            ev_prob = 1
+    else:
+        # Not interested in any other types of statements for now
         return False
-
-    # Make a yes/no query to obtain the likelihood of content
-    reg_gr_v, _ = agent.symbolic.concl_vis
-    q_response, _ = agent.symbolic.query(reg_gr_v, None, statement)
-    ev_prob = q_response[()]
 
     # Proceed only if surprisal is above threshold
     surprisal = -math.log(ev_prob + EPS)
     if surprisal < -math.log(SR_THRES):
         return False
 
-    for ante, cons in flatten_ante_cons(*statement):
+    for ante, cons in flatten_ante_cons(*statement[2:]):
         if len(ante+cons) != 1:
             # Not going to happen in our scope, but setting up a flag...
             continue
@@ -168,7 +190,7 @@ def identify_mismatch(agent, statement):
     return xb_updated
 
 
-def identify_generics(agent, statement, prev_Qs, provenance):
+def identify_generics(agent, statement, provenance):
     """
     For symbolic knowledge base expansion. Integrate the rule into KB by adding
     as new entry if it is not already included. For now we won't worry about
@@ -176,102 +198,65 @@ def identify_generics(agent, statement, prev_Qs, provenance):
     the statement is identified as a novel generic rule, and KB is accordingly
     updated.
     """
+    gq, bvars, ante, cons = statement
+
+    # Only process statements that could be interpreted as a generic rule;
+    # in our scope, taxonomy relations (identified by "sp_subtype" literal)
+    # or general properties (identified by "forall" quantifiers)
+    taxonomy_rel = any(lit.name=="sp_subtype" for lit in cons)
+    general_prop = "forall" in gq
+    if not (taxonomy_rel or general_prop): return False
+
     kb_updated = False          # Return value
 
-    ante, cons = statement
-    rule_is_lifted = (cons is None or is_lifted(cons)) and \
-        (ante is None or is_lifted(ante))
-    rule_is_grounded = (cons is None or is_grounded(cons)) and \
-        (ante is None or is_grounded(ante))
-
-    # List of generic rules that can be extracted from the statement
-    generics = []
-
-    if rule_is_lifted:
-        # Lifted generic rule statement, without any grounded term arguments
-
-        # Assume default knowledge type here
-        knowledge_type = "property"
-
-        # First add the face-value semantics of the explicitly stated rule
-        generics.append((rule, U_IN_PR, provenance, knowledge_type))
-
-    # if rule_is_grounded and ante is None:
-    #     # Grounded fact without constant predicate referents
-
-    #     # For corrective feedback "This is Y" following the agent's incorrect answer
-    #     # to the probing question "What kind of X is this?", extract 'Y entails X'
-    #     # (e.g., What kind of truck is this? This is a fire truck => All fire trucks
-    #     # are trucks). More of a universal statement rather than a generic one.
-
-    #     # Collect concept entailment & constraints in questions made by the user
-    #     # during this dialogue
-    #     entail_consts = defaultdict(list)       # Map from pred var to set of pred consts
-    #     instance_consts = {}                    # Map from ent const to pred var
-    #     context_Qs = {}                         # Pointers to user's original question
-
-    #     # Disregard all questions except the last one from user
-    #     relevant_Qs = [
-    #         (q_vars, q_cons, presup, raw)
-    #         for _, (spk, (q_vars, (q_cons, _)), presup, raw) in prev_Qs
-    #         if spk=="Teacher"
-    #     ][-1:]
-
-    #     for q_vars, q_cons, presup, raw in relevant_Qs:
-
-    #         if presup is None:
-    #             p_cons = []
-    #         else:
-    #             p_cons, _ = presup
-
-    #         for qv, is_pred in q_vars:
-    #             # Consider only predicate variables
-    #             if not is_pred: continue
-
-    #             for ql in q_cons:
-    #                 # Constraint: P should entail conjunction {p1 and p2 and ...}
-    #                 if ql.name=="sp_subtype" and ql.args[0][0]==qv:
-    #                     entail_consts[qv] += [pl.name for pl in p_cons]
-
-    #                 # Constraint: x should be an instance of P
-    #                 if ql.name=="sp_isinstance" and ql.args[0][0]==qv:
-    #                     instance_consts[ql.args[1][0]] = qv
-            
-    #             context_Qs[qv] = raw
-
-    #     # Synthesize into a rule encoding the appropriate entailment
-    #     for ent, pred_var in instance_consts.items():
-    #         if pred_var not in entail_consts: continue
-    #         entailed_preds = entail_consts[pred_var]
-
-    #         # (Temporary) Only consider 1-place predicates, so match the first and
-    #         # only entity from the arg list. Disregard negated conjunctions.
-    #         entailing_preds = tuple(
-    #             lit.name for lit in cons
-    #             if isinstance(lit, Literal) and len(lit.args)==1 and lit.args[0][0]==ent
-    #         )
-    #         if len(entailing_preds) == 0: continue
-
-    #         entailment_rule = (
-    #             tuple(Literal(pred, [("X", True)]) for pred in entailed_preds),
-    #             tuple(Literal(pred, [("X", True)]) for pred in entailing_preds)
-    #         )
-    #         knowledge_source = f"{context_Qs[pred_var]} => {provenance}"
-    #         knowledge_type = "taxonomy"
-    #         generics.append(
-    #             (entailment_rule, U_IN_PR, knowledge_source, knowledge_type)
-    #         )
-
-    # Update knowledge base with obtained generic statements
-    for rule, w_pr, knowledge_source, knowledge_type in generics:
+    # Translate the provided statement into a logical form to be stored in KB;
+    # simple pattern matching for the scope of our study
+    if taxonomy_rel:
+        (subtype, _), (supertype, _) = next(
+            lit for lit in cons if lit.name=="sp_subtype"
+        ).args[1:]
+        subtype = next(lit.name for lit in cons if lit.args[0][0] == subtype)
+        supertype = next(lit.name for lit in cons if lit.args[0][0] == supertype)
         kb_updated |= agent.lt_mem.kb.add(
-            rule, w_pr, knowledge_source, knowledge_type
+            (
+                [Literal(subtype, wrap_args("X"))],
+                [Literal(supertype, wrap_args("X"))]
+            ),
+            U_IN_PR, provenance, "taxonomy"
+        )
+
+    if general_prop:
+        univ_q_vars = [v for q, v in zip(gq, bvars) if q == "forall"]
+        exst_q_vars = [v for q, v in zip(gq, bvars) if q == "exists"]
+        # Re-assign variable names to universally quantified vars first
+        variable_renaming = { v: f"X{i}" for i, v in enumerate(univ_q_vars) }
+        # Then assign skolem function terms to existentially quantified ones,
+        # where function args are determined by any binary predicate involving
+        # such var together with some universally quantified (hence already
+        # re-named) var
+        variable_renaming |= {
+            v: (f"f{i}", (next(
+                variable_renaming[list(args - {v})[0]]
+                for lit in cons if v in (args := {a for a, _ in lit.args}) \
+                    and len(args - {v}) == 1
+            ),))
+            for i, v in enumerate(exst_q_vars)
+        }
+        variable_renaming = {
+            (v, False): (v_rn, True) for v, v_rn in variable_renaming.items()
+        }
+        kb_updated |= agent.lt_mem.kb.add(
+            (
+                [lit.substitute(variable_renaming) for lit in ante],
+                [lit.substitute(variable_renaming) for lit in cons]
+            ),
+            U_IN_PR, provenance, "property"
         )
 
     return kb_updated
 
 
-def handle_neologism(agent, novel_concepts, dialogue_state):
+def handle_neologism(agent, dialogue_state):
     """
     Identify neologisms (that the agent doesn't know which concepts they refer to)
     to be handled, attempt resolving from information available so far if possible,
@@ -290,39 +275,50 @@ def handle_neologism(agent, novel_concepts, dialogue_state):
 
     objs_to_add = set(); pointers = defaultdict(set)
     for tok, sym in neologisms.items():
+        # Skip if already processed somehow
+        if sym in agent.lt_mem.lexicon: continue
+
+        # Flag whether this neologism can be immediately resolved within
+        # this method call
+        resolved = False
+
+        pos, name = sym
+        match pos:
+            case "n" | "a":
+                conc_type = "pcls"
+            case "v" | "p":
+                conc_type = "prel"
+            case _:
+                raise ValueError("Invalid POS type")
+
+        # Expand corresponding visual concept inventory
+        conc_ind = agent.vision.add_concept(conc_type)
+        novel_concept = (conc_type, conc_ind)
+
+        # Acquire novel concept by updating lexicon
+        agent.lt_mem.lexicon.add((pos, name), novel_concept)
+
+        # Update word sense resolution accordingly
+        agent.lang.dialogue.word_senses[tok] = (
+            sym, f"{novel_concept[0]}_{novel_concept[1]}"
+        )
+
         neologism_in_cons = tok[2].startswith("pc")
         neologisms_in_same_clause_ante = [
             n for n in neologisms
             if tok[:2]==n[:2] and n[2]==tok[2].replace("pc", "pa")
         ]
-        if neologism_in_cons and len(neologisms_in_same_clause_ante)==0:
+        if neologism_in_cons and len(neologisms_in_same_clause_ante) == 0:
             # Occurrence in rule cons implies either definition or exemplar is
             # provided by the utterance containing this token... only if the
             # source clause is in indicative mood. If that's the case, register
             # new visual concept, and perform few-shot learning if appropriate
-            pos, name = sym
-            match pos:
-                case "n" | "a":
-                    conc_type = "pcls"
-                case "v" | "p":
-                    conc_type = "prel"
-                case _:
-                    raise ValueError("Invalid POS type")
-
-            # Expand corresponding visual concept inventory
-            conc_ind = agent.vision.add_concept(conc_type)
-            novel_concept = (conc_type, conc_ind)
-            novel_concepts.add(novel_concept)
-
-            # Acquire novel concept by updating lexicon
-            agent.lt_mem.lexicon.add((pos, name), novel_concept)
-
             ti = int(tok[0].strip("t"))
             ci = int(tok[1].strip("c"))
             (_, _, ante, cons), _ = dialogue_state.record[ti][1][ci]
 
             mood = dialogue_state.clause_info[f"t{ti}c{ci}"]["mood"]
-            if len(ante) == 0 and mood == ".":
+            if len(cons) == 0 and len(ante) == 0 and mood == ".":
                 # Labelled exemplar provided; add new concept exemplars to
                 # memory, as feature vectors obtained from vision module backbone
                 raise NotImplementedError       # Update as necessary
@@ -353,21 +349,13 @@ def handle_neologism(agent, novel_concepts, dialogue_state):
                 # Set flag that XB is updated
                 xb_updated |= True
 
-            elif len(ante) == 0 and mood == "!":
-                # Neologism is an argument of a command; agent will report whichever
-                # inability associated with the concept, and teacher will provide
-                # some demonstration that involves an instance of the concept.
-                # Lexicon will be appropriately expanded while analyzing the demo,
-                # and the neologism will be duly considered as 'resolved' then.
-                agent.lang.unresolved_neologisms.add(sym)
+                resolved = True
 
-            else:
-                # Otherwise not immediately resolvable
-                agent.lang.unresolved_neologisms.add(sym)
-
-        else:
-            # Otherwise not immediately resolvable
-            agent.lang.unresolved_neologisms.add(sym)
+        if not resolved:
+            agent.lang.unresolved_neologisms[sym] = {
+                "dependency": None,     # Dependency not specified yet
+                "reported": False       # Not reported to user yet
+            }
 
     if len(objs_to_add) > 0 or len(pointers) > 0:
         objs_to_add = list(objs_to_add)         # Assign arbitrary ordering
@@ -379,6 +367,108 @@ def handle_neologism(agent, novel_concepts, dialogue_state):
     return xb_updated
 
 
+def resolve_neologisms(agent):
+    """
+    Inspect the current set of unresolved neologisms to see if they can be
+    treated as resolved at the moment. In particular, this method checks for
+    each currently unresolved neologism if the 'depedency of resolution' is
+    specified yet, and if so, whether the dependency is cleared. The dependency
+    of an unresolved neologism is specified when the denoted concept is properly
+    defined either extensionally (via exemplars) or intensionally (via relational
+    definitions).
+    """
+    # Needed for potential registration of 3D structure inspection actions
+    resolved_record = agent.lang.dialogue.export_resolved_record()
+    exec_state = agent.planner.execution_state
+
+    while True:
+        resolved = set()
+        for sym, info in agent.lang.unresolved_neologisms.items():
+            den = agent.lt_mem.lexicon.s2d[sym][0]
+            den_str = f"{den[0]}_{den[1]}"
+
+            # See if any positive exemplar of the denoted concept is provided.
+            # If so, this neologism can be immediately considered as resolved.
+            pos_exs = agent.lt_mem.exemplars.object_2d_pos[den[0]].get(den[1], set())
+            if len(pos_exs) > 0:
+                resolved.add(sym)
+
+                # Whenever a neologism is resolved by means of exemplification,
+                # need to obtain and register its 3D structure. Add a series of
+                # 3D inspection actions to the agenda deque, with the labeled
+                # instance as inspection target.
+                labeling_lit = next(
+                    cons[0]
+                    for speaker, turn_clauses in resolved_record
+                    for (_, _, ante, cons), _, _ in turn_clauses
+                    if len(ante) == 0 and len(cons) == 1 and \
+                        speaker == "Teacher" and cons[0].name == den_str
+                )
+                inspection_target = labeling_lit.args[0][0]
+                for side, mnp_state in enumerate(exec_state["manipulator_states"]):
+                    if mnp_state[0] is None:
+                        empty_side = side
+                        break
+                else:
+                    # At least one manipulator should be free by design...
+                    raise ValueError
+                empty_side = "left" if empty_side == 0 else "right"
+                pick_up_action = agent.lt_mem.lexicon.s2d[("va", f"pick_up_{empty_side}")][0][1]
+                inspect_action = agent.lt_mem.lexicon.s2d[("va", f"inspect_{empty_side}")][0][1]
+                drop_action = agent.lt_mem.lexicon.s2d[("va", f"drop_{empty_side}")][0][1]
+                inspection_plan = [(pick_up_action, (inspection_target,))] + [
+                    (inspect_action, (inspection_target, i))
+                    for i in range(24+1)
+                ] + [(drop_action, ())]
+                inspection_plan = [
+                    ("execute_command", (action_type, action_params))
+                    for action_type, action_params in inspection_plan
+                ]
+                agent.planner.agenda = deque(inspection_plan) + agent.planner.agenda
+                continue
+
+            if info["dependency"] is None:
+                # Extract resolution dependency from current knowledge state
+
+                # See if any definitions---characterizing properties---are stored
+                # in KB. If any referenced concepts are denoted by other unresolved
+                # neologisms, add those to the dependency.
+                relevant_kb_entries = agent.lt_mem.kb.entries_by_pred[den_str]
+                if len(relevant_kb_entries) > 0:
+                    dependent_neologisms = set()
+                    for ei in agent.lt_mem.kb.entries_by_pred[den_str]:
+                        (ante, cons), _, _, knowledge_type = agent.lt_mem.kb.entries[ei]
+                        if knowledge_type != "property": continue
+                        relevant_concs = {
+                            ((pred_spl := lit.name.split("_"))[0], int(pred_spl[1]))
+                            for lit in ante+cons
+                        }
+                        dependent_neologisms |= {
+                            rel_sym for conc in relevant_concs
+                            if (rel_sym := agent.lt_mem.lexicon.d2s[conc][0]) != sym \
+                                and rel_sym in agent.lang.unresolved_neologisms
+                        }
+                    info["dependency"] = dependent_neologisms
+            else:
+                # Check if any dependent neologism in the specified set is
+                # resolved; if so, remove them from set. If the set becomes
+                # empty, the neologism can be marked as resolved.
+                if len(info["dependency"]) == 0:
+                    resolved.add(sym)
+
+        if len(resolved) == 0:
+            # No more neologisms to resolve
+            break
+        else:
+            # Update set accordingly, deleting the resolved neologism itself
+            # and updating any other relevant resolution dependencies
+            for sym in resolved:
+                del agent.lang.unresolved_neologisms[sym]
+                for info in agent.lang.unresolved_neologisms.values():
+                    if not isinstance(info["dependency"], set): continue
+                    info["dependency"] -= {sym}
+
+
 def report_neologism(agent, neologism):
     """
     Some neologism was identified and couldn't be resolved with available information
@@ -386,14 +476,15 @@ def report_neologism(agent, neologism):
     information that characterize the concept denoted by the neologism (e.g., definition,
     exemplar)
     """
-    # Remove from list
-    agent.lang.unresolved_neologisms.remove(neologism)
+    if agent.lang.unresolved_neologisms[neologism]["reported"]:
+        # No-op if already reported
+        return
 
     # Update cognitive state w.r.t. value assignment and word sense
 
     # NL surface form and corresponding logical form
     surface_form = f"I don't know what '{neologism[1]}' means."
-    gq = None; bvars = set(); ante = []
+    gq = (); bvars = (); ante = []
     cons = [
         ("sp", "unknown", ["x0", "x1"]),
         ("sp", "pronoun1", ["x0"]),
@@ -411,6 +502,9 @@ def report_neologism(agent, neologism):
     agent.lang.dialogue.to_generate.append(
         (logical_form, surface_form, referents, predicates, {})
     )
+
+    # Mark as reported
+    agent.lang.unresolved_neologisms[neologism]["reported"] = True
 
 
 def analyze_demonstration(agent, demo_data):
@@ -443,7 +537,7 @@ def analyze_demonstration(agent, demo_data):
             obj["scene_img"], obj["pred_mask"]
         ))
 
-    for img, annotations, env_refs in demo_data:
+    for img, annotations in demo_data:
         # Appropriately handle each annotation
         for (_, _, ante, cons), raw, clause_info in annotations:
             # Nothing to do with non-indicative annotations
@@ -451,7 +545,7 @@ def analyze_demonstration(agent, demo_data):
             # Nothing to do with initial declaration of demonstration
             if raw.startswith("I will demonstrate"): continue
 
-            if ante is None:
+            if len(ante) == 0:
                 # Non-quantified statement without antecedent
                 if raw.startswith("# Action:"):
                     # Non-NL annotation of action intent specifying atomic action type
@@ -503,13 +597,11 @@ def analyze_demonstration(agent, demo_data):
                                 nonatomic_subassemblies.add(current_held[left_or_right][0])
 
                             case "inspect":
-                                # inspect_~ action; collect all views for 3D reconstruction
-                                viewed_obj = lit.args[2][0]
+                                # inspect_~ action; collect all views for 3D reconstruction.
+                                # Image at "# Action", mask and pose at "# Effect" (below)
                                 view_ind = int(referents["dis"][lit.args[3][0]]["name"])
                                 if view_ind < 24:
                                     inspect_data["img"][view_ind] = img
-                                if view_ind > 0:
-                                    inspect_data["msk"][view_ind-1] = env_refs[viewed_obj]["mask"]
 
                 elif raw.startswith("# Effect:"):
                     # Non-NL annotation of action effect specifying atomic action type
@@ -585,6 +677,14 @@ def analyze_demonstration(agent, demo_data):
                                 # in camera coordinate, where the camera is put at different
                                 # vantage points. Needed for appropriately adjusting ground
                                 # truth poses passed from Unity environment.
+                                if view_ind > 0:
+                                    raw_mask = np.array(rle_decode(
+                                        [int(v) for v in referents["dis"][lit.args[4][0]]["name"].split("/")]
+                                    ))
+                                    raw_mask = raw_mask.reshape(
+                                        inspect_data["img"][0].height, inspect_data["img"][0].width
+                                    ).astype(bool)
+                                    inspect_data["msk"][view_ind-1] = raw_mask
                                 if view_ind < 24:
                                     inspect_data["pose"][view_ind] = (
                                         flip_quaternion_y(xyzw2wxyz(parse_floats(2))),
@@ -694,18 +794,22 @@ def analyze_demonstration(agent, demo_data):
 
             # In whichever case, the symbol shouldn't be a 'unresolved neologism'
             if sym in agent.lang.unresolved_neologisms:
-                agent.lang.unresolved_neologisms.remove(sym)
+                del agent.lang.unresolved_neologisms[sym]
         # Also process any remaining neologisms denoting hypernyms and holonyms
         for part_supertype_name in part_supertype_labeling.values():
             sym = ("n", part_supertype_name)
             if sym not in agent.lt_mem.lexicon:
                 new_conc_ind = agent.vision.add_concept("pcls")
                 agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
+            if sym in agent.lang.unresolved_neologisms:
+                del agent.lang.unresolved_neologisms[sym]
         for sa_type_name in sa_labeling.values():
             sym = ("n", sa_type_name)
             if sym not in agent.lt_mem.lexicon:
                 new_conc_ind = agent.vision.add_concept("pcls")
                 agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
+            if sym in agent.lang.unresolved_neologisms:
+                del agent.lang.unresolved_neologisms[sym]
         # Also process any hyper/hyponymy relations provided
         for part_subtype, (part_supertype, raw) in hyp_rels.items():
             subtype_conc = agent.lt_mem.lexicon.s2d[("n", part_subtype)][0][1]
@@ -759,7 +863,7 @@ def analyze_demonstration(agent, demo_data):
     for part_inst, examples in vision_2d_data.items():
         if part_inst not in inst2conc_map:
             # Concept label info was not available (which happens for language-less
-            # player types), 
+            # player types)
             continue
 
         for image, mask, f_vec in examples:
@@ -1074,9 +1178,8 @@ def posthoc_episode_analysis(agent):
         (lit.args[0][0], int(lit.name.strip("pcls_")))
         for spk, turn_clauses in resolved_record
         for ((_, _, _, cons), _, clause_info) in turn_clauses
-        if cons is not None
         for lit in cons
-        if spk == "Teacher" and clause_info["mood"] == "." \
+        if len(cons) > 0 and spk == "Teacher" and clause_info["mood"] == "." \
             and lit.name.startswith("pcls")
     ]
     exec_state["recognitions"] = dict(labeling_feedback) | {
@@ -1103,18 +1206,20 @@ def posthoc_episode_analysis(agent):
         sa for sa, sa_graph in exec_state["connection_graphs"].items()
         if len(sa_graph) > 1
     )
+    obj2sa_map = {
+        ex_obj: final_sa for ex_obj in exec_state["connection_graphs"][final_sa]
+    }
     possible_mappings = _match_existing_subassemblies(
-        connection_graph, node_unifications,
+        connection_graph, obj2sa_map, node_unifications,
         atomic_node_concs, hyp_rels, exec_state
     )
     for ism in possible_mappings[final_sa]:
         for n, ex_obj in ism.items():
-            node_unifications[f"{final_sa}_{ex_obj}"].add(n)
+            node_unifications[ex_obj].add(n)
 
     # Collect possible atomic part types for each existing object
     obj_possible_concs = defaultdict(set)
     for oi, nodes in node_unifications.items():
-        oi = re.findall(r"s\d+_(o\d+)", oi)[0]
         obj_possible_concs[oi] |= {atomic_node_concs[n] for n in nodes}
 
     # Part type selection must comply with the total atomic part type counts
@@ -1185,17 +1290,27 @@ def posthoc_episode_analysis(agent):
             if isinstance(objs, tuple)
         ): continue
 
+        # Need exact subtype recognition for getting probability scores,
+        # select best ones according to specified supertypes
+        scn_subtype = {
+            oi: max([
+                subtype_conc for subtype_conc, supertype_conc in hyp_rels.items()
+                if supertype_conc == conc
+            ], key=lambda c: agent.vision.scene[oi]["pred_cls"][c])
+                if conc in hyp_rels.values() else conc
+            for oi, conc in scn.items()
+        }
         prob_score = sum(
-            agent.vision.scene[oi]["pred_cls"][c] for oi, c in scn.items()
+            agent.vision.scene[oi]["pred_cls"][c] for oi, c in scn_subtype.items()
         )
-        scenarios_scored.append((scn, prob_score.item()))
+        scenarios_scored.append((scn_subtype, prob_score.item()))
 
     # Select the best allocation of objects to nodes by score sum    
     final_recognitions = sorted(
         scenarios_scored, reverse=True, key=lambda x: x[1]
     )[0][0]
 
-    pr_thres = 0.8                  # Threshold for adding exemplars
+    pr_thres = 0.7                  # Threshold for adding exemplars
     exemplars = {}; pointers = defaultdict(set)
     for oi, best_conc in final_recognitions.items():
         # Skip if supertype

@@ -296,7 +296,28 @@ class SimulatedTeacher:
                 else:
                     # Non-target concept, most likely referring to some unknown part
                     # subtype concept; teach new concept by exemplification
-                    print(0)
+
+                    # Fetch list of matching instances and select one
+                    matching_insts = [
+                        ((supertype, inst_id), f"{inst_id[0]}_{supertype}_{inst_id[1]}")
+                        for (supertype, inst_id), info in sampled_parts.items()
+                        if reported_neologism == info["type"]
+                    ]
+                    inst, serialized_name = random.sample(matching_insts, 1)[0]
+                    ent_path = f"/{serialized_name}"
+
+                    response += [
+                        ("generate",
+                        {
+                            "utterance": f"This is a {reported_neologism}.",
+                            "pointing": { (0, 4): (ent_path, False) }
+                        }),
+                        ("generate",
+                        {
+                            "utterance": f"{reported_neologism} is a type of {inst[0]}.",
+                            "pointing": {}
+                        }),
+                    ]
 
             elif utt == "# Observing":
                 # Agent has signaled it is paying attention to user's action
@@ -466,12 +487,11 @@ class SimulatedTeacher:
 
                 elif act_type.startswith("inspect"):
                     # For inspect~ actions, provide integer index of (relative) viewpoint
-                    ent_path = f"/Student Agent/{side.capitalize()} Hand/{ep_st[side]}"
                     target, view_ind = act_params
                     crange = (offset+1, offset+1+len(target))
                     act_anno = {
                         "utterance": f"{act_str_prefix}({target},{view_ind})",
-                        "pointing": { crange: (ent_path, True) }
+                        "pointing": {}
                     }
 
                 if act_type is not None:
@@ -1373,7 +1393,7 @@ class SimulatedTeacher:
             else:
                 large_wheel_needed = None
 
-            # Each object argument of pick_up_left/Right arguments in the action
+            # Each object argument of pick_up_left/right arguments in the action
             # sequence is somewhat lifted, as they only specify type; 'ground'
             # them by sampling from existing part instances, then append to fully
             # instantiated plan
@@ -1508,8 +1528,8 @@ class SimulatedTeacher:
                     "p_" + str(cp_names_inv[contact[0][0] + "/" + contact[0][1]]),
                     "p_" + str(cp_names_inv[contact[1][0] + "/" + contact[1][1]])
                 )
-                node_unifications[f"{sa}_{u}"] = u
-                node_unifications[f"{sa}_{v}"] = v
+                node_unifications[u] = u
+                node_unifications[v] = v
             connection_status[sa] = sa_graph
 
         if len(remaining_joins) == 0:

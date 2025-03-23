@@ -292,7 +292,7 @@ class DialogueManager:
                 (f"t{ti}",f"c{ci}",f"p{c_or_a}{li}"),
                 # If not found (likely reserved predicate), fall back to cnjt's pred
                 (None, "_".join(cnjt[:2]))
-            )[1] or "sp_neologism",
+            )[1],
             args=wrap_args(*a_map(cnjt[2]))
         )
 
@@ -302,21 +302,14 @@ class DialogueManager:
             for ci, ((gq, bvars, ante, cons), raw) in enumerate(turn_clauses):
                 # Translate consequent and antecedent by converting NL predicates to
                 # denoted concepts
-                if cons is not None and len(cons) > 0:
-                    tr_cons = tuple(
-                        encode_lits(lit, ti, ci, "c", li)
-                        for li, lit in enumerate(cons)
-                    )
-                else:
-                    tr_cons = None
-
-                if ante is not None and len(ante) > 0:
-                    tr_ante = tuple(
-                        encode_lits(lit, ti, ci, "a", li)
-                        for li, lit in enumerate(ante)
-                    )
-                else:
-                    tr_ante = None
+                tr_cons = tuple(
+                    encode_lits(lit, ti, ci, "c", li)
+                    for li, lit in enumerate(cons)
+                )
+                tr_ante = tuple(
+                    encode_lits(lit, ti, ci, "a", li)
+                    for li, lit in enumerate(ante)
+                )
 
                 clause_info = self.clause_info[f"t{ti}c{ci}"]
                 turn_translated.append(((gq, bvars, tr_ante, tr_cons), raw, clause_info))
