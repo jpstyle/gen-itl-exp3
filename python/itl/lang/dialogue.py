@@ -37,19 +37,11 @@ class DialogueManager:
         # and clauses in the turn
         self.record = []
 
+        # Track unanswered questions as set of pointers
         self.unanswered_Qs = set()
-        self.unexecuted_commands = set()
-
-        if hasattr(self, "acknowledged_stms"):
-            # If acknowledgement info exists for current record when refreshing, outdate
-            # by re-indexing "curr" entries with "prev"
-            self.acknowledged_stms = {
-                ("prev", ti, ci): data
-                for (prev_or_curr, ti, ci), data in self.acknowledged_stms.items()
-                if prev_or_curr=="curr"
-            }
-        else:
-            self.acknowledged_stms = {}
+        # Track unexecuted commands as dict from pointer to whether it is
+        # addressed
+        self.unexecuted_commands = {}
 
         # Buffer of utterances to generate
         self.to_generate = []

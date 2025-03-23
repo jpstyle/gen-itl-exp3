@@ -22,7 +22,7 @@ class SemanticParser:
         #       literals.
         #    `referents`: dict with discourse referent and event variables as keys
         #       and their associated information as values.
-        #   `events`: dict with event variables as keys and natural-language
+        #   `source`: dict with event variables as keys and natural-language
         #       provenances as values.
         parses = []       # Return value
         for utt, dem_refs in zip(usr_in, pointing):
@@ -34,11 +34,13 @@ class SemanticParser:
             #   4) "# Action/Effect: {action_type}({parameters})"
             #   5) "This is (not) a {concept_type}."
             #   6) "This is [red/green/blue/gold/white]."
-            #   7) "Pick up a {part_type}." or "Pick up the subassembly/{subassembly_type}."
+            #   7) "Pick up this {part_type}." or "Pick up the subassembly/{subassembly_type}."
             #   8) "Join the {part_type_1} and the {part_type_2}."
-            #   9) "# Observing"
-            #   10) "What were you trying to do?"
-            #   11) "Stop." & "Continue."
+            #   9) "{part_subtype} is a type of {part_supertype}."
+            #   10) "# Observing"
+            #   11) "What were you trying to do?"
+            #   12) "Stop." & "Continue."
+            #   13) "A {truck_subtype} is a truck with {part_subtypes}."
             if re.match(r"Build a (.*)\.$", utt):
                 # Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -221,13 +223,13 @@ class SemanticParser:
                 # description (with haptic-ostensive reference) of a pick-up action
                 # being demonstrated by the user
 
-                # Only consider "Pick up a {part_type}" descriptions; "Pick up
+                # Only consider "Pick up this {part_type}" descriptions; "Pick up
                 # the subassembly/{subassembly_type}" utterances don't provide any
                 # additional learning signals in our scope
-                pick_up_target = re.findall(r"Pick up a (.*)\.$", utt)
-                if len(pick_up_target) > 0:
-                    # "~ a {part_type}" case, extract the NL label
-                    pick_up_target = pick_up_target[0]
+                target = re.findall(r"Pick up this (.*)\.$", utt)
+                if len(target) > 0:
+                    # "~ this {part_type}" case, extract the NL label
+                    target = target[0]
 
                     clauses = {
                         "e0": (
@@ -235,7 +237,7 @@ class SemanticParser:
                             [
                                 ("va", "pick_up", ["e0", "x0", "x1"]),
                                 ("sp", "pronoun2", ["x0"]),
-                                ("n", pick_up_target, ["x1"])
+                                ("n", target, ["x1"])
                             ]
                         )
                     }
@@ -244,7 +246,6 @@ class SemanticParser:
                         "x0": { "source_evt": "e0" },
                         "x1": { "source_evt": "e0" }
                     }
-
                     source = { "e0": utt }
                 else:
                     # "~ the {subassembly_type}" case, null logical form
@@ -252,17 +253,60 @@ class SemanticParser:
                     referents = {}
                     source = { "e0": utt }
 
-            elif re.match(r"Join the (.*) and the (.*)\.$", utt):
+            elif re.match(r"Join (.*) and (.*)\.$", utt):
                 # Similar to the case above; utterance has appearance of a command,
-                # but more like a NL description (with haptic-ostensive reference)
-                # of a join action being demonstrated by the user
+                # but more like a NL description of a join action being demonstrated
+                # by the user
 
-                # Note that in our scope, these utterances won't provide any further
-                # learning signals in the learner's demonstration analysis procedure
-                # in addition to the '# Action/Effect: ~' annotations. Therefore,
-                # we'll just return null logical form here.
-                clauses = {}
-                referents = {}
+                # Note that a target quantified with indefinite article (e.g., a
+                # wheel) signals introduction of an instance of the denoted part
+                # (super)type, which specifies type requirements for the part
+                # 'slot' in the target structure for the first time
+                _, target_l, _, target_r = \
+                    re.findall(r"Join (a|the) (.*) and (a|the) (.*)\.$", utt)[0]
+
+                clauses = clauses = {
+                    "e0": (
+                        None, set(), [],
+                        [
+                            ("va", "join", ["e0", "x0", "x1", "x2"]),
+                            ("sp", "pronoun2", ["x0"]),
+                            ("n", target_l, ["x1"]),
+                            ("n", target_r, ["x2"])
+                        ]
+                    )
+                }
+                referents = {
+                    "e0": { "mood": "." },
+                    "x0": { "source_evt": "e0" },
+                    "x1": { "source_evt": "e0" },
+                    "x2": { "source_evt": "e0" }
+                }
+                source = { "e0": utt }
+
+            elif re.match(r"(.*) is a type of (.*)\.$", utt):
+                # Providing a taxonomy (hypernymy/hyponymy) relation between
+                # a part subtype and a part supertype. Should be identified
+                # as a lifted rule and stored in KB later.
+                part_subtype, part_supertype = \
+                    re.findall(r"(.*) is a type of (.*)\.$", utt)[0]
+
+                clauses = {
+                    "e0": (
+                        None, set(), [],
+                        [
+                            ("sp", "subtype", ["e0", "x0", "x1"]),
+                            ("n", part_subtype, ["x0"]),
+                            ("n", part_supertype, ["x1"])
+                        ]
+                    )
+                }
+                referents = {
+                    "e0": { "mood": "." },
+                    "x0": { "source_evt": "e0", "is_pred": True },
+                    "x1": { "source_evt": "e0", "is_pred": True }
+                }
+
                 source = { "e0": utt }
 
             elif utt == "What were you trying to join?":
@@ -294,6 +338,19 @@ class SemanticParser:
 
             elif utt == "Stop." or utt == "Continue.":
                 # Raw form has all necessary info, null logical form
+                clauses = {}
+                referents = {}
+                source = { "e0": utt }
+
+            elif re.match(r"A (.*) is a truck with (.*)\.$", utt):
+                # Providing verbal definition of a truck subtype by
+                # necessary parts
+                truck_subtype, part_subtypes = \
+                    re.findall(r"A (.*) is a truck with (.*)\.$", utt)[0]
+                part_subtypes = [
+                    subtype.strip("a ") for subtype in part_subtypes.split(" and ")
+                ]
+
                 clauses = {}
                 referents = {}
                 source = { "e0": utt }

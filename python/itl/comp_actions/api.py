@@ -32,10 +32,6 @@ class CompositeActions:
         return identify_mismatch(self.agent, rule)
     def identify_generics(self, rule, prev_Qs, provenance):
         return identify_generics(self.agent, rule, prev_Qs, provenance)
-    def identify_acknowledgement(self, rule, prev_statements, prev_context):
-        return identify_acknowledgement(self.agent, rule, prev_statements, prev_context)
-    def handle_acknowledgement(self, acknowledgement_info):
-        return handle_acknowledgement(self.agent, acknowledgement_info)
     def handle_neologism(self, novel_concepts, dialogue_state):
         return handle_neologism(self.agent, novel_concepts, dialogue_state)
     def report_neologism(self, neologism):

@@ -70,7 +70,7 @@ class KnowledgeBase:
             if isinstance(a, str)
         }
         rename_var = {
-            (vn, True): (re.match("(.+?)(t\d+c\d+)?$", vn).group(1), True)
+            (vn, True): (re.match("(t\d+c\d+)?(.+?)$", vn).group(2), True)
             for vn in rename_var
         }
         rename_fn = {

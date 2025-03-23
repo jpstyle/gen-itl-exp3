@@ -269,6 +269,7 @@ def attempt_command(agent, utt_pointer):
     (_, _, _, cons), raw, _ = dialogue_record[ti][1][ci]
 
     command_executable = True
+    addressed_before = agent.lang.dialogue.unexecuted_commands[utt_pointer]
 
     action_lit = [lit for lit in cons if lit.name.startswith("arel_")][0]
     action_type = int(action_lit.name.replace("arel_", ""))
@@ -291,13 +292,23 @@ def attempt_command(agent, utt_pointer):
     if command_executable:
         # Schedule to generate plan & execute towards fulfilling the command
         agent.planner.agenda.appendleft(("execute_command", (action_type, action_params)))
-        agent.lang.dialogue.unexecuted_commands.remove(utt_pointer)
+        del agent.lang.dialogue.unexecuted_commands[utt_pointer]
+        return
+
+    elif addressed_before:
+        # Value true only if the command was attempted before but proven unable
+        # to be executed, then verbally reported to user. Do not report again,
+        # silently skipping.
         return
 
     else:
-        # Command cannot be executed for some reason; report inability and dismiss
-        # the command
-        ri_command = f"t{ti}c{ci}"                      # Denotes original request
+        # Command proven to be not executable; report inability, only if never
+        # addressed before
+
+        # Mark 'addressed'
+        agent.lang.dialogue.unexecuted_commands[utt_pointer] = True
+
+        ri_command = f"t{ti}c{ci}"                  # Denotes original request
 
         # NL surface form and corresponding logical form
         surface_form = f"I am unable to {raw[0].lower()}{raw[1:]}"
@@ -315,7 +326,6 @@ def attempt_command(agent, utt_pointer):
         }
         predicates = { "pc0": (("sp", "unable"), "sp_unable") }
 
-        agent.lang.dialogue.unexecuted_commands.remove(utt_pointer)
         agent.lang.dialogue.to_generate.append(
             (logical_form, surface_form, referents, predicates, {})
         )
@@ -531,7 +541,8 @@ def _plan_assembly(agent, build_target):
         tabulated_results = _tabulate_goal_selection_result(best_model)
         assembly_hierarchy, part_candidates = tabulated_results[:2]
         connect_edges, connection_graph = tabulated_results[2:4]
-        node_unifications, atomic_node_concs = tabulated_results[4:]
+        node_unifications, atomic_node_concs = tabulated_results[4:6]
+        vis_scores, hyp_rels = tabulated_results[6:]
 
         # Build target may have one or more 'template' options that count as
         # valid structure for the concept, fetch the index of the selected
@@ -560,7 +571,8 @@ def _plan_assembly(agent, build_target):
         # still would be too broad. We could eliminate many options by means of graph
         # matching algorithm.
         possible_mappings = _match_existing_subassemblies(
-            connection_graph, node_unifications, atomic_node_concs, exec_state
+            connection_graph, node_unifications,
+            atomic_node_concs, hyp_rels, exec_state
         )
         covered_objs = {
             obj for group_mappings in possible_mappings.values()
@@ -784,40 +796,73 @@ def _plan_assembly(agent, build_target):
             for obj, n in unification_choice.items():
                 collected_unification_choices[obj].add(n)
 
-        # Inspect the join tree(s) to see if any of them are complete and lead
-        # to the final product, not involving any atomic parts with type unknown
-        safe_join_trees = []
-        for join_tree, _ in valid_join_trees:
-            safe_join_tree = join_tree.copy()
-            for nodes in collected_unification_choices.values():
-                # Filter out any nodes and edges that involve 'unsafe' nodes
-                # with more than one unification possibilities
-                if len(nodes) == 1: continue
-                joins = list(safe_join_tree.edges(data="join_by"))
-                for u, v, join_by in joins:
-                    if join_by not in nodes: continue       # Safe join
-                    if v not in safe_join_tree: continue    # Already removed
-                    # Remove the receiving end node and all of its descendants
-                    # since including them in the plan is risky
-                    safe_join_tree.remove_nodes_from(
-                        {v} | nx.descendants(safe_join_tree, v)
-                    )
+        # Obtain intersection of sets of joins in all the join trees, invariant
+        # to naming of intermediate subassemblies. The intersection represents
+        # collection of edges common to all of the sanitized join trees, thus
+        # safe to make.
+        def remaining_join_signatures(join_tree):
+            join_tree = join_tree.copy()
+            available_joins = [
+                n for n in join_tree if len(nx.ancestors(join_tree, n))==2
+            ]
+            signatures = {}
+            while len(available_joins) > 0:
+                for join_res in available_joins:
+                    n1, n2 = tuple(n for n, _ in join_tree.in_edges(join_res))
+                    signatures[join_res] = frozenset([
+                        (signatures.get(n1, n1), join_tree.edges[(n1, join_res)]["join_by"]),
+                        (signatures.get(n2, n2), join_tree.edges[(n2, join_res)]["join_by"])
+                    ])
+                    join_tree.remove_edge(n1, join_res); join_tree.remove_edge(n2, join_res)
+                available_joins = [
+                    n for n in join_tree if len(nx.ancestors(join_tree, n))==2
+                ]
+            return set(signatures.values())
+        common_joins = set.intersection(*[
+            remaining_join_signatures(join_tree) for join_tree, _ in valid_join_trees
+        ])
+        # Build the final intersection tree, combining the commonly occurring joins
+        # into a single tree/forest, naming intermediate products on the fly
+        tree_intersection = nx.DiGraph(); i = 0
+        sa_sgns = {}; sa_sgns_inv = {}
+        while len(common_joins) > 0:
+            unprocessed_joins = []
+            for n1, n2 in common_joins:
+                if isinstance(n1[0], str) and isinstance(n2[0], str):
+                    # Can be processed now
+                    product_name = f"i{i}"
+                    join_signature = frozenset([
+                        (sa_sgns.get(n1[0], n1[0]), n1[1]),
+                        (sa_sgns.get(n2[0], n2[0]), n2[1])
+                    ])
+                    tree_intersection.add_edge(n1[0], product_name, join_by=n1[1])
+                    tree_intersection.add_edge(n2[0], product_name, join_by=n2[1])
+                    sa_sgns[product_name] = join_signature
+                    sa_sgns_inv[join_signature] = product_name
+                    i += 1
+                else:
+                    # To be processed at a later iteration
+                    unprocessed_joins.append((n1, n2))
 
-            plan_complete = len(safe_join_tree) == len(join_tree)
-            safe_join_trees.append((safe_join_tree, plan_complete))
+            common_joins = {
+                frozenset([
+                    (sa_sgns_inv.get(n1[0], n1[0]), n1[1]),
+                    (sa_sgns_inv.get(n2[0], n2[0]), n2[1])
+                ])
+                for n1, n2 in unprocessed_joins
+            }
 
-        # Select the largest join tree; if a tree is complete, its size will be
-        # one of the biggest ones, and it will be naturally selected
-        best_join_tree, plan_complete = sorted(
-            safe_join_trees, reverse=True, key=lambda x: len(x[0].edges)
-        )[0]
+        # Join tree is complete if all the nodes and edges are retained after
+        # the series of intersection
+        plan_complete = len(tree_intersection.nodes) == len(valid_join_trees[0][0].nodes) \
+            and len(tree_intersection.edges) == len(valid_join_trees[0][0].edges)
 
         safe_unification_choice = {
             n: list(objs)[0] for n, objs in collected_unification_choices.items()
             if len(objs) == 1
         }
         action_sequence, node2obj_map = _linearize_join_tree(
-            copy.deepcopy(best_join_tree), exec_state, connection_graph,
+            copy.deepcopy(tree_intersection), exec_state, connection_graph,
             connect_edges, atomic_node_concs, safe_unification_choice,
             part_candidates, (pick_up_actions, drop_actions, assemble_actions)
         )       # The valid `unification_choice` obtained above is passed as well
@@ -831,13 +876,25 @@ def _plan_assembly(agent, build_target):
     log_msg += f"({total_query_count} calls total)"
     logger.info(log_msg)
 
-    # 'Commit' to a set of part type recognitions, i.e., decisions as to of which
-    # type to consider each object as an instance
-    recognitions = {
-        oi: conc for oi, conc in node2obj_map.values()
-        if oi not in node_unifications or       # Not unified in the first place
-            oi in safe_unification_choice       # Unification is safe
-    } | exec_state["recognitions"]              # Prioritize existing ones
+    # 'Commit' to a set of part type recognitions, i.e., decisions as to
+    # of which type to consider each object as an instance
+    recognitions = {}
+    for oi, conc in node2obj_map.values():
+        if oi in node_unifications and oi not in safe_unification_choice:
+            # Skip if already unified and unification is not safe
+            continue
+        if oi in agent.vision.scene and conc in hyp_rels.values():
+            # For existing scene objects whose subtype should be further
+            # specified
+            recognitions[oi] = max([
+                subtype_conc for subtype_conc, supertype_conc in hyp_rels.items()
+                if supertype_conc == conc
+            ], key=lambda c: vis_scores.get((oi, c), -1))
+        else:
+            # Existing scene object with no specifiable subtype, or non-objs
+            recognitions[oi] = conc
+    # Prioritize existing ones
+    recognitions.update(exec_state["recognitions"])
 
     return action_sequence, recognitions, plan_complete
 
@@ -865,28 +922,32 @@ def _goal_selection(agent, build_target):
     min_vals = np.maximum(likelihood_values.min(axis=0), threshold)
     max_vals = likelihood_values.max(axis=0)
     val_ranges = max_vals - min_vals
-
     for oi, obj in agent.vision.scene.items():
         if oi in exec_state["recognitions"]:
             # Object recognition already committed with confidence, or labeling
             # feedback directly provided by user; max confidence
             ci = exec_state["recognitions"][oi]
-            obs_lit = Literal("is_likely", wrap_args(oi, ci, dsc_bin + 1))
+            obs_lit = Literal("type_likely", wrap_args(oi, ci, dsc_bin + 1))
             observations.add(obs_lit)
         else:
             # List all predictions with values above threshold
             for ci, val in enumerate(obj["pred_cls"]):
                 if val < threshold: continue
 
+                pred_name = agent.lt_mem.lexicon.d2s.get(
+                    ("pcls", ci), [(None, None)]
+                )[0][1]
+                if pred_name in ["red", "green", "blue", "gold", "white"]:
+                    lit_pred = "color_likely"
+                else:
+                    lit_pred = "type_likely"
                 # Normalize & discretize within [0,dsc_bin]; the more bins we
                 # use for discrete approximation, the more time it takes to
                 # solve the program
                 nrm_val = (val-min_vals[ci]) / val_ranges[ci]
                 dsc_val = int(nrm_val * dsc_bin)
 
-                obs_lit = Literal(
-                    "is_likely", wrap_args(oi, ci, dsc_val)
-                )
+                obs_lit = Literal(lit_pred, wrap_args(oi, ci, dsc_val))
                 observations.add(obs_lit)
 
     # Compile assembly structure knowledge into ASP fact literals
@@ -904,7 +965,7 @@ def _goal_selection(agent, build_target):
             for n, data in template.nodes(data=True):
                 if data["node_type"] == "atomic":
                     conc_ind = data["conc"]
-                    assembly_pieces.add(Literal("atomic", wrap_args(conc_ind)))
+                    assembly_pieces.add(Literal("slot_type", wrap_args(conc_ind)))
                     assembly_pieces.add(Literal(
                         "req_atomic", wrap_args(sa_conc, ti, n, conc_ind)
                     ))
@@ -932,6 +993,15 @@ def _goal_selection(agent, build_target):
                     wrap_args(sa_conc, ti, u, v, sgn_u, sgn_v, cp_u, cp_v)
                 )
                 assembly_pieces.add(conn_sgn_lit)
+
+    # Retrieve and encode hyper/hyponymy relations
+    for (ante, cons), _, _, rule_type in agent.lt_mem.kb.entries:
+        if rule_type != "taxonomy": continue
+        subtype_conc = int(ante[0].name.strip("pcls_"))
+        supertype_conc = int(cons[0].name.strip("pcls_"))
+        assembly_pieces.add(
+            Literal("subtype_of", wrap_args(subtype_conc, supertype_conc))
+        )
 
     # Additional constraints introduced by current assembly progress. Selected
     # goal structure must be compliant with existing subassemblies assembled;
@@ -1055,6 +1125,7 @@ def _tabulate_goal_selection_result(model):
     part_candidates = defaultdict(set)
     connect_edges = {}; connection_graph = nx.Graph()
     node_unifications = defaultdict(set)
+    vis_scores = {}; hyp_rels = {}
     for atm in model:
         match atm.name:
             case "node_atomic" | "node_sa_template":
@@ -1076,9 +1147,22 @@ def _tabulate_goal_selection_result(model):
                         node_rn
                     )
 
+            case "type_likely":
+                # Retrieving subtype likelihood stores from visual observations
+                obj_name = atm.arguments[0].name
+                part_conc = atm.arguments[1].number
+                vis_score = atm.arguments[2].number
+                vis_scores[(obj_name, part_conc)] = vis_score
+
+            case "subtype_of":
+                # Retrieving supertype/subtype relations
+                subtype_conc = atm.arguments[0].number
+                supertype_conc = atm.arguments[1].number
+                hyp_rels[subtype_conc] = supertype_conc
+
             case "use_as":
-                # Decision as to use which recognized object as instance of which
-                # atomic part type
+                # Decision as to use which recognized object to fill which
+                # atomic part slot in the assembly hierarchy graph
                 obj_name = atm.arguments[0].name
                 part_conc = atm.arguments[1].number
                 part_candidates[part_conc].add(obj_name)
@@ -1113,12 +1197,13 @@ def _tabulate_goal_selection_result(model):
 
     tabulated_results = (
         assembly_hierarchy, part_candidates, connect_edges, connection_graph,
-        node_unifications, atomic_node_concs
+        node_unifications, atomic_node_concs, vis_scores, hyp_rels
     )
     return tabulated_results
 
 def _match_existing_subassemblies(
-    connection_graph, unification_options, atomic_node_concs, exec_state
+    connection_graph, unification_options,
+    atomic_node_concs, hyp_rels, exec_state
 ):
     """
     Helper method factored out for establishing correspondence between
@@ -1126,6 +1211,11 @@ def _match_existing_subassemblies(
     subassemblies, based on graph matching and currently committed part
     type recognitions.
     """
+    recognitions = exec_state["recognitions"]       # Shortcut
+    get_supertype = lambda c: hyp_rels.get(c, c)
+        # Helper for obtaining the supertype of subtype c if it exists,
+        # otherwise returning the type itself
+
     possible_mappings = defaultdict(list)
     uniquely_unified = {
         re.findall(r"(s\d+)_(o\d+)", ex_obj)[0]: list(nodes)[0]
@@ -1162,8 +1252,8 @@ def _match_existing_subassemblies(
             # Discard the matching if any existing object with known type
             # doesn't typecheck
             if any(
-                ex_obj in exec_state["recognitions"] and \
-                    exec_state["recognitions"][ex_obj] != atomic_node_concs[n]
+                ex_obj in recognitions and \
+                    get_supertype(recognitions[ex_obj]) != atomic_node_concs[n]
                 for n, ex_obj in ism.items()
             ): continue
             possible_mappings[sa].append(ism)
@@ -1177,8 +1267,8 @@ def _match_existing_subassemblies(
         for ism in matcher.find_isomorphisms(symmetry=False):
             # Typechecking again
             if any(
-                ex_obj in exec_state["recognitions"] and \
-                    exec_state["recognitions"][ex_obj] != atomic_node_concs[n]
+                ex_obj in recognitions and \
+                    get_supertype(recognitions[ex_obj]) != atomic_node_concs[n]
                 for n, ex_obj in ism.items()
             ): continue
             possible_mappings[sa].append(ism)

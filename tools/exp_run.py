@@ -18,6 +18,7 @@ sys.path.insert(
     os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 )
 import uuid
+import copy
 import random
 import logging
 import warnings
@@ -160,7 +161,7 @@ def main(cfg):
 
     # Extract subtype ordering info from response message and store
     incoming_msgs = user_channel.incoming_message_buffer
-    all_subtypes = {}
+    all_subtypes = {}; all_subtypes_subsampled = None
     while len(incoming_msgs) > 0:
         spk, utterance, _ = incoming_msgs.pop(0)
         if spk == "System" and utterance.startswith("# Subtype orderings response: "):
@@ -176,17 +177,27 @@ def main(cfg):
     for ep_i in range(cfg.exp.num_episodes+1):
         logger.info(f"Sys> Episode {ep_i})")
 
+        # Sample for the easier supertype task problem initialization
+        # if target task is "build_truck_supertype" (of course) or
+        # "build_truck_subtype" for the first 10 episodes
+        if target_task == "build_truck_subtype" and ep_i < 15:
+            episode_task = "build_truck_supertype"
+        else:
+            episode_task = target_task
+
         # Obtain random initialization of each episode
-        sampled_inits = user.setup_episode(target_task, all_subtypes)
+        if episode_task == "build_truck_supertype":
+            sampled_inits = user.setup_episode(
+                episode_task, all_subtypes_subsampled or all_subtypes
+            )
+        else:
+            sampled_inits = user.setup_episode(episode_task, all_subtypes)
 
-        # Send the randomly initialized parameters to Unity
-        for field, value in sampled_inits.items():
-            if "viol" in field: continue
-            env_par_channel.set_float_parameter(field, value)
-
-        if target_task == "build_truck_supertype":
+        if episode_task == "build_truck_supertype" and \
+            all_subtypes_subsampled is None:
             # Fix the pool of possible subtypes into only the sampled ones for
-            # the remaining episodes (except color attributes)
+            # the following supertype task problems (except color attributes)
+            all_subtypes_subsampled = copy.deepcopy(all_subtypes)
             occurring_subtypes = {
                 (f_spl[0], value) for field, value in sampled_inits.items()
                 if (f_spl := field.split("/"))[2] == "type"
@@ -196,10 +207,15 @@ def main(cfg):
                 # Replace unoccurring subtypes with None rather than deleting
                 # in order to preserve indices
                 sampled_subtypes = [i for _, i in sampled_subtypes]
-                all_subtypes[supertype] = [
+                all_subtypes_subsampled[supertype] = [
                     subtype if i in sampled_subtypes else None
-                    for i, subtype in enumerate(all_subtypes[supertype])
+                    for i, subtype in enumerate(all_subtypes_subsampled[supertype])
                 ]
+
+        # Send the randomly initialized parameters to Unity
+        for field, value in sampled_inits.items():
+            if "viol" in field: continue
+            env_par_channel.set_float_parameter(field, value)
 
         # Request sending ground-truth mask info to teacher at the beginning
         agent_channel.send_string("System", "# GT mask request: *", {})
@@ -278,7 +294,7 @@ def main(cfg):
                                 agent.symbolic.sensemake_vis(None, visual_evidence)
                                 # Record instance names used in the environment side associated
                                 # with each object
-                                aliases = user.current_episode_record["assembly_state"]["aliases"]
+                                aliases = user.current_episode_record["episode_state"]["aliases"]
                                     # Provide teacher with access to the object correspondence as well
                                 for oi, crange in enumerate(dem_refs):
                                     name_with_type = utterance[crange[0]:crange[1]].split("/")
@@ -315,7 +331,7 @@ def main(cfg):
                                                 groundings.append((gt_label, ans_label))
                                     else:
                                         # Tracking part type classification accuracy scores
-                                        get_label = lambda c: agent.lt_mem.lexicon.codesheet[c] \
+                                        get_label = lambda c: agent.lt_mem.lexicon.codesheet.get(c) \
                                             if cfg.exp.player_type in ["bool", "demo"] \
                                             else agent.lt_mem.lexicon.d2s[("pcls", c)][0][1]
                                         for obj in agent.vision.scene.values():
@@ -325,14 +341,7 @@ def main(cfg):
                                             ans_conc = np.nanargmax(scores)
                                             ans_prob = scores[ans_conc]
                                             ans_label = get_label(ans_conc) if ans_prob >= 0.35 else None
-                                            if cfg.exp.task == "build_truck_supertype" and \
-                                                cfg.exp.player_type in ["label", "full"]:
-                                                # Supertype as ground-truth label for base-difficulty task
-                                                # with languageful agents
-                                                gt_label = re.findall(r"t_(.*)_\d+$", obj["env_handle"])[0]
-                                            else:
-                                                # Subtype as ground-truth label otherwise
-                                                gt_label = obj["type_code"]
+                                            gt_label = obj["type_code"]
                                             groundings.append((gt_label, ans_label))
                                     stats = defaultdict(lambda: { "tp": 0, "fp": 0, "fn": 0 })
                                     for gt, ans in groundings:
@@ -344,6 +353,12 @@ def main(cfg):
                                     f1_scores = {}
                                     for c in agent.lt_mem.exemplars.binary_classifiers_2d["pcls"]:
                                         # Looping only for concepts whose binary classifier exists
+                                        if c is None:
+                                            continue
+                                        elif cfg.exp.task == "inject_color":
+                                            if c not in color_concs: continue
+                                        else:
+                                            if c in color_concs: continue
                                         label = get_label(c)
                                         tp = stats[label]["tp"]
                                         fp = stats[label]["fp"]
@@ -517,6 +532,7 @@ def main(cfg):
         # Just save the model
         agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/color_pretrained.ckpt")
     else:
+        agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/{cfg.exp.player_type}_{cfg.seed}.ckpt")
         # Save evaluation metric curves to output dir
         out_csv_fname = f"{exp_tag}.csv"
 

@@ -347,6 +347,16 @@ class ITLAgent:
                 demo_ci = int(demonstrated_event[1])
                 demonstrated_event = resolved_record[demo_ti][1][demo_ci][0][-1]
                 self.observed_demo = (demonstrated_event, (demo_ti, demo_ci))
+                # Resolve any unexecuted command with the same event signature
+                resolved_commands = []
+                demo_evt_sgn = {lit.name for lit in demonstrated_event}
+                for ti, ci in self.lang.dialogue.unexecuted_commands:
+                    command = resolved_record[ti][1][ci][0][-1]
+                    command_evt_sgn = {lit.name for lit in command}
+                    if demo_evt_sgn <= command_evt_sgn:
+                        resolved_commands.append((ti, ci))
+                for utt_pointer in resolved_commands:
+                    del self.lang.dialogue.unexecuted_commands[utt_pointer]
                 break           # Break here without proceeding
 
             if self.observed_demo is not None:
@@ -462,23 +472,9 @@ class ITLAgent:
                         # of negative)
                         statement = (ante, cons)
                         xb_updated |= self.comp_actions.identify_mismatch(statement)
-                        # self.comp_actions.identify_acknowledgement(
-                        #     statement, prev_statements, prev_context
-                        # )
                         kb_updated |= self.comp_actions.identify_generics(
                             statement, prev_Qs, raw
                         )
-
-                # By default, treat lack of any negative acknowledgements to an agent's statement
-                # as positive acknowledgement
-                prev_or_curr = "prev" if new_env else "curr"
-                for (ti, ci), (speaker, statement) in prev_statements:
-                    if speaker != "Student": continue         # Not interested
-
-                    stm_ind = (prev_or_curr, ti, ci)
-                    if stm_ind not in self.lang.dialogue.acknowledged_stms:
-                        acknowledgement_data = (statement, True, prev_context)
-                        self.lang.dialogue.acknowledged_stms[stm_ind] = acknowledgement_data
 
                 # Handle neologisms
                 xb_updated |= self.comp_actions.handle_neologism(
@@ -523,12 +519,10 @@ class ITLAgent:
         # pending items in agenda
         for n in self.lang.unresolved_neologisms:
             self.planner.agenda.appendleft(("address_neologism", n))
-        for a in self.lang.dialogue.acknowledged_stms.items():
-            self.planner.agenda.appendleft(("address_acknowledgement", a))
-        for ti, ci in self.lang.dialogue.unanswered_Qs:
-            self.planner.agenda.appendleft(("address_unanswered_Q", (ti, ci)))
-        for ti, ci in self.lang.dialogue.unexecuted_commands:
-            self.planner.agenda.appendleft(("address_unexecuted_commands", (ti, ci)))
+        for utt_pointer in self.lang.dialogue.unanswered_Qs:
+            self.planner.agenda.appendleft(("address_unanswered_Q", utt_pointer))
+        for utt_pointer in self.lang.dialogue.unexecuted_commands:
+            self.planner.agenda.appendleft(("address_unexecuted_commands", utt_pointer))
 
         return_val = []
         act_on_env = False
