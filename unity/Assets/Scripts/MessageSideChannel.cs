@@ -139,7 +139,7 @@ public class MessageSideChannel : SideChannel
         QueueMessageToSend(msgOut);
     }
 
-    private static float[] RleEncode(float[] rawMask)
+    public static float[] RleEncode(float[] rawMask)
     {
         // Encode raw binary mask into RLE format for message compression
         var rle = new List<float>();

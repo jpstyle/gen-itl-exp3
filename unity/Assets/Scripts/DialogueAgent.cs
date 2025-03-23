@@ -987,8 +987,8 @@ public class DialogueAgent : Agent
         // bring the hand back to the original position.
         var directionString = onLeft ? "left" : "right";
 
-        // Action aftermath info to return; 3d pose of the object being inspected,
-        // in camera coordinate
+        // Action aftermath info to return; 3d pose of the object being inspected
+        // in camera coordinate, RLE encoding of current entity mask
         var actionEffect = $"# Effect: inspect_{directionString}(";
 
         var activeHand = onLeft ? leftHand : rightHand;
@@ -1048,8 +1048,16 @@ public class DialogueAgent : Agent
         var pos = camTr.InverseTransformPoint(partTr.position);
         var poseString = $"{rot.ToString("F4")},{pos.ToString("F4")}";
         poseString = poseString.Replace("(", "").Replace(")", "").Replace(", ", "/");
-        actionEffect += $"{poseString})";
+        actionEffect += $"{poseString},";
 
+        // Sending current segmentation mask (RLE-encoded) of the EnvEntity as action effect
+        // as well
+        var entMaskRle = MessageSideChannel
+            .RleEncode(GetSensorMask(heldObj.GetComponent<EnvEntity>()))
+            .Select(f => f.ToString()).ToArray();
+        var maskString = String.Join("/", entMaskRle);
+        actionEffect += $"{maskString})";
+        
         return actionEffect;
     }
 
