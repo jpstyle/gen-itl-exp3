@@ -15,6 +15,7 @@ from numpy.linalg import norm, inv
 from sklearn.metrics import pairwise_distances
 from sklearn.decomposition import PCA
 
+from .constants import *
 from .interact import (
     _goal_selection, _tabulate_goal_selection_result,
     _match_existing_subassemblies
@@ -26,29 +27,6 @@ from ..vision.utils import (
 )
 from ..lpmln import Literal
 from ..lpmln.utils import flatten_ante_cons, wrap_args
-
-
-EPS = 1e-10                 # Value used for numerical stabilization
-SR_THRES = 0.8              # Mismatch surprisal threshold
-U_IN_PR = 0.99              # How much the agent values information provided by the user
-
-# Connectivity graph that represents pairs of 3D inspection images to be cross-referenced
-CON_GRAPH = nx.Graph()
-for i in range(8):
-    CON_GRAPH.add_edge(i, i+8)
-    CON_GRAPH.add_edge(i+8, i+16)
-    if i < 7:
-        CON_GRAPH.add_edge(i, i+1)
-        CON_GRAPH.add_edge(i+8, i+9)
-        CON_GRAPH.add_edge(i+16, i+17)
-    else:
-        CON_GRAPH.add_edge(i, i-7)
-        CON_GRAPH.add_edge(i+8, i+1)
-        CON_GRAPH.add_edge(i+16, i+9)
-# Index of viewpoints whose data (camera pose, visible points and their descriptors)
-# will be stored in long-term memory; storing for all consumes too much space (storing
-# all descriptors---even in reduced dimensionalities---would take too much)
-STORE_VP_INDS = [0, 2, 4, 6, 16, 18, 20, 22]
 
 
 def identify_mismatch(agent, statement):
@@ -417,7 +395,7 @@ def resolve_neologisms(agent):
                 inspect_action = agent.lt_mem.lexicon.s2d[("va", f"inspect_{empty_side}")][0][1]
                 drop_action = agent.lt_mem.lexicon.s2d[("va", f"drop_{empty_side}")][0][1]
                 inspection_plan = [(pick_up_action, (inspection_target,))] + [
-                    (inspect_action, (inspection_target, i))
+                    (inspect_action, (inspection_target, i, den))
                     for i in range(24+1)
                 ] + [(drop_action, ())]
                 inspection_plan = [
@@ -749,8 +727,7 @@ def analyze_demonstration(agent, demo_data):
     )
     for inst, (data_img, data_msk, data_pose) in v3d_it:
         vision_3d_data[inst] = agent.vision.reconstruct_3d_structure(
-            data_img, data_msk, data_pose, CON_GRAPH, STORE_VP_INDS,
-            # resolution_multiplier=1.25
+            data_img, data_msk, data_pose, CON_GRAPH, STORE_VP_INDS
         )
 
     # Tag each part instance with their visual concept index, registering any

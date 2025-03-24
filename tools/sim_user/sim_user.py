@@ -780,7 +780,7 @@ class SimulatedTeacher:
                 matching_insts = [
                     ((supertype, inst_id), f"{inst_id[0]}_{supertype}_{inst_id[1]}")
                     for (supertype, inst_id), info in sampled_parts.items()
-                    if queried_type == supertype or queried_type == info["type"]
+                    if queried_type == supertype and inst_id[0] == "t"
                 ]
                 consumed_insts = [
                     inst for sa_graph in subassems.values() for inst in sa_graph

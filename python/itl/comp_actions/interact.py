@@ -18,6 +18,7 @@ import networkx as nx
 from numpy.linalg import inv
 from clingo import Control, SymbolType, Number, Function
 
+from .constants import CON_GRAPH, STORE_VP_INDS
 from .utils import rle_decode
 from ..vision.utils import (
     xyzw2wxyz, flip_position_y, flip_quaternion_y, rmat2quat, transformation_matrix
@@ -305,6 +306,12 @@ def attempt_command(agent, utt_pointer):
             action_params[arg[0]] = agent.lang.dialogue.referents["env"][-1][arg[0]]
 
     if command_executable:
+        # Some reformatting of action parameters according to action type
+        action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
+        if action_name == "build":
+            action_params = list(action_params.values())[0][0].split("_")
+            action_params = (action_params[0], int(action_params[1]))
+
         # Schedule to generate plan & execute towards fulfilling the command
         agent.planner.agenda.append(("execute_command", (action_type, action_params)))
         del agent.lang.dialogue.unexecuted_commands[utt_pointer]
@@ -382,13 +389,15 @@ def execute_command(agent, action_spec):
     if replanning_needed:
         # Plan again for the remainder of the assembly based on current execution
         # state, belief and knowledge, then return without return value
+
+        # Incorporate any previous labeling feedback from user
         resolved_record = agent.lang.dialogue.export_resolved_record()
         labeling_feedback = [
             (lit.args[0][0], int(lit.name.strip("pcls_")))
             for spk, turn_clauses in resolved_record
             for ((_, _, _, cons), _, clause_info) in turn_clauses
             for lit in cons
-            if len(cons) > 0 and spk == "Teacher" and clause_info["mood"] == "." \
+            if len(cons) == 1 and spk == "Teacher" and clause_info["mood"] == "." \
                 and lit.name.startswith("pcls")
         ]
         labeling_map = dict(labeling_feedback)
@@ -406,7 +415,6 @@ def execute_command(agent, action_spec):
             if isinstance(objs, tuple)
         } | labeling_map
 
-        # Finally, re-plan
         build_action, build_target = exec_state["plan_goal"]
         build_action = agent.lt_mem.lexicon.s2d[("va", build_action)][0][1]
         action_sequence, recognitions, plan_complete = _plan_assembly(agent, build_target)
@@ -437,8 +445,6 @@ def execute_command(agent, action_spec):
         action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
         match action_name:
             case "build":
-                action_params = list(action_params.values())[0][0].split("_")
-                action_params = (action_params[0], int(action_params[1]))
                 return _execute_build(agent, action_params)
 
             case "pick_up_left" | "pick_up_right":
@@ -480,6 +486,33 @@ def _execute_build(agent, action_params):
             "num_collision_queries": 0
         }
     }
+
+    exec_state = agent.planner.execution_state    # Shortcut var
+
+    # Incorporate any previous labeling feedback from user
+    resolved_record = agent.lang.dialogue.export_resolved_record()
+    labeling_feedback = [
+        (lit.args[0][0], int(lit.name.strip("pcls_")))
+        for spk, turn_clauses in resolved_record
+        for ((_, _, _, cons), _, clause_info) in turn_clauses
+        for lit in cons
+        if len(cons) == 1 and spk == "Teacher" and clause_info["mood"] == "." \
+            and lit.name.startswith("pcls")
+    ]
+    labeling_map = dict(labeling_feedback)
+
+    # Update execution state to reflect recognitions hitherto committed
+    # and those certified by user feedback
+    exec_state["recognitions"] = {
+        n: exec_state["recognitions"][n]
+        for gr in exec_state["connection_graphs"].values()
+        for n in gr
+        if n in exec_state["recognitions"]
+    } | {
+        objs: labels
+        for objs, labels in exec_state["recognitions"].items()
+        if isinstance(objs, tuple)
+    } | labeling_map
 
     # Plan towards building valid target structure
     action_sequence, recognitions, plan_complete = _plan_assembly(
@@ -561,7 +594,8 @@ def _plan_assembly(agent, build_target):
         # valid structure for the concept, fetch the index of the selected
         # template in order to retrieve storage of any known scope entailments
         selected_tmpl = next(
-            atm.arguments[2].number for atm in best_model
+            (atm.arguments[1].number, atm.arguments[2].number)
+            for atm in best_model
             if atm.name=="node_sa_template" and \
                 (top_node := atm.arguments[0]).type == SymbolType.Number and \
                 top_node.number == 0
@@ -741,7 +775,7 @@ def _plan_assembly(agent, build_target):
         valid_join_trees = []
         structures = agent.lt_mem.kb.assembly_structures
         _, scope_entailments, verified_joins = \
-            structures[build_target][selected_tmpl]
+            structures[("pcls", selected_tmpl[0])][selected_tmpl[1]]
         violated_entailments_by_obj = set()
         for unification_choice in valid_scenarios:
             if total_planning_attempts >= 30:
@@ -936,6 +970,10 @@ def _goal_selection(agent, build_target):
     min_vals = np.maximum(likelihood_values.min(axis=0), threshold)
     max_vals = likelihood_values.max(axis=0)
     val_ranges = max_vals - min_vals
+    color_concs = {
+        agent.lt_mem.lexicon.s2d[("a", col)][0][1]
+        for col in ["red", "green", "blue", "white", "gold"]
+    }
     for oi, obj in agent.vision.scene.items():
         if oi in exec_state["recognitions"]:
             # Object recognition already committed with confidence, or labeling
@@ -948,21 +986,20 @@ def _goal_selection(agent, build_target):
             for ci, val in enumerate(obj["pred_cls"]):
                 if val < threshold: continue
 
-                pred_name = agent.lt_mem.lexicon.d2s.get(
-                    ("pcls", ci), [(None, None)]
-                )[0][1]
-                if pred_name in ["red", "green", "blue", "gold", "white"]:
-                    lit_pred = "color_likely"
-                else:
-                    lit_pred = "type_likely"
                 # Normalize & discretize within [0,dsc_bin]; the more bins we
                 # use for discrete approximation, the more time it takes to
                 # solve the program
-                nrm_val = (val-min_vals[ci]) / val_ranges[ci]
-                dsc_val = int(nrm_val * dsc_bin)
+                if val_ranges[ci] == 0:
+                    dsc_val = 0         # Pessimistic
+                else:
+                    nrm_val = (val-min_vals[ci]) / val_ranges[ci]
+                    dsc_val = int(nrm_val * dsc_bin)
 
-                obs_lit = Literal(lit_pred, wrap_args(oi, ci, dsc_val))
-                observations.add(obs_lit)
+                if dsc_val >= 5:
+                    # Setting another threshold by the discrete score
+                    lit_pred = "color_likely" if ci in color_concs else "type_likely"
+                    obs_lit = Literal(lit_pred, wrap_args(oi, ci, dsc_val))
+                    observations.add(obs_lit)
 
     # Compile assembly structure knowledge into ASP fact literals
     structures = agent.lt_mem.kb.assembly_structures
@@ -1015,6 +1052,32 @@ def _goal_selection(agent, build_target):
         assembly_pieces.add(
             Literal("subtype_of", wrap_args(subtype_conc, supertype_conc))
         )
+
+    # Add any constraints from 'property'-type entries in KB. Each constraint
+    # will have an associated 'severity score', the maximum of which will be
+    # offset from the final compatibility score.
+    kb_constraints = set()
+    for ei, ((ante, cons), _, _, knowledge_type) in enumerate(agent.lt_mem.kb.entries):
+        if knowledge_type != "property": continue
+        skolem_fn_terms = {
+            a for lit in cons for a, _ in lit.args if isinstance(a, tuple)
+        }
+        if len(skolem_fn_terms):
+            # Existential constraints signaled by skolem function terms
+            assert len(ante) == 1
+            scope_conc = int(ante[0].name.split("_")[1])
+            constraint_str = f"violation_severity({ei},20) :- node_sa(N,{scope_conc}), "
+            constraint_str += "#count { O : component_obj(O,N)"
+            for lit in cons:
+                if lit.name == "prel_0": continue       # Already incorporated
+                prop_conc = int(lit.name.split("_")[1])
+                lit_pred = "color_likely" if prop_conc in color_concs else "type_likely"
+                constraint_str += f", {lit_pred}(O,{prop_conc},_)"
+            constraint_str += " } = 0.\n"
+        else:
+            # Universal constraints signaled by lack of skolem function terms
+            print(0)
+        kb_constraints.add(constraint_str)
 
     # Additional constraints introduced by current assembly progress. Selected
     # goal structure must be compliant with existing subassemblies assembled;
@@ -1081,7 +1144,8 @@ def _goal_selection(agent, build_target):
         key=lambda x: x.name
     )
     facts_prg = "".join(str(lit) + ".\n" for lit in all_lits)
-    commit_ctl.add("facts", [], facts_prg)
+    constraints_prg = "".join(kb_constraints)
+    commit_ctl.add("facts", [], facts_prg + constraints_prg)
 
     # Optimize with clingo; using the incremental multi-shot optimization
     # procedure supported from clingo 4, as built-in optimization seems to
@@ -3177,7 +3241,47 @@ def handle_action_effect(agent, effect, actor):
 
         if view_ind == 24:
             # All necessary data collected, extract the 3D structure
-            print(0)
+            reconstruction = agent.vision.reconstruct_3d_structure(
+                exec_state["3d_inspection_data"]["img"],
+                exec_state["3d_inspection_data"]["msk"],
+                exec_state["3d_inspection_data"]["pose"],
+                CON_GRAPH, STORE_VP_INDS
+            )
+            point_cloud, views, descriptors = reconstruction
+
+            # Fetch inspection target concept
+            conc = exec_state["action_history"][-1][1][-1]
+            conc_str = f"{conc[0]}_{conc[1]}"
+
+            # Simplifying assumption: all subtypes of a part supertype share
+            # the same coordinate space (origin and axes) and contact point
+            # poses defined within. Without the assumption, we'd have to
+            # request join demonstrations for every single pair of (part
+            # subtype, contact point).
+            supertype_conc = next(
+                entry[0][1][0].name
+                for ei in agent.lt_mem.kb.entries_by_pred[conc_str]
+                if (entry := agent.lt_mem.kb.entries[ei])[3] == "taxonomy" and \
+                    entry[0][0][0].name == conc_str
+            )
+            all_subtype_concs = {
+                entry[0][0][0].name
+                for ei in agent.lt_mem.kb.entries_by_pred[supertype_conc]
+                if (entry := agent.lt_mem.kb.entries[ei])[3] == "taxonomy" and \
+                    entry[0][1][0].name == supertype_conc
+            } - {conc_str}
+            contact_points = next(
+                agent.lt_mem.exemplars.object_3d[st_conc][3]
+                for st_conc_str in all_subtype_concs
+                if (st_conc := int(st_conc_str.split("_")[1])) in \
+                    agent.lt_mem.exemplars.object_3d
+            )
+
+            # Store the extracted structure and the imported contact points in XB
+            agent.lt_mem.exemplars.add_exs_3d(
+                conc[1], np.asarray(point_cloud.points), views, descriptors,
+                contact_points
+            )
 
             # Remove the temporary data storage field
             del exec_state["3d_inspection_data"]
