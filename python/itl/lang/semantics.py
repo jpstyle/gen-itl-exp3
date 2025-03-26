@@ -41,6 +41,7 @@ class SemanticParser:
             #   11) "What were you trying to do?"
             #   12) "Stop." & "Continue."
             #   13) "A {truck_subtype} is a truck with {part_subtypes}."
+            #   14) "Use this {gt_descriptor} instead of this {dt_descriptor}."
             if re.match(r"Build a (.*)\.$", utt):
                 # Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -169,18 +170,9 @@ class SemanticParser:
                 # is provided
                 pol, labeled_target = re.findall(r"This is (not )?a (.*)\.$", utt)[0]
 
-                if pol != "not ":
-                    # Positive polarity; factual statement represented as a simple
-                    # antecedent-less clause
-                    ante = []
-                    cons = [("n", labeled_target, ["x0"])]
-                else:
-                    # Negative polarity; factual statement represented as a simple
-                    # consequent-less clause (similar to headless integrity constraint
-                    # in logic programming)
-                    ante = [("n", labeled_target, ["x0"])]
-                    cons = []
-                clauses = { "e0": ((), (), ante, cons) }
+                pol = "~" if pol == "not " else ""
+                cons = [("n", f"{pol}{labeled_target}", ["x0"])]
+                clauses = { "e0": ((), (), [], cons) }
                 referents = {
                     "e0": { "mood": "." },
                     "x0": { "source_evt": "e0", "dem_ref": (0, 4) }
@@ -380,6 +372,43 @@ class SemanticParser:
                         f"x{2+2*i+1}": { "source_evt": f"e{i+1}" },
                     }
                 source = { f"e{i}": utt for i in range(len(part_subtypes)+1) }
+
+            elif re.match(r"Use this (.*) instead of this (.*)\.$", utt):
+                # Informing agent to use some ground-truth part instance
+                # of a same category instead of the distractor part instance
+                # previously used
+                gt_descriptor, dt_descriptor = \
+                    re.findall(r"Use this (.*) instead of this (.*)\.$", utt)[0]
+                if gt_descriptor == "one":
+                    gt_descriptor = []
+                else:
+                    gt_descriptor = gt_descriptor.split(" ")
+                    gt_descriptor = [("n", gt_descriptor[-1], ["x1"])] + \
+                        ([("a", gt_descriptor[0], ["x1"])] if len(gt_descriptor) > 1 else [])
+                if dt_descriptor == "one":
+                    dt_descriptor = []
+                else:
+                    dt_descriptor = dt_descriptor.split(" ")
+                    dt_descriptor = [("n", dt_descriptor[-1], ["x2"])] + \
+                        ([("a", dt_descriptor[0], ["x2"])] if len(dt_descriptor) > 1 else [])
+
+                clauses = {
+                    "e0": (
+                        (), (), [],
+                        [
+                            ("sp", "pronoun2", ["x0"]),
+                            ("va", "pick_up", ["e0", "x0", "x1"]),
+                            ("va", "~pick_up", ["e0", "x0", "x2"]),
+                        ] + gt_descriptor + dt_descriptor
+                    )
+                }
+                referents = {
+                    "e0": { "mood": "." },
+                    "x0": { "source_evt": "e0" },
+                    "x1": { "source_evt": "e0", "dem_ref": sorted(dem_refs)[0] },
+                    "x2": { "source_evt": "e0", "dem_ref": sorted(dem_refs)[1] }
+                }
+                source = { "e0": utt }
 
             else:
                 # Don't know how to process other patterns

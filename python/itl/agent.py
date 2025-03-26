@@ -180,8 +180,15 @@ class ITLAgent:
                     # currently remaining plan is invalid and replanning
                     # would be needed.
                     self.execution_paused = True
-                    self.planner.execution_state["replanning_needed"] = True
                     self.interrupted = True     # Also log interruption
+                    # Replanning to agenda
+                    goal_action, goal_target = self.planner.execution_state["plan_goal"]
+                    goal_action = self.lt_mem.lexicon.s2d[("va", goal_action)][0][1]
+                    self.planner.execution_state["last_scrapped_plan"] = \
+                        self.planner.agenda
+                    self.planner.agenda = deque([
+                        ("execute_command", (goal_action, (goal_target, True)))
+                    ])
                 if utt == "Continue." and self.execution_paused:
                     # Exit pause mode
                     self.execution_paused = False
@@ -442,12 +449,7 @@ class ITLAgent:
                         xb_updated |= self.comp_actions.identify_mismatch(statement)
                         kb_updated |= self.comp_actions.identify_generics(statement, raw)
 
-                if xb_updated or kb_updated:
-                    # Agent's knowledge state is somehow updated, flag that
-                    # re-planning is in order before execution
-                    if "replanning_needed" in self.planner.execution_state:
-                        self.planner.execution_state["replanning_needed"] = True
-                else:
+                if not (xb_updated or kb_updated):
                     # Terminate the loop when 'equilibrium' is reached
                     break
 

@@ -18,44 +18,59 @@
 
 truck_front:
     forall:
-        - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+        - logical_form: [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+          surface_form: ""
 
 truck_back:
     forall:
-        - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+        - logical_form: [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+          surface_form: ""
 
 fw_unit:
     forall:
-        - [["large_fender", "normal_wheel"], null]
+        - logical_form: [["large_fender", "normal_wheel"], null]
+          surface_form: ""
 
 truck:
     forall:
-        - [["fender", "chassis_center"], [["_same_color", false, [0, 1]]]]
-        - [["normal_wheel", "large_wheel"], null]
+        - logical_form: [["fender", "chassis_center"], [["_same_color", false, [0, 1]]]]
+          surface_form: ""
+        - logical_form: [["normal_wheel", "large_wheel"], null]
+          surface_form: ""
 
 base_truck:
     forall:
-        - [["cabin", "chassis_center"], [["_same_color", false, [0, 1]]]]
-        - [["staircase_chassis_center"], null]
+        - logical_form: [["cabin", "chassis_center"], [["_same_color", false, [0, 1]]]]
+          surface_form: ""
+        - logical_form: [["staircase_chassis_center"], null]
+          surface_form: ""
 
 missile_truck:
     exists:
-        - [["fender"], [["green", true, [0]]]]
+        - logical_form: [["fender"], [["green", true, [0]]]]
+          surface_form: ""
     forall:
-        - [["cabin", "chassis_center"], [["_same_color", true, [0, 1]]]]
+        - logical_form: [["cabin", "chassis_center"], [["_same_color", true, [0, 1]]]]
+          surface_form: ""
 
 dump_truck:
     forall:
-        - [["colored_part"], [["gold", false, [0]]]]
-        - [["wheel"], [["normal_wheel", true, [0]]]]
+        - logical_form: [["colored_part"], [["gold", false, [0]]]]
+          surface_form: ""
+        - logical_form: [["wheel"], [["normal_wheel", true, [0]]]]
+          surface_form: ""
 
 container_truck:
     forall:
-        - [["colored_part"], [["blue", false, [0]]]]
-        - [["wheel"], [["large_wheel", true, [0]]]]
+        - logical_form: [["colored_part"], [["blue", false, [0]]]]
+          surface_form: ""
+        - logical_form: [["wheel"], [["large_wheel", true, [0]]]]
+          surface_form: ""
 
 fire_truck:
     exists:
-        - [["colored_part"], [["white", true, [0]]]]
+        - logical_form: [["colored_part"], [["white", true, [0]]]]
+          surface_form: ""
     forall:
-        - [["fender"], [["red", true, [0]]]]
+        - logical_form: [["fender"], [["red", true, [0]]]]
+          surface_form: ""

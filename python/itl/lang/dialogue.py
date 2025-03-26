@@ -152,7 +152,7 @@ class DialogueManager:
                     for pi, p in enumerate(preds):
                         # Skip reserved predicates of 'special' (denoted 'sp') type
                         if p[0] == "sp": continue
-
+                        p = (p[0], p[1].strip("~"))
                         occurring_preds.add(p)
 
                         sym = f"{p[0]}_{p[1]}"
@@ -287,14 +287,16 @@ class DialogueManager:
 
         # Recursive helper methods for encoding pre-translation tuples representing
         # literals into actual Literal objects
-        encode_lits = lambda cnjt, ti, ci, c_or_a, li: Literal(
-            self.word_senses.get(
+        def encode_lits(cnjt, ti, ci, c_or_a, li):
+            denotation = self.word_senses.get(
                 (f"t{ti}",f"c{ci}",f"p{c_or_a}{li}"),
                 # If not found (likely reserved predicate), fall back to cnjt's pred
                 (None, "_".join(cnjt[:2]))
-            )[1],
-            args=wrap_args(*a_map(cnjt[2]))
-        )
+            )[1]
+            return Literal(
+                denotation, args=wrap_args(*a_map(cnjt[2])),
+                naf=cnjt[1].startswith("~")
+            )
 
         record_translated = []
         for ti, (speaker, turn_clauses) in enumerate(self.record):

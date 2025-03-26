@@ -75,7 +75,10 @@ def attempt_Q(agent, utt_pointer):
         }
 
     pred_concs = {
-        ((pred_spl := pred.split("_"))[0], int(pred_spl[1]))
+        (
+            (pred_spl := pred.split("_"))[0],
+            int(pred_spl[1]) if pred_spl[1].isdigit() else pred_spl[1]
+        )
         for pred in predicates_mentioned
     }
     if any(
@@ -151,11 +154,15 @@ def prepare_answer_Q(agent, utt_pointer):
                 # Entity was picked up with left hand in last action, which
                 # is currently dropped back on table
                 ent_path_left = f"/*/{ent_left}"
-                ent_path_right = f"/Student Agent/Right Hand/*/{ent_right}"
+                ent_path_right = f"/Student Agent/Right Hand/*/{ent_right}" \
+                    if exec_state["manipulator_states"][1][0] is not None \
+                    else f"/*/{ent_right}"
             else:
                 # Entity was picked up with right hand in last action, which
                 # is currently dropped back on table
-                ent_path_left = f"/Student Agent/Left Hand/*/{ent_left}"
+                ent_path_left = f"/Student Agent/Left Hand/*/{ent_left}" \
+                    if exec_state["manipulator_states"][0][0] is not None \
+                    else f"/*/{ent_left}"
                 ent_path_right = f"/*/{ent_right}"
         else:
             ent_path_left = f"/Student Agent/Left Hand/*/{ent_left}"
@@ -244,10 +251,11 @@ def _last_intended_join(agent):
     if last_action_type in pick_up_actions:
         # The previous action undone was a picking up which resulted in
         # holding a pair of subassemblies that can never be joined. In this
-        # case, the intended join is the next one in the planner agenda.
+        # case, the intended join is the next one in the (scrapped) planner
+        # agenda.
         intended_join = next(
             (todo_args[1][1], todo_args[1][4])
-            for todo_type, todo_args in agent.planner.agenda
+            for todo_type, todo_args in exec_state["last_scrapped_plan"]
             if todo_type == "execute_command" and todo_args[0] in assemble_actions
         )
     else:
@@ -309,8 +317,9 @@ def attempt_command(agent, utt_pointer):
         # Some reformatting of action parameters according to action type
         action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
         if action_name == "build":
-            action_params = list(action_params.values())[0][0].split("_")
-            action_params = (action_params[0], int(action_params[1]))
+            build_target = list(action_params.values())[0][0].split("_")
+            build_target = (build_target[0], int(build_target[1]))
+            action_params = (build_target, False)       # `replan`: False
 
         # Schedule to generate plan & execute towards fulfilling the command
         agent.planner.agenda.append(("execute_command", (action_type, action_params)))
@@ -373,91 +382,31 @@ def execute_command(agent, action_spec):
 
     exec_state = agent.planner.execution_state      # Shortcut var
 
-    # Re-planning flag check
-    replanning_needed = exec_state.get("replanning_needed", False)
-    exec_state["replanning_needed"] = False         # Clear flag
+    # Currently considered commands: some long-term commands that requiring
+    # long-horizon planning (e.g., 'build'), and some primitive actions that
+    # are to be executed---that is, signaled to Unity environment---immediately
 
-    # Note to self: One could imagine we could skip re-planning from scratch
-    # after the user's labeling feedback if it did not involve an instance
-    # that is already referenced in the remainder of the plan (i.e., when the
-    # corrective feedback does not refute the premise based on agent's previous
-    # object recognition output)... However, it turned out it caused too much
-    # headache to juice such opportunities, and it's much easier to simply
-    # re-plan after any form of knowledge update (after dropping all held
-    # objects in hands).
+    # Record the spec of action being executed
+    exec_state["action_history"].append(
+        (action_type, action_params, "Student")
+    )
 
-    if replanning_needed:
-        # Plan again for the remainder of the assembly based on current execution
-        # state, belief and knowledge, then return without return value
+    action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
+    match action_name:
+        case "build":
+            return _execute_build(agent, action_params)
 
-        # Incorporate any previous labeling feedback from user
-        resolved_record = agent.lang.dialogue.export_resolved_record()
-        labeling_feedback = [
-            (lit.args[0][0], int(lit.name.strip("pcls_")))
-            for spk, turn_clauses in resolved_record
-            for ((_, _, _, cons), _, clause_info) in turn_clauses
-            for lit in cons
-            if len(cons) == 1 and spk == "Teacher" and clause_info["mood"] == "." \
-                and lit.name.startswith("pcls")
-        ]
-        labeling_map = dict(labeling_feedback)
+        case "pick_up_left" | "pick_up_right":
+            return _execute_pick_up(agent, action_name, action_params)
 
-        # Update execution state to reflect recognitions hitherto committed
-        # and those certified by user feedback
-        exec_state["recognitions"] = {
-            n: exec_state["recognitions"][n]
-            for gr in exec_state["connection_graphs"].values()
-            for n in gr
-            if n in exec_state["recognitions"]
-        } | {
-            objs: labels
-            for objs, labels in exec_state["recognitions"].items()
-            if isinstance(objs, tuple)
-        } | labeling_map
+        case "drop_left" | "drop_right":
+            return _execute_drop(agent, action_name)
 
-        build_action, build_target = exec_state["plan_goal"]
-        build_action = agent.lt_mem.lexicon.s2d[("va", build_action)][0][1]
-        action_sequence, recognitions, plan_complete = _plan_assembly(agent, build_target)
+        case "assemble_right_to_left" | "assemble_left_to_right":
+            return _execute_assemble(agent, action_name, action_params)
 
-        # Record how the agent decided to recognize each (non-)object
-        exec_state["recognitions"] = recognitions
-
-        agent.planner.agenda = deque(
-            ("execute_command", action_step) for action_step in action_sequence
-        )       # Whatever steps remaining, replace
-        if plan_complete:
-            # Enqueue appropriate agenda items and finish
-            agent.planner.agenda.append(("posthoc_episode_analysis", ()))
-            agent.planner.agenda.append(("utter_simple", ("Done.", { "mood": "." })))
-        else:
-            agent.planner.agenda.append(("report_planning_failure", ()))
-
-    else:
-        # Currently considered commands: some long-term commands that requiring
-        # long-horizon planning (e.g., 'build'), and some primitive actions that
-        # are to be executed---that is, signaled to Unity environment---immediately
-
-        # Record the spec of action being executed
-        exec_state["action_history"].append(
-            (action_type, action_params, "Student")
-        )
-
-        action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
-        match action_name:
-            case "build":
-                return _execute_build(agent, action_params)
-
-            case "pick_up_left" | "pick_up_right":
-                return _execute_pick_up(agent, action_name, action_params)
-
-            case "drop_left" | "drop_right":
-                return _execute_drop(agent, action_name)
-
-            case "assemble_right_to_left" | "assemble_left_to_right":
-                return _execute_assemble(agent, action_name, action_params)
-
-            case "inspect_left" | "inspect_right":
-                return _execute_inspect(agent, action_name, action_params)
+        case "inspect_left" | "inspect_right":
+            return _execute_inspect(agent, action_name, action_params)
 
 def _execute_build(agent, action_params):
     """
@@ -475,19 +424,20 @@ def _execute_build(agent, action_params):
         3) Solving the compiled ASP program with clingo, adding the obtained
             sequence of atomic actions to agenda
     """
-    # Initialize plan execution state tracking dict
-    agent.planner.execution_state |= {
-        "plan_goal": ("build", action_params),
-        "connection_graphs": {},
-        "recognitions": {},
-        "replanning_needed": False,
-        "metrics": {
-            "num_planning_attempts": 0,
-            "num_collision_queries": 0
-        }
-    }
-
+    build_target, replan = action_params
     exec_state = agent.planner.execution_state    # Shortcut var
+
+    if not replan:
+        # Initialize plan execution state tracking dict
+        agent.planner.execution_state |= {
+            "plan_goal": ("build", build_target),
+            "connection_graphs": {},
+            "recognitions": {},
+            "metrics": {
+                "num_planning_attempts": 0,
+                "num_collision_queries": 0
+            }
+        }
 
     # Incorporate any previous labeling feedback from user
     resolved_record = agent.lang.dialogue.export_resolved_record()
@@ -497,7 +447,7 @@ def _execute_build(agent, action_params):
         for ((_, _, _, cons), _, clause_info) in turn_clauses
         for lit in cons
         if len(cons) == 1 and spk == "Teacher" and clause_info["mood"] == "." \
-            and lit.name.startswith("pcls")
+            and lit.name.startswith("pcls") and not lit.naf
     ]
     labeling_map = dict(labeling_feedback)
 
@@ -514,9 +464,18 @@ def _execute_build(agent, action_params):
         if isinstance(objs, tuple)
     } | labeling_map
 
+    # Note to self: One could imagine we could skip re-planning from scratch
+    # after the user's labeling feedback if it did not involve an instance
+    # that is already referenced in the remainder of the plan (i.e., when the
+    # corrective feedback does not refute the premise based on agent's previous
+    # object recognition output)... However, it turned out it caused too much
+    # headache to juice such opportunities, and it's much easier to simply
+    # re-plan after any form of knowledge update (after dropping all held
+    # objects in hands).
+
     # Plan towards building valid target structure
     action_sequence, recognitions, plan_complete = _plan_assembly(
-        agent, action_params
+        agent, build_target
     )
 
     # Record how the agent decided to recognize each (non-)object
@@ -2607,8 +2566,14 @@ def _execute_pick_up(agent, action_name, action_params):
             # Enter pause mode, waiting for teacher's partial demo up to
             # next valid join
             agent.execution_paused = True
-            # Replanning needed after demo
-            exec_state["replanning_needed"] = True
+
+            # Scrap currently queued plan, replan after teacher's demo
+            goal_action, goal_target = exec_state["plan_goal"]
+            goal_action = agent.lt_mem.lexicon.s2d[("va", goal_action)][0][1]
+            exec_state["last_scrapped_plan"] = agent.planner.agenda
+            agent.planner.agenda = deque([
+                ("execute_command", (goal_action, (goal_target, True)))
+            ])
 
         else:
             # Language-conversant agents can inquire the agent whether there
@@ -2631,8 +2596,13 @@ def _execute_pick_up(agent, action_name, action_params):
             }
             predicates = { "pc0": (("n", target_sym), f"pcls_{target_conc}") }
 
-            # Need to replan after getting teacher's response
-            exec_state["replanning_needed"] = True
+            # Scrap currently queued plan, replan after getting teacher's response
+            goal_action, goal_target = exec_state["plan_goal"]
+            goal_action = agent.lt_mem.lexicon.s2d[("va", goal_action)][0][1]
+            exec_state["last_scrapped_plan"] = agent.planner.agenda
+            agent.planner.agenda = deque([
+                ("execute_command", (goal_action, (goal_target, True)))
+            ])
 
         # Append to & flush generation buffer
         agent.lang.dialogue.to_generate.append(
@@ -2824,6 +2794,10 @@ def _execute_inspect(agent, action_name, action_params):
         })
     ]
 
+    # Wait before executing the rest of the plan until teacher reacts
+    # (either with silent observation or interruption)
+    agent.planner.agenda.appendleft(("execute_command", (None, None)))
+
     return agent_action
 
 def report_planning_failure(agent):
@@ -2887,11 +2861,14 @@ def report_planning_failure(agent):
     
     # Enter pause mode
     agent.execution_paused = True
-    # Need to plan again after demo
-    exec_state["replanning_needed"] = True
-    # Append the original goal at the end of the agenda in order to keep
-    # current episode active
-    agent.planner.agenda.append(("execute_command", (action_conc, action_target)))
+
+    # Scrap currently queued plan, replan after teacher's demo
+    goal_action, goal_target = exec_state["plan_goal"]
+    goal_action = agent.lt_mem.lexicon.s2d[("va", goal_action)][0][1]
+    exec_state["last_scrapped_plan"] = agent.planner.agenda
+    agent.planner.agenda = deque([
+        ("execute_command", (goal_action, (goal_target, True)))
+    ])
 
 def handle_action_effect(agent, effect, actor):
     """
