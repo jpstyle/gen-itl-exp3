@@ -292,11 +292,11 @@ class ITLAgent:
             ##       Sensemaking via synthesis of perception+knowledge       ##
             ###################################################################
 
-            if self.observed_demo is None and (ents_updated or xb_updated or kb_updated):
-                # Sensemaking from vision input only
-                exported_kb = self.lt_mem.kb.export_reasoning_program()
-                visual_evidence = self.lt_mem.kb.visual_evidence_from_scene(self.vision.scene)
-                self.symbolic.sensemake_vis(exported_kb, visual_evidence)
+            # if self.observed_demo is None and (ents_updated or xb_updated or kb_updated):
+            #     # Sensemaking from vision input only
+            #     exported_kb = self.lt_mem.kb.export_reasoning_program()
+            #     visual_evidence = self.lt_mem.kb.visual_evidence_from_scene(self.vision.scene)
+            #     self.symbolic.sensemake_vis(exported_kb, visual_evidence)
 
             if self.lang.latest_input is not None:
                 # Reference & word sense resolution to connect vision & discourse
@@ -582,7 +582,9 @@ class ITLAgent:
 
                 if len(user_nl_inputs) > 0 and len(return_val) == 0:
                     # Break loop with cool acknowledgement to whichever NL
-                    # input from user so that user doesn't feel awkward
+                    # input from user so that user doesn't feel awkward. This
+                    # will terminate the episode, so don't say this if there's
+                    # still a pending, unfulfilled command.
                     return_val.append(("generate", ("OK.", {})))
 
                 # Break loop with return vals

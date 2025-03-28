@@ -104,13 +104,15 @@ class SimulatedTeacher:
             "episode_state": {
                 "left": None, "right": None, "subassemblies": {},
                 "joins_remaining": {frozenset(join) for join in VALID_JOINS},
-                "aliases": {}, "instructed_hyp_rels": set()
+                "aliases": {}, "instructed_hyp_rels": set(),
+                "forthcoming_inspections": set()
             },
             "metrics": {
                 "num_search_failure": 0,
                 "num_invalid_pickup": 0,
                 "num_invalid_join": 0,
                 "num_planning_forfeiture": 0,
+                "num_distractor_pickup": 0,
                 "episode_discarded": False
             } if target_task != "inject_color" else {}
         }
@@ -124,6 +126,7 @@ class SimulatedTeacher:
             ("forall", "truck", (["staircase_chassis_center", "dumper"], None), None, False)
         ]
 
+        random.seed(self.next_seed)
         if target_task == "build_truck_supertype":
             # More 'basic' experiment suite invested on learning part types, valid
             # structures of trucks (& subassemblies) and contact pairs & points
@@ -184,8 +187,7 @@ class SimulatedTeacher:
             ]
 
         # Leverage ASP to obtain all possible samples of valid part set subject to
-        # a set of constraints
-        random.seed(self.next_seed)
+        # a set of constraints\
         sampled_inits = self._sample_ASP(
             sampled_truck_subtype, self.domain_knowledge,
             constraints, all_subtypes, num_distractors
@@ -536,13 +538,10 @@ class SimulatedTeacher:
                         singleton_gr.add_node(obj_picked_up)
                         subassems[obj_picked_up] = singleton_gr
 
+                    # Test if a valid join can be achieved with the two subassembly
+                    # objects held in each hand
                     pair_invalid = False
-                    if obj_picked_up.startswith("d_"):
-                        # Picked up a distractor part, need to interrupt
-                        pair_invalid = True
-                    elif ep_st["left"] is not None and ep_st["right"] is not None:
-                        # Test if a valid join can be achieved with the two subassembly
-                        # objects held in each hand
+                    if ep_st["left"] is not None and ep_st["right"] is not None:
                         compatible_part_pairs = {
                             frozenset([type1, type2])
                             for (type1, _), (type2, _) in ep_st["joins_remaining"]
@@ -550,8 +549,8 @@ class SimulatedTeacher:
                         sa_left = subassems[ep_st["left"]]
                         sa_right = subassems[ep_st["right"]]
                         for part_left, part_right in product(sa_left, sa_right):
-                            part_left = re.findall(r"t_(.*)_\d+$", part_left)[0]
-                            part_right = re.findall(r"t_(.*)_\d+$", part_right)[0]
+                            part_left = re.findall(r"[td]_(.*)_\d+$", part_left)[0]
+                            part_right = re.findall(r"[td]_(.*)_\d+$", part_right)[0]
                             part_pair = frozenset([part_left, part_right])
                             # Pass if part pair not compatible after all
                             compatible = part_pair in compatible_part_pairs
@@ -561,14 +560,35 @@ class SimulatedTeacher:
                         else:
                             # If reached here, no compatible bipartite pairing of
                             # parts exists with held subassemblies
+                            ep_metrics["num_invalid_pickup"] += 1
                             pair_invalid = True
+
+                    # If pair is physically valid yet distractor part instance
+                    # was used, needs interruption as well
+                    distracted = False
+                    if obj_picked_up.startswith("d_") and not pair_invalid:
+                        ep_metrics["num_distractor_pickup"] += 1
+                        distracted = True
+
+                    # Flag whether a distractor pick-up is forgiven for expected
+                    # 3D structure inspection; only applies for atomics (singleton
+                    # subassemblies)
+                    interruption_exempt = False
+                    if len(subassems[obj_picked_up]) == 1:
+                        picked_inst = re.findall(r"([td])_(.*)_(\d+)$", obj_picked_up)[0]
+                        picked_inst = (picked_inst[1], (picked_inst[0], int(picked_inst[2])))
+                        picked_subtype = sampled_parts[picked_inst]["type"]
+                        if picked_subtype in ep_st["forthcoming_inspections"]:
+                            interruption_exempt = True
 
                     # Interrupt if agent has picked up an object not needed in the
                     # desired goal structure, or if agent is holding a pair of objects
                     # that should not be assembled
-                    if pair_invalid:
+                    if (pair_invalid or distracted) and not interruption_exempt:
                         # Interrupt agent and undo the last pick up (by dropping the
                         # object just picked up)
+                        interrupted = True
+
                         ep_st[side] = None       # Pick-up undone
                         response += [
                             ("generate", { "utterance": "Stop.", "pointing": {} }),
@@ -599,9 +619,6 @@ class SimulatedTeacher:
                                     "pointing": {}
                                 })
                             ]
-                        
-                        interrupted = True
-                        ep_metrics["num_invalid_pickup"] += 1
 
                 if utt.startswith("# Effect: drop"):
                     # Effect of drop action; no args, just update hand states
@@ -665,6 +682,9 @@ class SimulatedTeacher:
                     if join_invalid:
                         # Interrupt agent and undo the last join (by disassembling
                         # the product just assembled, at the exact same part pair)
+                        interrupted = True
+                        ep_metrics["num_invalid_join"] += 1
+
                         if tgt_side == "right":
                             takeaway_parts = list(graph_left)
                         else:
@@ -705,8 +725,6 @@ class SimulatedTeacher:
                                     "pointing": {}
                                 })
                             ]
-                        interrupted = True
-                        ep_metrics["num_invalid_join"] += 1
                     else:
                         # If join not invalid, update ongoing execution state
                         assert len(valid_pairs_achieved) == 1
@@ -729,9 +747,23 @@ class SimulatedTeacher:
                         # Check the achieved join off the set
                         ep_st["joins_remaining"] -= valid_pairs_achieved
 
+                elif utt.startswith("# Effect: inspect"):
+                    # Inspection is ongoing, now distractor pick-up of the
+                    # same category is no longer forgiven---check off if
+                    # present
+                    side = re.findall(r"# Effect: inspect_(.*)\(", utt)[0]
+                    tgt_handle = ep_st[side]
+                    tgt_inst = re.findall(r"([td])_(.*)_(\d+)$", tgt_handle)[0]
+                    tgt_inst = (tgt_inst[1], (tgt_inst[0], int(tgt_inst[2])))
+                    tgt_subtype = sampled_parts[tgt_inst]["type"]
+                    if tgt_subtype in ep_st["forthcoming_inspections"]:
+                        ep_st["forthcoming_inspections"].remove(tgt_subtype)
+
                 if not interrupted:
                     # No interruption needs to be made, keep observing...
-                    response.append(("generate", { "utterance": "# Observing", "pointing": {} }))
+                    response.append(
+                        ("generate", { "utterance": "# Observing", "pointing": {} })
+                    )
 
             elif utt == "I cannot find a part I need on the table." or \
                 utt.startswith("I couldn't plan further"):
@@ -819,24 +851,32 @@ class SimulatedTeacher:
             elif utt.startswith("I was trying to "):
                 # Agent reported its originally intended join of two part instances
                 # which is based on incorrect grounding
+                def get_path(handle):
+                    # Util method for obtaining entity path based on current
+                    # position of the entity with provided handle
+                    if handle in subassems.get(ep_st["left"], set()):
+                        return f"/Student Agent/Left Hand/*/{handle}"
+                    elif handle in subassems.get(ep_st["right"], set()):
+                        return f"/Student Agent/Right Hand/*/{handle}"
+                    else:
+                        return f"/*/{handle}"
+
                 for crange, ref_handle in dem_refs.items():
                     ref_inst = re.findall(r"([td])_(.*)_(\d+)$", ref_handle)[0]
                     ref_inst = (ref_inst[1], (ref_inst[0], int(ref_inst[2])))
-                    reported_grounding = utt[slice(*crange)]
+                    reported_subtype = re.findall(r"this (.*)$", utt[slice(*crange)])[0]
+                    reported_supertype = next(iter(
+                        self.domain_knowledge["taxonomy"].in_edges(reported_subtype)
+                    ), (reported_subtype, None))[0]
                     ref_subtype = sampled_parts[ref_inst]["type"]
 
-                    if reported_grounding != ref_subtype:
+                    if reported_subtype != ref_subtype:
                         # For incorrect groundings results, provide appropriate corrective
                         # feedback
-                        if ref_handle in subassems.get(ep_st["left"], set()):
-                            ent_path = f"/Student Agent/Left Hand/*/{ref_handle}"
-                        elif ref_handle in subassems.get(ep_st["right"], set()):
-                            ent_path = f"/Student Agent/Right Hand/*/{ref_handle}"
-                        else:
-                            ent_path = f"/*/{ref_handle}"        # On tabletop
+                        ent_path = get_path(ref_handle)
                         response += [
                             ("generate", {
-                                "utterance": f"This is not a {reported_grounding}.",
+                                "utterance": f"This is not a {reported_subtype}.",
                                 "pointing": { (0, 4): (ent_path, False) }
                             }),
                             ("generate", {
@@ -844,8 +884,8 @@ class SimulatedTeacher:
                                 "pointing": { (0, 4): (ent_path, False) }
                             })
                         ]
-                    elif ref_inst[1][0] == "d":
-                        # Grounding itself is correct but picked up a distractor;
+                    if ref_inst[1][0] == "d" and ref_inst[0] == reported_supertype:
+                        # Grounding is (somewhat) correct but picked up a distractor;
                         # correct by means of demonstration (languageless), contrastive
                         # labeling (languageful - label only) and/or directly providing
                         # the violated constraint (languageful - full semantics)
@@ -881,13 +921,13 @@ class SimulatedTeacher:
                                 gt_descriptor = " ".join([
                                     sampled_parts[gt_inst]["color"], gt_descriptor
                                 ])
-                            gt_ent_path = f"/*/{gt_handle}"
+                            gt_ent_path = get_path(gt_handle)
                             dt_descriptor = sampled_parts[ref_inst]["type"]
                             if "color" in sampled_parts[ref_inst]:
                                 dt_descriptor = " ".join([
                                     sampled_parts[ref_inst]["color"], dt_descriptor
                                 ])
-                            dt_ent_path = f"/*/{ref_handle}"
+                            dt_ent_path = get_path(ref_handle)
                             utterance = f"Use this {gt_descriptor} instead of this {dt_descriptor}."
                             dem_ref_cranges = [
                                 (m.start(), m.end()) for m in re.finditer(r"this", utterance)
@@ -911,7 +951,33 @@ class SimulatedTeacher:
                     ("generate", { "utterance": "Continue.", "pointing": {} })
                 )
 
-            elif utt == "OK." or utt == "Done.":
+            elif utt.startswith("What kind of part is "):
+                # Agent requested supertype info of some subtype, provide appropriate
+                # taxonomy statement
+                part_subtype = re.findall(r"What kind of part is (.*)\?$", utt)[0]
+                part_supertype = next(iter(
+                    self.domain_knowledge["taxonomy"].in_edges(part_subtype)
+                ))[0]
+
+                response.append(
+                    ("generate",
+                    {
+                        "utterance": f"{part_subtype} is a type of {part_supertype}.",
+                        "pointing": {}
+                    }),
+                )
+                ep_st["forthcoming_inspections"].add(part_subtype)
+
+            elif utt == "OK.":
+                # Iff a truck has to be built and has been built, no further interaction
+                # needed; terminate episode. Otherwise, send observation signal to keep
+                # the episode alive.
+                if self.target_task == "inject_color" or len(ep_st["joins_remaining"]) == 0:
+                    pass
+                else:
+                    response.append(("generate", { "utterance": "# Observing", "pointing": {} }))
+
+            elif utt == "Done.":
                 # No further interaction needed; effectively terminates current episode
                 pass
 
@@ -1216,6 +1282,7 @@ class SimulatedTeacher:
                     # Obtain up to 1k samples; there may be none, in which case
                     # no resampling from the part group can violate the constraint
                     samples = set()
+                    ctl.configuration.solver.seed = self.cfg.seed
                     with ctl.solve(yield_=True) as solve_gen:
                         models_inspected = 0
                         for m in solve_gen:

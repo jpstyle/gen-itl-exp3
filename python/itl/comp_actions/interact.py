@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 
 import copy
 import yaml
+import torch
 import numpy as np
 import networkx as nx
 from numpy.linalg import inv
@@ -21,7 +22,8 @@ from clingo import Control, SymbolType, Number, Function
 from .constants import CON_GRAPH, STORE_VP_INDS
 from .utils import rle_decode
 from ..vision.utils import (
-    xyzw2wxyz, flip_position_y, flip_quaternion_y, rmat2quat, transformation_matrix
+    xyzw2wxyz, flip_position_y, flip_quaternion_y, rmat2quat, transformation_matrix,
+    blur_and_grayscale, visual_prompt_by_mask
 )
 from ..lpmln import Literal
 from ..lpmln.utils import wrap_args
@@ -138,39 +140,36 @@ def prepare_answer_Q(agent, utt_pointer):
         intended_join, last_action_type = _last_intended_join(agent)
 
         # Getting appropriate name handles, concepts and NL symbols
-        ent_left = agent.vision.scene[intended_join[0]]["env_handle"]
-        ent_right = agent.vision.scene[intended_join[1]]["env_handle"]
-        den_left = exec_state["recognitions"][intended_join[0]]
-        den_right = exec_state["recognitions"][intended_join[1]]
-        sym_left = agent.lt_mem.lexicon.d2s[("pcls", den_left)][0][1]
-        sym_right = agent.lt_mem.lexicon.d2s[("pcls", den_right)][0][1]
-
-        # Entity paths in environment, obtained differently per previous
-        # action type
         get_conc = lambda s: agent.lt_mem.lexicon.s2d[("va", s)][0][1]
         pick_up_actions = [get_conc("pick_up_left"), get_conc("pick_up_right")]
-        if last_action_type in pick_up_actions:
-            if pick_up_actions.index(last_action_type) == 0:
-                # Entity was picked up with left hand in last action, which
-                # is currently dropped back on table
-                ent_path_left = f"/*/{ent_left}"
-                ent_path_right = f"/Student Agent/Right Hand/*/{ent_right}" \
-                    if exec_state["manipulator_states"][1][0] is not None \
-                    else f"/*/{ent_right}"
+        side_strs = ["Left", "Right"]
+        syms = []; dens = []; ent_paths = []; ref_phrases = []
+        for side, obj in enumerate(intended_join):
+            if obj in agent.vision.scene:
+                det = "this"
+                ent = agent.vision.scene[obj]["env_handle"]
+                if last_action_type in pick_up_actions:
+                    if side == pick_up_actions.index(last_action_type):
+                        ent_path = f"/*/{ent}"
+                    else:
+                        ent_path = f"/Student Agent/{side_strs[side]} Hand/*/{ent}" \
+                            if exec_state["manipulator_states"][side][0] is not None \
+                            else f"/*/{ent}"
+                else:
+                    ent_path = f"/Student Agent/{side_strs[side]} Hand/*/{ent}"
             else:
-                # Entity was picked up with right hand in last action, which
-                # is currently dropped back on table
-                ent_path_left = f"/Student Agent/Left Hand/*/{ent_left}" \
-                    if exec_state["manipulator_states"][0][0] is not None \
-                    else f"/*/{ent_left}"
-                ent_path_right = f"/*/{ent_right}"
-        else:
-            ent_path_left = f"/Student Agent/Left Hand/*/{ent_left}"
-            ent_path_right = f"/Student Agent/Right Hand/*/{ent_right}"
+                det = "a"
+                ent_path = None
+            den = exec_state["recognitions"][obj]
+            sym = agent.lt_mem.lexicon.d2s[("pcls", den)][0][1]
+            ref_phrase = f"{det} {sym}"
+
+            syms.append(sym); dens.append(den)
+            ent_paths.append(ent_path); ref_phrases.append(ref_phrase)
 
         # NL surface forms and corresponding logical forms
-        surface_form_0 = f"I was trying to join this {sym_left} and this {sym_right}."
-        surface_form_1 = f"# to-infinitive phrase ('to join this {sym_left} and this {sym_right}')"
+        surface_form_0 = f"I was trying to join {ref_phrases[0]} and {ref_phrases[1]}."
+        surface_form_1 = f"# to-infinitive phrase ('to join {ref_phrases[0]} and {ref_phrases[1]}')"
         gq_0 = gq_1 = (); bvars_0 = bvars_1 = (); ante_0 = ante_1 = []
         cons_0 = [
             ("sp", "intend", [("e", 0), "x0", ("e", 1)]),
@@ -182,8 +181,8 @@ def prepare_answer_Q(agent, utt_pointer):
         # will do for now.
         cons_1 = [
             ("va", "join", [("e", 0), "x0", "x1", "x2"]),
-            ("n", sym_left, ["x1"]),
-            ("n", sym_right, ["x2"])
+            ("n", syms[0], ["x1"]),
+            ("n", syms[1], ["x2"])
         ]
         logical_form_0 = (gq_0, bvars_0, ante_0, cons_0)
         logical_form_1 = (gq_1, bvars_1, ante_1, cons_1)
@@ -195,29 +194,31 @@ def prepare_answer_Q(agent, utt_pointer):
         }
         referents_1 = {
             "e": { "mood": "~" },       # Infinitive
-            "x0": { "entity": None, "rf_info": {} },
-            "x1": { "entity": intended_join[0], "rf_info": {} },
-            "x2": { "entity": intended_join[1], "rf_info": {} }
+            "x0": { "entity": None, "rf_info": {} }
         }
+        for side, obj in enumerate(intended_join):
+            if obj in agent.vision.scene:
+                referents_1[f"x{side+1}"] = { "entity": obj, "rf_info": {} }
+            else:
+                referents_1[f"x{side+1}"] = { "entity": None, "rf_info": {} }
         predicates_0 = {
             "pc0": (("sp", "intend"), "sp_intend"),
             "pc1": (("sp", "pronoun1"), "sp_pronoun1")
         }
         predicates_1 = {
             "pc0": (("va", "join"), f"arel_{join_conc}"),
-            "pc1": (("n", sym_left), f"pcls_{den_left}"),
-            "pc2": (("n", sym_right), f"pcls_{den_right}")
+            "pc1": (("n", syms[0]), f"pcls_{dens[0]}"),
+            "pc2": (("n", syms[1]), f"pcls_{dens[1]}")
         }
 
         # Point to each part involved in the originally intended join
-        offset_left = surface_form_0.find(sym_left)
-        offset_right = surface_form_0.find(sym_right)
-        dem_refs_0 = {
-            (offset_left, offset_left+len(sym_left)): (ent_path_left, False),
-            (offset_right, offset_right+len(sym_right)): (ent_path_right, False)
+        dem_refs_0 = {}
+        for ref_phrase, ent_path in zip(ref_phrases, ent_paths):
+            if ent_path is None: continue
+            offset = surface_form_0.find(ref_phrase)
+            dem_refs_0[(offset, offset+len(ref_phrase))] = (ent_path, False)
                 # Note: False values in the tuples specify that the demonstrative
                 # references are conveyed via string name handles instead of masks
-        }
 
         # Append to & flush generation buffer
         record_0 = (
@@ -433,6 +434,7 @@ def _execute_build(agent, action_params):
             "plan_goal": ("build", build_target),
             "connection_graphs": {},
             "recognitions": {},
+            "nogood_objects": set(),        # Logs distractors
             "metrics": {
                 "num_planning_attempts": 0,
                 "num_collision_queries": 0
@@ -441,15 +443,23 @@ def _execute_build(agent, action_params):
 
     # Incorporate any previous labeling feedback from user
     resolved_record = agent.lang.dialogue.export_resolved_record()
-    labeling_feedback = [
-        (lit.args[0][0], int(lit.name.strip("pcls_")))
-        for spk, turn_clauses in resolved_record
-        for ((_, _, _, cons), _, clause_info) in turn_clauses
-        for lit in cons
-        if len(cons) == 1 and spk == "Teacher" and clause_info["mood"] == "." \
-            and lit.name.startswith("pcls") and not lit.naf
-    ]
-    labeling_map = dict(labeling_feedback)
+    color_concs = {
+        agent.lt_mem.lexicon.s2d[("a", col)][0][1]
+        for col in ["red", "green", "blue", "white", "gold"]
+    }
+    labeling_map = {}
+    for spk, turn_clauses in resolved_record:
+        if spk != "Teacher": continue
+        for ((_, _, ante, cons), _, clause_info) in turn_clauses:
+            if clause_info["mood"] != ".": continue
+            if not (len(ante) == 0 and len(cons) > 0): continue
+            for lit in cons:
+                if not lit.name.startswith("pcls"): continue
+                if lit.args[0][0] not in agent.vision.scene: continue
+                if lit.naf: continue
+                conc = int(lit.name.strip("pcls_"))
+                if conc in color_concs: continue
+                labeling_map[lit.args[0][0]] = conc
 
     # Update execution state to reflect recognitions hitherto committed
     # and those certified by user feedback
@@ -934,7 +944,10 @@ def _goal_selection(agent, build_target):
         for col in ["red", "green", "blue", "white", "gold"]
     }
     for oi, obj in agent.vision.scene.items():
-        if oi in exec_state["recognitions"]:
+        if oi in exec_state["nogood_objects"]:
+            # Object marked as not to be used in planning, skip
+            continue
+        elif oi in exec_state["recognitions"]:
             # Object recognition already committed with confidence, or labeling
             # feedback directly provided by user; max confidence
             ci = exec_state["recognitions"][oi]
@@ -1016,26 +1029,79 @@ def _goal_selection(agent, build_target):
     # will have an associated 'severity score', the maximum of which will be
     # offset from the final compatibility score.
     kb_constraints = set()
+    have_conc = agent.lt_mem.lexicon.s2d[("vs", "have")][0]
+    have_pred = f"{have_conc[0]}_{have_conc[1]}"
     for ei, ((ante, cons), _, _, knowledge_type) in enumerate(agent.lt_mem.kb.entries):
         if knowledge_type != "property": continue
         skolem_fn_terms = {
             a for lit in cons for a, _ in lit.args if isinstance(a, tuple)
         }
+
         if len(skolem_fn_terms):
             # Existential constraints signaled by skolem function terms
+
+            # The scope concept is identified from the only antecedant literal
             assert len(ante) == 1
             scope_conc = int(ante[0].name.split("_")[1])
+
+            # Build constraint rule string, using ASP's #count aggregate for checking
+            # (non-)existence
             constraint_str = f"violation_severity({ei},20) :- node_sa(N,{scope_conc}), "
             constraint_str += "#count { O : component_obj(O,N)"
             for lit in cons:
-                if lit.name == "prel_0": continue       # Already incorporated
+                if lit.name == have_pred: continue       # Already incorporated
                 prop_conc = int(lit.name.split("_")[1])
                 lit_pred = "color_likely" if prop_conc in color_concs else "type_likely"
                 constraint_str += f", {lit_pred}(O,{prop_conc},_)"
             constraint_str += " } = 0.\n"
+
         else:
             # Universal constraints signaled by lack of skolem function terms
-            print(0)
+
+            # The scope variable is identified as the only first arguments of
+            # 'have' literals; scope concept naturally follows
+            scope_var = {lit.args[0][0] for lit in ante if lit.name == have_pred}
+            assert len(scope_var) == 1
+            scope_var = list(scope_var)[0]
+            scope_conc = next(
+                int(lit.name.split("_")[1]) for lit in ante
+                if len(lit.args) == 1 and lit.args[0][0] == scope_var
+            )
+
+            # Build constraint rule string, appropriately translating predicates
+            constraint_body = []; pr_vars = []; pr_i = 0
+            for lit in ante:
+                if lit.name == have_pred:
+                    trans_lit = f"component_obj({lit.args[1][0]},{lit.args[0][0]})"
+                else:
+                    assert len(lit.args) == 1
+                    prop_conc = int(lit.name.split("_")[1])
+                    if lit.args[0][0] == scope_var:
+                        trans_lit = f"node_sa({lit.args[0][0]},{scope_conc})"
+                    else:
+                        pr_var = f"PR{pr_i}"
+                        pr_vars.append(pr_var)
+                        pr_i += 1
+                        lit_pred = "color_likely" if prop_conc in color_concs else "type_likely"
+                        trans_lit = f"{lit_pred}({lit.args[0][0]},{prop_conc},{pr_var})"
+                if lit.naf:
+                    trans_lit = f"not {trans_lit}"
+                constraint_body.append(trans_lit)
+            for lit in cons:
+                assert len(lit.args) == 1
+                prop_conc = int(lit.name.split("_")[1])
+                pr_var = f"PR{pr_i}"
+                pr_vars.append(pr_var)
+                pr_i += 1
+                lit_pred = "color_likely" if prop_conc in color_concs else "type_likely"
+                trans_lit = f"{lit_pred}({lit.args[0][0]},{prop_conc},{pr_var})"
+                if not lit.naf:
+                    trans_lit = f"not {trans_lit}"
+            constraint_body = ", ".join(constraint_body)
+            mean_score_term = "(" + "+".join(pr_vars) + f")/{len(pr_vars)}"
+            constraint_head = f"violation_severity({ei},{mean_score_term})"
+            constraint_str = f"{constraint_head} :- {constraint_body}.\n"
+
         kb_constraints.add(constraint_str)
 
     # Additional constraints introduced by current assembly progress. Selected
@@ -1110,7 +1176,7 @@ def _goal_selection(agent, build_target):
     # procedure supported from clingo 4, as built-in optimization seems to
     # not work for some reason...
     commit_ctl.ground([("base", []), ("facts", [])])
-    best_model = None; best_score = -1
+    best_model = None; best_score = -21
     while True:
         commit_ctl.ground([("check", [Number(best_score)])])
         commit_ctl.assign_external(
@@ -1120,10 +1186,13 @@ def _goal_selection(agent, build_target):
         model = None
         with commit_ctl.solve(yield_=True, async_=True) as solve_gen:
             solve_gen.resume()
-            _ = solve_gen.wait(5)   # Don't spend more than 5 secs
-            m = solve_gen.model()
-            if m is not None:
-                model = m.symbols(atoms=True)
+            model_ready = solve_gen.wait(2)   # Don't spend more than 2 secs
+            if model_ready:
+                m = solve_gen.model()
+                if m is not None:
+                    model = m.symbols(atoms=True)
+            else:
+                solve_gen.cancel()
         
         if model is None:
             # Cannot find a better solution
@@ -1139,8 +1208,6 @@ def _goal_selection(agent, build_target):
                 atm.arguments[0].number
                 for atm in best_model if atm.name=="avg_score"
             )
-            if best_score >= 18:
-                break           # Score good enough
 
     return best_model
 
@@ -3259,6 +3326,27 @@ def handle_action_effect(agent, effect, actor):
                 conc[1], np.asarray(point_cloud.points), views, descriptors,
                 contact_points
             )
+
+            # Also store some 2D exemplars from select viewpoints (as done
+            # in learn.analyze_demonstration method)
+            vis_model = agent.vision.model; vis_model.eval()
+            with torch.no_grad():
+                for view_ind in STORE_VP_INDS[:4]:
+                    image = exec_state["3d_inspection_data"]["img"][view_ind]
+                    mask = exec_state["3d_inspection_data"]["msk"][view_ind]
+                    vis_prompt = visual_prompt_by_mask(
+                        image, blur_and_grayscale(image), [mask]
+                    )
+                    vp_processed = vis_model.dino_processor(images=vis_prompt, return_tensors="pt")
+                    vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
+                    vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
+                    f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
+                    
+                    agent.lt_mem.exemplars.add_exs_2d(
+                        scene_img=image,
+                        exemplars=[{ "scene_id": None, "mask": mask, "f_vec": f_vec }],
+                        pointers={ ("pcls", conc[1], "pos"): {(True, 0)} }
+                    )
 
             # Remove the temporary data storage field
             del exec_state["3d_inspection_data"]

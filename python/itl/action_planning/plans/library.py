@@ -113,6 +113,14 @@ library = {
         }
     ],
 
+    # Generate whatever utterance is queued to be made in generation buffer
+    "generate": [
+        {
+            "action_method": Val(referrable=["lang", "generate"]),
+            "action_args_getter": lambda x: ()
+        }
+    ],
+
     # Agent wasn't able to come up with a complete plan that ends up with
     # the desired end product due to uncertainty on types of parts used in
     # some subassembly. Report that it couldn't plan further and ask for help.

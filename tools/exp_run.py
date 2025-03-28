@@ -288,10 +288,10 @@ def main(cfg):
                                         if v.sum() > 100        # Remove small/null masks
                                     }
                                 )
-                                visual_evidence = agent.lt_mem.kb.visual_evidence_from_scene(
-                                    agent.vision.scene
-                                )
-                                agent.symbolic.sensemake_vis(None, visual_evidence)
+                                # visual_evidence = agent.lt_mem.kb.visual_evidence_from_scene(
+                                #     agent.vision.scene
+                                # )
+                                # agent.symbolic.sensemake_vis(None, visual_evidence)
                                 # Record instance names used in the environment side associated
                                 # with each object
                                 aliases = user.current_episode_record["episode_state"]["aliases"]
@@ -540,8 +540,9 @@ def main(cfg):
             metric_types = [
                 "num_search_failure", "num_invalid_pickup",
                 "num_invalid_join", "num_planning_forfeiture",
-                "episode_discarded", "num_planning_attempts",
-                "num_collision_queries", "episode_length", "mean_f1"
+                "num_distractor_pickup", "episode_discarded",
+                "num_planning_attempts", "num_collision_queries",
+                "episode_length", "mean_f1"
             ]
             out_csv.write("episode," + ",".join(metric_types) + "\n")
             for ep_i, ep_metric in enumerate(metrics):

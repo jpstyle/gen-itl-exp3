@@ -62,94 +62,88 @@ def identify_mismatch(agent, statement):
     # ev_prob = q_response[()]
     ####### OBSOLETE #######
 
-    if len(ante) == 0 and len(cons) == 1:
-        # Instance labeling, positive or negative
-        atom = cons[0]
-        conc_type, conc_ind = atom.name.split("_")
-        conc_ind = int(conc_ind)
-        obj = atom.args[0][0]
-        if conc_ind in range(len(agent.vision.scene[obj]["pred_cls"])):
-            ev_prob = agent.vision.scene[obj]["pred_cls"][conc_ind]
-        else:
-            ev_prob = 0
-        if atom.naf:
-            # Flip probability score if negative polarity
-            ev_prob = 1 - ev_prob
-    else:
+    if not (len(cons) > 0 and len(ante) == 0):
         # Not interested in any other types of statements for now
         return False
 
-    # Proceed only if surprisal is above threshold
-    surprisal = -math.log(ev_prob + EPS)
-    if surprisal < -math.log(SR_THRES):
-        return False
-
     for ante, cons in flatten_ante_cons(*statement[2:]):
-        if not (len(ante) == 0 and len(cons) == 1):
+        if not (len(cons) > 0 and len(ante) == 0):
             # Not going to happen in our scope, but setting up a flag...
             continue
 
-        atom = cons[0]
-        conc_type, conc_ind = atom.name.split("_")
-        conc_ind = int(conc_ind)
-        ex_obj = atom.args[0][0]
-        pol = "neg" if atom.naf else "pos"
+        for lit in cons:
+            conc_type, conc_ind = lit.name.split("_")
+            if conc_type != "pcls":
+                # Only interested in these in our scope
+                continue
+            conc_ind = int(conc_ind)
 
-        match conc_type:
-            case "pcls":
-                if all(obj["exemplar_ind"] is None for obj in agent.vision.scene.values()):
-                    # Totally new visual scene; both scene and object should be added
-                    scene_id = None
-                    scene_img = agent.vision.scene[ex_obj]["scene_img"]
+            ex_obj = lit.args[0][0]
+            if ex_obj not in agent.vision.scene:
+                # Exemplars should be in scene
+                continue
+
+            if conc_ind in range(len(agent.vision.scene[ex_obj]["pred_cls"])):
+                ev_prob = agent.vision.scene[ex_obj]["pred_cls"][conc_ind]
+            else:
+                ev_prob = 0
+            if lit.naf:
+                # Flip probability score if negative polarity
+                ev_prob = 1 - ev_prob
+
+            # Proceed only if surprisal is above threshold
+            surprisal = -math.log(ev_prob + EPS)
+            if surprisal < -math.log(SR_THRES):
+                continue
+
+            pol = "neg" if lit.naf else "pos"
+            if all(obj["exemplar_ind"] is None for obj in agent.vision.scene.values()):
+                # Totally new visual scene; both scene and object should be added
+                scene_id = None
+                scene_img = agent.vision.scene[ex_obj]["scene_img"]
+                pointer = ((conc_type, conc_ind, pol), (True, 0))
+            else:
+                # Scene already registered in XB, fetch scene id
+                scene_id = next(
+                    obj["exemplar_ind"][0] for obj in agent.vision.scene.values()
+                    if obj["exemplar_ind"] is not None
+                )
+                scene_img = None
+                if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
+                    # New object for existing scene, object should be added
                     pointer = ((conc_type, conc_ind, pol), (True, 0))
                 else:
-                    # Scene already registered in XB, fetch scene id
-                    scene_id = next(
-                        obj["exemplar_ind"][0] for obj in agent.vision.scene.values()
-                        if obj["exemplar_ind"] is not None
-                    )
-                    scene_img = None
-                    if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
-                        # New object for existing scene, object should be added
-                        pointer = ((conc_type, conc_ind, pol), (True, 0))
+                    # Exemplar present in storage, only add pointer
+                    ex_ind = agent.vision.scene[ex_obj]["exemplar_ind"]
+
+                    # Check if this exemplar info is already present in XB
+                    # for this particular concept-polarity descriptor and
+                    # thus redundant
+                    ex_mem = agent.lt_mem.exemplars
+                    redundant = False
+                    match pol:
+                        case "pos":
+                            ex_exs = ex_mem.object_2d_pos[conc_type][conc_ind]
+                            redundant = ex_ind in ex_exs
+                        case "neg":
+                            ex_exs = ex_mem.object_2d_neg[conc_type][conc_ind]
+                            redundant = ex_ind in ex_exs
+                    if redundant:
+                        # No need to update XB, continue to next iteration
+                        continue
                     else:
-                        # Exemplar present in storage, only add pointer
-                        ex_ind = agent.vision.scene[ex_obj]["exemplar_ind"]
+                        pointer = ((conc_type, conc_ind, pol), (False, ex_ind))
 
-                        # Check if this exemplar info is already present in XB
-                        # for this particular concept-polarity descriptor and
-                        # thus redundant
-                        ex_mem = agent.lt_mem.exemplars
-                        redundant = False
-                        match pol:
-                            case "pos":
-                                ex_exs = ex_mem.object_2d_pos[conc_type][conc_ind]
-                                redundant = ex_ind in ex_exs
-                            case "neg":
-                                ex_exs = ex_mem.object_2d_neg[conc_type][conc_ind]
-                                redundant = ex_ind in ex_exs
-                        if redundant:
-                            # No need to update XB, continue to next iteration
-                            continue
-                        else:
-                            pointer = ((conc_type, conc_ind, pol), (False, ex_ind))
-
-                added_xi = _add_scene_and_exemplar_2d(
-                    scene_id, scene_img, pointer,
-                    agent.vision.scene[ex_obj]["pred_mask"],
-                    agent.vision.scene[ex_obj]["vis_emb"],
-                    agent.lt_mem.exemplars
-                )
-                if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
-                    assert added_xi is not None
-                    agent.vision.scene[ex_obj]["exemplar_ind"] = added_xi
-                xb_updated = True
-
-            case "prel":
-                raise NotImplementedError   # Step back for relation prediction...
-
-            case _:
-                raise ValueError("Invalid concept type")
+            added_xi = _add_scene_and_exemplar_2d(
+                scene_id, scene_img, pointer,
+                agent.vision.scene[ex_obj]["pred_mask"],
+                agent.vision.scene[ex_obj]["vis_emb"],
+                agent.lt_mem.exemplars
+            )
+            if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
+                assert added_xi is not None
+                agent.vision.scene[ex_obj]["exemplar_ind"] = added_xi
+            xb_updated = True
 
     return xb_updated
 
@@ -220,27 +214,34 @@ def identify_generics(agent, statement, provenance):
     occ_objs = {
         a for lit in cons for a, _ in lit.args if a in agent.vision.scene
     }
-    contrastive_suggestion = len(occ_objs) == 2 and len(ante) == 0
+    pick_up_conc = agent.lt_mem.lexicon.s2d[("va", "pick_up")][0][1]
+    contrastive_suggestion = len(occ_objs) == 2 and len(ante) == 0 \
+        and any(lit.name == f"arel_{pick_up_conc}" for lit in cons)
     if contrastive_suggestion:
-        # No need to rely on contrastive labeling for constraint inference,
-        # as it is directly provided from user
-        if agent.cfg.exp.player_type == "full": return False
-
         # Identify the distractor object, which was previously picked up by
         # agent and dropped by teacher, and the ground-truth object contrasted
         # with the distractor object and proposed to be used instead
-        get_conc = lambda s: agent.lt_mem.lexicon.s2d[("va", s)][0][1]
-        pick_up_actions = [get_conc("pick_up_left"), get_conc("pick_up_right")]
-        occ_objs = {a for lit in cons for a, _ in lit.args}
-        dt_obj = [
-            action_params[0] for action_type, action_params, actor in exec_state["action_history"]
-            if action_type in pick_up_actions and actor == "Student"
-        ][-1]
-        gt_obj = list(occ_objs - {dt_obj})[0]
+        dt_obj = next(
+            lit for lit in cons
+            if lit.name == f"arel_{pick_up_conc}" and lit.naf
+        ).args[2][0]
+        gt_obj = next(
+            lit for lit in cons
+            if lit.name == f"arel_{pick_up_conc}" and not lit.naf
+        ).args[2][0]
+
+        # Log the distractor object as 'nogood object' so that it will never
+        # be used in planning for the remainder of this episode
+        exec_state["nogood_objects"].add(dt_obj)
+
+        # No need to rely on contrastive labeling for constraint inference,
+        # as it is directly provided from user; full semantics player can
+        # return here
+        if agent.cfg.exp.player_type == "full": return False
 
         # Obtain the distractor & ground-truth objects' predicate sets
-        dt_preds = {lit.name for lit in cons if (dt_obj, False) in lit.args}
-        gt_preds = {lit.name for lit in cons if (gt_obj, False) in lit.args}
+        dt_preds = {lit.name for lit in cons if lit.args[0] == (dt_obj, False)}
+        gt_preds = {lit.name for lit in cons if lit.args[0] == (gt_obj, False)}
 
         # Let's consider the current build target as the 'scope' of constraint
         # applicability
@@ -276,26 +277,33 @@ def handle_neologism(agent, dialogue_state):
     to be handled, attempt resolving from information available so far if possible,
     or record as unresolved neologisms for later addressing otherwise
     """
+    neologisms = {
+        tok: sym for tok, (sym, den) in agent.lang.dialogue.word_senses.items()
+        if den is None
+    }
+    if len(neologisms) == 0: return False       # Nothing to do
+
     exec_state = agent.planner.execution_state      # Shortcut var
 
     # Return value, boolean flag whether there has been any change to the
     # exemplar base
     xb_updated = False
 
-    neologisms = {
-        tok: sym for tok, (sym, den) in agent.lang.dialogue.word_senses.items()
-        if den is None
-    }
+    get_conc = lambda s: agent.lt_mem.lexicon.s2d[("va", s)][0][1]
+    pick_up_actions = [get_conc("pick_up_left"), get_conc("pick_up_right")]
+    inspect_actions = [get_conc("inspect_left"), get_conc("inspect_right")]
+    drop_actions = [get_conc("drop_left"), get_conc("drop_right")]
 
-    if len(neologisms) == 0: return False       # Nothing to do
-
+    resolved = set()
+    inspection_plans_concat = []; taxonomy_queries = []
     for tok, sym in neologisms.items():
-        # Skip if already processed somehow
-        if sym in agent.lt_mem.lexicon: continue
-
-        # Flag whether this neologism can be immediately resolved within
-        # this method call
-        resolved = False
+        # If already processed, just update the word sense resolution
+        # and skip
+        if sym in agent.lt_mem.lexicon:
+            # Update word sense resolution accordingly
+            conc = agent.lt_mem.lexicon.s2d[sym][0]
+            agent.lang.dialogue.word_senses[tok] = (sym, f"{conc[0]}_{conc[1]}")
+            continue
 
         pos, name = sym
         match pos:
@@ -305,6 +313,10 @@ def handle_neologism(agent, dialogue_state):
                 conc_type = "prel"
             case _:
                 raise ValueError("Invalid POS type")
+
+        if conc_type != "pcls":
+            # Only interested in these in our scope
+            continue
 
         # Expand corresponding visual concept inventory
         conc_ind = agent.vision.add_concept(conc_type)
@@ -323,87 +335,134 @@ def handle_neologism(agent, dialogue_state):
             n for n in neologisms
             if tok[:2]==n[:2] and n[2]==tok[2].replace("pc", "pa")
         ]
-        if neologism_in_cons and len(neologisms_in_same_clause_ante) == 0:
-            # Occurrence in rule cons implies either definition or exemplar is
-            # provided by the utterance containing this token... only if the
-            # source clause is in indicative mood. If that's the case, register
-            # new visual concept, and perform few-shot learning if appropriate
-            ti = int(tok[0].strip("t"))
-            ci = int(tok[1].strip("c"))
-            (_, _, ante, cons), _ = dialogue_state.record[ti][1][ci]
+        if not (neologism_in_cons and len(neologisms_in_same_clause_ante) == 0):
+            continue
 
-            mood = dialogue_state.clause_info[f"t{ti}c{ci}"]["mood"]
-            if len(cons) == 1 and len(ante) == 0 and mood == ".":
-                # Labeled exemplar provided; add new concept exemplars to
-                # memory, as feature vectors obtained from vision module backbone
-                ex_obj = agent.lang.dialogue.value_assignment[cons[0][2][0]]
+        # Occurrence in rule cons implies either definition or exemplar is
+        # provided by the utterance containing this token... only if the
+        # source clause is in indicative mood. If that's the case, register
+        # new visual concept, and perform few-shot learning if appropriate
+        ti = int(tok[0].strip("t"))
+        ci = int(tok[1].strip("c"))
+        (_, _, ante, cons), _ = dialogue_state.record[ti][1][ci]
 
-                match conc_type:
-                    case "pcls":
-                        if all(obj["exemplar_ind"] is None for obj in agent.vision.scene.values()):
-                            # Totally new visual scene; both scene and object should be added
-                            scene_id = None
-                            scene_img = agent.vision.scene[ex_obj]["scene_img"]
-                            pointer = ((conc_type, conc_ind, "pos"), (True, 0))
-                        else:
-                            # Scene already registered in XB, fetch scene id
-                            scene_id = next(
-                                obj["exemplar_ind"][0] for obj in agent.vision.scene.values()
-                                if obj["exemplar_ind"] is not None
-                            )
-                            scene_img = None
-                            if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
-                                # New object for existing scene, object should be added
-                                pointer = ((conc_type, conc_ind, "pos"), (True, 0))
-                            else:
-                                # Exemplar present in storage, only add pointer
-                                ex_ind = agent.vision.scene[ex_obj]["exemplar_ind"]
-                                pointer = ((conc_type, conc_ind, "pos"), (False, ex_ind))
+        mood = dialogue_state.clause_info[f"t{ti}c{ci}"]["mood"]
+        if not (len(cons) > 0 and len(ante) == 0 and mood == "."):
+            continue
 
-                        added_xi = _add_scene_and_exemplar_2d(
-                            scene_id, scene_img, pointer,
-                            agent.vision.scene[ex_obj]["pred_mask"],
-                            agent.vision.scene[ex_obj]["vis_emb"],
-                            agent.lt_mem.exemplars
-                        )
-                        if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
-                            assert added_xi is not None
-                            agent.vision.scene[ex_obj]["exemplar_ind"] = added_xi
-                        xb_updated |= True
+        # Labeled exemplar provided; add new concept exemplars to memory,
+        # as feature vectors obtained from vision module backbone
 
-                        # Also set up inspection plan for extracting 3D structure
-                        # of the new subtype instance
-                        for side, mnp_state in enumerate(exec_state["manipulator_states"]):
-                            if mnp_state[0] is None:
-                                empty_side = side
-                                break
-                        else:
-                            # At least one manipulator should be free by design...
-                            raise ValueError
-                        empty_side = "left" if empty_side == 0 else "right"
-                        pick_up_action = agent.lt_mem.lexicon.s2d[("va", f"pick_up_{empty_side}")][0][1]
-                        inspect_action = agent.lt_mem.lexicon.s2d[("va", f"inspect_{empty_side}")][0][1]
-                        drop_action = agent.lt_mem.lexicon.s2d[("va", f"drop_{empty_side}")][0][1]
-                        inspection_plan = [(pick_up_action, (ex_obj,))] + [
-                            (inspect_action, (ex_obj, i, novel_concept))
-                            for i in range(24+1)
-                        ] + [(drop_action, ())]
-                        inspection_plan = [
-                            ("execute_command", (action_type, action_params))
-                            for action_type, action_params in inspection_plan
-                        ]
-                        agent.planner.agenda = deque(inspection_plan) + agent.planner.agenda
-                        continue
+        # Fetch the clause by token index
+        pos, name, args = cons[int(tok[2].strip("pc"))]
+        ex_obj = agent.lang.dialogue.value_assignment[args[0]]
 
-                    case "prel":
-                        raise NotImplementedError   # Step back for relation prediction...
+        if all(obj["exemplar_ind"] is None for obj in agent.vision.scene.values()):
+            # Totally new visual scene; both scene and object should be added
+            scene_id = None
+            scene_img = agent.vision.scene[ex_obj]["scene_img"]
+            pointer = ((conc_type, conc_ind, "pos"), (True, 0))
+        else:
+            # Scene already registered in XB, fetch scene id
+            scene_id = next(
+                obj["exemplar_ind"][0] for obj in agent.vision.scene.values()
+                if obj["exemplar_ind"] is not None
+            )
+            scene_img = None
+            if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
+                # New object for existing scene, object should be added
+                pointer = ((conc_type, conc_ind, "pos"), (True, 0))
+            else:
+                # Exemplar present in storage, only add pointer
+                ex_ind = agent.vision.scene[ex_obj]["exemplar_ind"]
+                pointer = ((conc_type, conc_ind, "pos"), (False, ex_ind))
 
-                    case _:
-                        raise ValueError("Invalid concept type")
+        added_xi = _add_scene_and_exemplar_2d(
+            scene_id, scene_img, pointer,
+            agent.vision.scene[ex_obj]["pred_mask"],
+            agent.vision.scene[ex_obj]["vis_emb"],
+            agent.lt_mem.exemplars
+        )
+        if agent.vision.scene[ex_obj]["exemplar_ind"] is None:
+            assert added_xi is not None
+            agent.vision.scene[ex_obj]["exemplar_ind"] = added_xi
+        xb_updated |= True
 
-                resolved = True
+        # Also set up inspection plan for extracting 3D structure
+        # of the new subtype instance
+        if ex_obj == exec_state["manipulator_states"][0][0]:
+            inspection_plan = [
+                (inspect_actions[0], (ex_obj, i, novel_concept))
+                for i in range(24+1)
+            ]
+        elif ex_obj == exec_state["manipulator_states"][1][0]:
+            inspection_plan = [
+                (inspect_actions[1], (ex_obj, i, novel_concept))
+                for i in range(24+1)
+            ]
+        else:
+            for side, mnp_state in enumerate(exec_state["manipulator_states"]):
+                if mnp_state[0] is None:
+                    inspection_plan = [(pick_up_actions[side], (ex_obj,))] + [
+                        (inspect_actions[side], (ex_obj, i, novel_concept))
+                        for i in range(24+1)
+                    ] + [(drop_actions[side], ())]
+                    break
+            else:
+                # At least one manipulator should be free by design...
+                raise ValueError
+        inspection_plans_concat += [
+            ("execute_command", (action_type, action_params))
+            for action_type, action_params in inspection_plan
+        ]
 
-        if not resolved:
+        # In our domain... Any novel part concept is a subtype of some
+        # part supertype. The neologism currently being resolved by
+        # exemplification also needs supertype info, so ask teacher for
+        # it if there's no relevant taxonomy info. Kinda dirty, but this
+        # will do for now.
+        taxonomy_entries = [
+            ei for ei in agent.lt_mem.kb.entries_by_pred[f"{conc_type}_{conc_ind}"]
+            if agent.lt_mem.kb[ei][3] == "taxonomy"
+        ]
+        if len(taxonomy_entries) == 0:
+            # NL surface form and corresponding logical form
+            surface_form = f"What kind of part is {name}?"
+            gq = ("?",); bvars = ("x1",); ante = []
+            cons = [
+                ("sp", "subtype", ["e0", "x0", "x1"]),
+                ("n", name, ["x0"])
+            ]
+            logical_form = (gq, bvars, ante, cons)
+
+            # Referents & predicates info
+            referents = {
+                "e": { "mood": "?" },
+                "x0": { "entity": None, "rf_info": {} }
+            }
+            predicates = {
+                "pc0": (("sp", "subtype"), "sp_subtype"),
+                "pc1": (("n", name), f"{conc_type}_{conc_ind}")
+            }
+
+            taxonomy_queries.append(
+                (logical_form, surface_form, referents, predicates, {})
+            )
+
+        resolved.add(sym)
+
+    # Process any concatenated inspection plans and taxonomy queries in
+    # one place (so as to apply correct number of no-op command guards,
+    # namely 1)
+    agent.planner.agenda = deque(inspection_plans_concat) + agent.planner.agenda
+    if len(taxonomy_queries) > 0:
+        agent.lang.dialogue.to_generate += taxonomy_queries
+        agent.planner.agenda.appendleft(("execute_command", (None, None)))
+            # Adding a layer of wait-for-user-reaction buffer
+        agent.planner.agenda.appendleft(("generate", ()))
+
+    for tok, sym in neologisms.items():
+        if sym not in resolved:
             agent.lang.unresolved_neologisms[sym] = {
                 "dependency": None,     # Dependency not specified yet
                 "reported": False       # Not reported to user yet
@@ -426,6 +485,16 @@ def resolve_neologisms(agent):
     resolved_record = agent.lang.dialogue.export_resolved_record()
     exec_state = agent.planner.execution_state
 
+    get_conc = lambda s: agent.lt_mem.lexicon.s2d[("va", s)][0][1]
+    pick_up_actions = [get_conc("pick_up_left"), get_conc("pick_up_right")]
+    inspect_actions = [get_conc("inspect_left"), get_conc("inspect_right")]
+    drop_actions = [get_conc("drop_left"), get_conc("drop_right")]
+
+    color_concs = {
+        agent.lt_mem.lexicon.s2d[("a", col)][0][1]
+        for col in ["red", "green", "blue", "white", "gold"]
+    }
+
     while True:
         resolved = set()
         for sym, info in agent.lang.unresolved_neologisms.items():
@@ -442,29 +511,44 @@ def resolve_neologisms(agent):
                 # need to obtain and register its 3D structure. Add a series of
                 # 3D inspection actions to the agenda deque, with the labeled
                 # instance as inspection target.
-                labeling_lit = next(
-                    cons[0]
-                    for speaker, turn_clauses in resolved_record
-                    for (_, _, ante, cons), _, _ in turn_clauses
-                    if len(cons) == 1 and len(ante) == 0 and \
-                        speaker == "Teacher" and cons[0].name == den_str
-                )
+                for spk, turn_clauses in resolved_record:
+                    if spk != "Teacher": continue
+                    for ((_, _, ante, cons), _, clause_info) in turn_clauses:
+                        if clause_info["mood"] != ".": continue
+                        if not (len(ante) == 0 and len(cons) > 0): continue
+                        for lit in cons:
+                            if not lit.name.startswith("pcls"): continue
+                            if lit.args[0][0] not in agent.vision.scene: continue
+                            if lit.naf: continue
+                            conc = int(lit.name.strip("pcls_"))
+                            if conc in color_concs: continue
+                            labeling_lit = lit
+                            break
                 inspection_target = labeling_lit.args[0][0]
-                for side, mnp_state in enumerate(exec_state["manipulator_states"]):
-                    if mnp_state[0] is None:
-                        empty_side = side
-                        break
+
+                if inspection_target == exec_state["manipulator_states"][0][0]:
+                    inspection_plan = [
+                        (inspect_actions[0], (inspection_target, i, den))
+                        for i in range(24+1)
+                    ]
+                elif inspection_target == exec_state["manipulator_states"][1][0]:
+                    inspection_plan = [
+                        (inspect_actions[1], (inspection_target, i, den))
+                        for i in range(24+1)
+                    ]
                 else:
-                    # At least one manipulator should be free by design...
-                    raise ValueError
-                empty_side = "left" if empty_side == 0 else "right"
-                pick_up_action = agent.lt_mem.lexicon.s2d[("va", f"pick_up_{empty_side}")][0][1]
-                inspect_action = agent.lt_mem.lexicon.s2d[("va", f"inspect_{empty_side}")][0][1]
-                drop_action = agent.lt_mem.lexicon.s2d[("va", f"drop_{empty_side}")][0][1]
-                inspection_plan = [(pick_up_action, (inspection_target,))] + [
-                    (inspect_action, (inspection_target, i, den))
-                    for i in range(24+1)
-                ] + [(drop_action, ())]
+                    for side, mnp_state in enumerate(exec_state["manipulator_states"]):
+                        if mnp_state[0] is None:
+                            inspection_plan = [
+                                (pick_up_actions[side], (inspection_target,))
+                            ] + [
+                                (inspect_actions[side], (inspection_target, i, den))
+                                for i in range(24+1)
+                            ] + [(drop_actions[side], ())]
+                            break
+                    else:
+                        # At least one manipulator should be free by design...
+                        raise ValueError
                 inspection_plan = [
                     ("execute_command", (action_type, action_params))
                     for action_type, action_params in inspection_plan
@@ -524,8 +608,6 @@ def report_neologism(agent, neologism):
     if agent.lang.unresolved_neologisms[neologism]["reported"]:
         # No-op if already reported
         return
-
-    # Update cognitive state w.r.t. value assignment and word sense
 
     # NL surface form and corresponding logical form
     surface_form = f"I don't know what '{neologism[1]}' means."
@@ -775,8 +857,6 @@ def analyze_demonstration(agent, demo_data):
                 raise NotImplementedError
 
         if len(inspect_data["msk"]) == 24:
-            inst_inspected = current_held[left_or_right][0]
-
             # Collect 3D & 2D visual data for later processing
             vision_3d_data[inspect_data["inst"]] = (
                 inspect_data["img"], inspect_data["msk"], inspect_data["pose"]
@@ -784,7 +864,7 @@ def analyze_demonstration(agent, demo_data):
             # Add select examples to 2D classification data as well
             vision_2d_data[inspect_data["inst"]] += [
                 (inspect_data["img"][view_ind], inspect_data["msk"][view_ind])
-                for view_ind in STORE_VP_INDS[4:8]
+                for view_ind in STORE_VP_INDS[:4]
             ]
 
             # Make way for new data
@@ -1220,15 +1300,24 @@ def posthoc_episode_analysis(agent):
     # Direct positive labels (languageful agents) and pairwise
     # negative labels (languageless agents)
     resolved_record = agent.lang.dialogue.export_resolved_record()
-    labeling_feedback = [
-        (lit.args[0][0], int(lit.name.strip("pcls_")))
-        for spk, turn_clauses in resolved_record
-        for ((_, _, _, cons), _, clause_info) in turn_clauses
-        for lit in cons
-        if len(cons) == 1 and spk == "Teacher" and clause_info["mood"] == "." \
-            and lit.name.startswith("pcls") and not lit.naf
-    ]
-    exec_state["recognitions"] = dict(labeling_feedback) | {
+    color_concs = {
+        agent.lt_mem.lexicon.s2d[("a", col)][0][1]
+        for col in ["red", "green", "blue", "white", "gold"]
+    }
+    labeling_map = {}
+    for spk, turn_clauses in resolved_record:
+        if spk != "Teacher": continue
+        for ((_, _, ante, cons), _, clause_info) in turn_clauses:
+            if clause_info["mood"] != ".": continue
+            if not (len(ante) == 0 and len(cons) > 0): continue
+            for lit in cons:
+                if not lit.name.startswith("pcls"): continue
+                if lit.args[0][0] not in agent.vision.scene: continue
+                if lit.naf: continue
+                conc = int(lit.name.strip("pcls_"))
+                if conc in color_concs: continue
+                labeling_map[lit.args[0][0]] = conc
+    exec_state["recognitions"] = labeling_map | {
         objs: labels
         for objs, labels in exec_state["recognitions"].items()
         if isinstance(objs, tuple)
