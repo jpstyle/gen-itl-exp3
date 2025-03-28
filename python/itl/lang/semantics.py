@@ -42,6 +42,8 @@ class SemanticParser:
             #   12) "Stop." & "Continue."
             #   13) "A {truck_subtype} is a truck with {part_subtypes}."
             #   14) "Use this {gt_descriptor} instead of this {dt_descriptor}."
+            #   15) "{part (tuple)} of a {subassembly_type} must (not) {constraint}."
+            #   16) "A {subassembly_type} must (not) {constraint}."
             if re.match(r"Build a (.*)\.$", utt):
                 # Imperative command to build an instance of the specified concept
                 # from parts available in the scene
@@ -281,7 +283,7 @@ class SemanticParser:
                     "e0": (
                         (), (), [],
                         [
-                            ("sp", "subtype", ["e0", "x0", "x1"]),
+                            ("sp", "subtype", ["x0", "x1"]),
                             ("n", part_subtype, ["x0"]),
                             ("n", part_supertype, ["x1"])
                         ]
@@ -327,8 +329,7 @@ class SemanticParser:
                 source = { "e0": utt }
 
             elif re.match(r"A (.*) is a truck with (.*)\.$", utt):
-                # Providing verbal definition of a truck subtype by
-                # necessary parts
+                # Providing verbal definition of a truck subtype by necessary parts
                 truck_subtype, part_subtypes = \
                     re.findall(r"A (.*) is a truck with (.*)\.$", utt)[0]
                 part_subtypes = [
@@ -343,7 +344,7 @@ class SemanticParser:
                     "e0": (
                         (), (), [],
                         [
-                            ("sp", "subtype", ["e0", "x0", "x1"]),
+                            ("sp", "subtype", ["x0", "x1"]),
                             ("n", truck_subtype, ["x0"]),
                             ("n", "truck", ["x1"])
                         ]
@@ -407,6 +408,115 @@ class SemanticParser:
                     "x0": { "source_evt": "e0" },
                     "x1": { "source_evt": "e0", "dem_ref": sorted(dem_refs)[0] },
                     "x2": { "source_evt": "e0", "dem_ref": sorted(dem_refs)[1] }
+                }
+                source = { "e0": utt }
+
+            elif re.match(r"(.*) of a (.*) must (not )?(.*)\.$", utt):
+                # Universally quantified constraint on scope subassembly concept
+                part_tuple, scope_sa, pol, constraint = \
+                    re.findall(r"(.*) of a (.*) must (not )?(.*)\.$", utt)[0]
+
+                if part_tuple.startswith("Pairs of "):
+                    part_tuple = re.findall(r"Pairs of a (.*) and a (.*)", part_tuple)[0]
+                else:
+                    part_tuple = (part_tuple,)
+                pol = "~" if pol == "not " else ""
+
+                # Build rule antecedent and consequent
+                ante = [("n", scope_sa, ["x0"])]
+                for i in range(len(part_tuple)):
+                    ante.append((("vs", "have", ["x0", f"x{i+1}"])))
+                if constraint == "have same color":
+                    assert len(part_tuple) == 2
+                    gq = ("forall",) * 5
+                    bvars = tuple(f"x{i}" for i in range(5))
+                    ante += [
+                        ("n", part_tuple[0], ["x1"]),
+                        ("n", part_tuple[1], ["x2"]),
+                    ]
+                    cons = [
+                        ("vs", "have", ["x1", "x3"]),
+                        ("vs", "have", ["x2", "x4"]),
+                        ("n", "color", ["x3"]),
+                        ("n", "color", ["x4"]),
+                        ("sp", f"{pol}equal", ["x3", "x4"]),
+                    ]
+                else:
+                    assert len(part_tuple) == 1
+                    gq = ("forall",) * 2
+                    bvars = tuple(f"x{i}" for i in range(2))
+                    det, pred = re.findall(r"be (a )?(.*)$", constraint)[0]
+                    ante.append(("n", part_tuple[0], ["x1"]))
+                    if det == "a ":
+                        # Noun, likely part subtype
+                        cons = [("n", pred, ["x1"])]
+                    else:
+                        # Adjective, likely color subtype
+                        cons = [("a", pred, ["x1"])]
+
+                clauses = { "e0": (gq, bvars, ante, cons) }
+                referents = {
+                    "e0": { "mood": "." },
+                    "x0": { "source_evt": "e0" }
+                } | {
+                    f"x{i+1}": { "source_evt": "e0" }
+                    for i in range(len(part_tuple))
+                }
+                if constraint == "have same color":
+                    referents |= {
+                        "x3": { "source_evt": "e0", "is_pred": True },
+                        "x4": { "source_evt": "e0", "is_pred": True }
+                    }
+                source = { "e0": utt }
+
+            elif re.match(r"A (.*) must (not )?(.*)\.$", utt):
+                # Universally or existentially quantified constraint on scope
+                # subassembly concept
+                scope_sa, pol, constraint = \
+                    re.findall(r"A (.*) must (not )?(.*)\.$", utt)[0]
+                optional_color, subtype = re.findall(r"have a (.* )?(.*)$", constraint)[0]
+                if optional_color != "":
+                    optional_color = optional_color.strip()
+                else:
+                    optional_color = None
+
+                if pol == "":
+                    # Existential quantified constraint, namely that the scope
+                    # subassembly must have an instance of something
+                    clauses = {
+                        "e0": (
+                            ("forall", "exists"), ("x0", "x1"),
+                            [("n", scope_sa, ["x0"])],
+                            [
+                                ("vs", "have", ["x0", "x1"]),
+                                ("n", subtype, ["x1"])
+                            ]
+                        )
+                    }
+                    if optional_color is not None:
+                        clauses["e0"][3].append(("a", optional_color, ["x1"]))
+                else:
+                    # Universally quantified constraint, namely that the scope
+                    # subassembly must not have an instance of something
+                    assert pol == "not "
+                    clauses = {
+                        "e0": (
+                            ("forall", "forall"), ("x0", "x1"),
+                            [
+                                ("n", scope_sa, ["x0"]),
+                                ("vs", "have", ["x0", "x1"]),
+                                ("n", subtype, ["x1"])
+                            ],
+                            []
+                        )
+                    }
+                    if optional_color is not None:
+                        clauses["e0"][2].append(("a", optional_color, ["x1"]))
+
+                referents = {
+                    "e0": { "mood": "." },
+                    "x0": { "source_evt": "e0" },
+                    "x1": { "source_evt": "e0" }
                 }
                 source = { "e0": utt }
 

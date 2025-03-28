@@ -169,9 +169,15 @@ def identify_generics(agent, statement, provenance):
     if taxonomy_rel:
         (subtype, _), (supertype, _) = next(
             lit for lit in cons if lit.name=="sp_subtype"
-        ).args[1:]
-        subtype = next(lit.name for lit in cons if lit.args[0][0] == subtype)
-        supertype = next(lit.name for lit in cons if lit.args[0][0] == supertype)
+        ).args
+        subtype = next(
+            lit.name for lit in cons
+            if lit.name.startswith("pcls") and lit.args[0][0] == subtype
+        )
+        supertype = next(
+            lit.name for lit in cons
+            if lit.name.startswith("pcls") and lit.args[0][0] == supertype
+        )
         kb_updated |= agent.lt_mem.kb.add(
             (
                 [Literal(subtype, wrap_args("X"))],
@@ -349,6 +355,8 @@ def handle_neologism(agent, dialogue_state):
         mood = dialogue_state.clause_info[f"t{ti}c{ci}"]["mood"]
         if not (len(cons) > 0 and len(ante) == 0 and mood == "."):
             continue
+        if any((pos, name) == ("sp", "subtype") for pos, name, _ in cons):
+            continue        # Taxonomy statement, not an exemplification
 
         # Labeled exemplar provided; add new concept exemplars to memory,
         # as feature vectors obtained from vision module backbone
@@ -430,7 +438,7 @@ def handle_neologism(agent, dialogue_state):
             surface_form = f"What kind of part is {name}?"
             gq = ("?",); bvars = ("x1",); ante = []
             cons = [
-                ("sp", "subtype", ["e0", "x0", "x1"]),
+                ("sp", "subtype", ["x0", "x1"]),
                 ("n", name, ["x0"])
             ]
             logical_form = (gq, bvars, ante, cons)
@@ -517,7 +525,7 @@ def resolve_neologisms(agent):
                         if clause_info["mood"] != ".": continue
                         if not (len(ante) == 0 and len(cons) > 0): continue
                         for lit in cons:
-                            if not lit.name.startswith("pcls"): continue
+                            if lit.name != den_str: continue
                             if lit.args[0][0] not in agent.vision.scene: continue
                             if lit.naf: continue
                             conc = int(lit.name.strip("pcls_"))
@@ -557,33 +565,36 @@ def resolve_neologisms(agent):
                 continue
 
             if info["dependency"] is None:
-                # Extract resolution dependency from current knowledge state
-
-                # See if any definitions---characterizing properties---are stored
-                # in KB. If any referenced concepts are denoted by other unresolved
-                # neologisms, add those to the dependency.
-                relevant_kb_entries = agent.lt_mem.kb.entries_by_pred[den_str]
-                if len(relevant_kb_entries) > 0:
-                    dependent_neologisms = set()
-                    for ei in agent.lt_mem.kb.entries_by_pred[den_str]:
-                        (ante, cons), _, _, knowledge_type = agent.lt_mem.kb.entries[ei]
-                        if knowledge_type != "property": continue
-                        relevant_concs = {
-                            ((pred_spl := lit.name.split("_"))[0], int(pred_spl[1]))
-                            for lit in ante+cons
-                        }
-                        dependent_neologisms |= {
-                            rel_sym for conc in relevant_concs
-                            if (rel_sym := agent.lt_mem.lexicon.d2s[conc][0]) != sym \
-                                and rel_sym in agent.lang.unresolved_neologisms
-                        }
-                    info["dependency"] = dependent_neologisms
+                info["dependency"] = set()
+                new_dependency = True
             else:
-                # Check if any dependent neologism in the specified set is
-                # resolved; if so, remove them from set. If the set becomes
-                # empty, the neologism can be marked as resolved.
-                if len(info["dependency"]) == 0:
-                    resolved.add(sym)
+                new_dependency = False
+
+            # See if any definitions---characterizing properties---are stored
+            # in KB. If any referenced concepts are denoted by other unresolved
+            # neologisms, add those to the dependency.
+            relevant_kb_entries = agent.lt_mem.kb.entries_by_pred[den_str]
+            if len(relevant_kb_entries) > 0:
+                dependent_neologisms = set()
+                for ei in agent.lt_mem.kb.entries_by_pred[den_str]:
+                    (ante, cons), _, _, knowledge_type = agent.lt_mem.kb.entries[ei]
+                    if knowledge_type != "property": continue
+                    relevant_concs = {
+                        (pred_spl[0], int(pred_spl[1])) for lit in ante+cons
+                        if (pred_spl := lit.name.split("_"))[0] == "pcls"
+                    }
+                    dependent_neologisms |= {
+                        rel_sym for conc in relevant_concs
+                        if (rel_sym := agent.lt_mem.lexicon.d2s[conc][0]) != sym \
+                            and rel_sym in agent.lang.unresolved_neologisms
+                    }
+                info["dependency"] |= dependent_neologisms
+
+            # Check if any dependent neologism in the specified set is
+            # resolved; if so, remove them from set. If the set becomes
+            # empty, the neologism can be marked as resolved.
+            if len(info["dependency"]) == 0 and not new_dependency:
+                resolved.add(sym)
 
         if len(resolved) == 0:
             # No more neologisms to resolve
@@ -1429,10 +1440,10 @@ def posthoc_episode_analysis(agent):
         # select best ones according to specified supertypes
         scn_subtype = {
             oi: max([
-                subtype_conc for subtype_conc, supertype_conc in hyp_rels.items()
-                if supertype_conc == conc
+                subtype_conc for subtype_conc in nx.descendants(hyp_rels, conc)
+                if len(hyp_rels.out_edges(subtype_conc)) == 0       # Most specific ones only
             ], key=lambda c: agent.vision.scene[oi]["pred_cls"][c])
-                if conc in hyp_rels.values() else conc
+                if conc in hyp_rels else conc
             for oi, conc in scn.items()
         }
         prob_score = sum(
@@ -1448,15 +1459,14 @@ def posthoc_episode_analysis(agent):
     pr_thres = 0.7                  # Threshold for adding exemplars
     exemplars = {}; pointers = defaultdict(set)
     for oi, best_conc in final_recognitions.items():
-        # Skip if supertype
-        if best_conc in hyp_rels.values(): continue
+        if best_conc in hyp_rels and len(hyp_rels.out_edges(best_conc)) > 0:
+            continue            # Skip if supertype
 
         # Add to the list of positive exemplars if the predicted probability
         # for the best type concept is lower than the threshold
         pred_prob = agent.vision.scene[oi]["pred_cls"][best_conc].item()
         if pred_prob < pr_thres:
             exemplars[oi] = {
-                "scene_id": None,
                 "mask": agent.vision.scene[oi]["pred_mask"],
                 "f_vec": agent.vision.scene[oi]["vis_emb"]
             }
@@ -1478,7 +1488,6 @@ def posthoc_episode_analysis(agent):
             pred_prob = agent.vision.scene[obj2]["pred_cls"][label2].item()
             if pred_prob > 1 - pr_thres:
                 exemplars[obj2] = {
-                    "scene_id": None,
                     "mask": agent.vision.scene[obj2]["pred_mask"],
                     "f_vec": agent.vision.scene[obj2]["vis_emb"]
                 }
@@ -1488,7 +1497,6 @@ def posthoc_episode_analysis(agent):
             pred_prob = agent.vision.scene[obj1]["pred_cls"][label1].item()
             if pred_prob > 1 - pr_thres:
                 exemplars[obj1] = {
-                    "scene_id": None,
                     "mask": agent.vision.scene[obj1]["pred_mask"],
                     "f_vec": agent.vision.scene[obj1]["vis_emb"]
                 }
@@ -1496,19 +1504,51 @@ def posthoc_episode_analysis(agent):
 
     # Running below only when we have exemplars to add
     if len(pointers) > 0:
-        # Get the very first scene image before any sort of manipulation took
-        # place
-        scene_img = next(
-            vis_inp for vis_inp in agent.vision.latest_inputs
-            if vis_inp is not None
-        )
+        if all(obj["exemplar_ind"] is None for obj in agent.vision.scene.values()):
+            # Totally new scene; get the very first scene image before any sort of
+            # manipulation took place
+            scene_id = None
+            scene_img = next(
+                vis_inp for vis_inp in agent.vision.latest_inputs
+                if vis_inp is not None
+            )
+        else:
+            # Some scene object already registered as exemplar for some concept,
+            # i.e. existing scene
+            scene_id = next(
+                obj["exemplar_ind"][0] for obj in agent.vision.scene.values()
+                if obj["exemplar_ind"] is not None
+            )
+            scene_img = None
         # Reformat `exemplars` and `pointers`
-        obj_ordering = list(exemplars)
-        exemplars = [exemplars[oi] for oi in obj_ordering]
+        new_exs_ordering = [
+            ex_obj for ex_obj in exemplars
+            if agent.vision.scene[oi]["exemplar_ind"] is None
+        ]
+        exemplars = [
+            exemplars[oi] | { "scene_id": scene_id }
+            for oi in new_exs_ordering
+        ]
         pointers = {
-            conc_dscr: [(True, obj_ordering.index(oi)) for oi in objs]
+            conc_dscr: [
+                (True, new_exs_ordering.index(oi)) if oi in new_exs_ordering \
+                    else (False, agent.vision.scene[oi]["exemplar_ind"])
+                for oi in objs
+            ]
             for conc_dscr, objs in pointers.items()
-            if len(objs) > 0
+        }
+        pointers = {
+            (conc_type, conc_ind, pol): [
+                (is_new_obj, ex_ind) for is_new_obj, ex_ind in ptrs
+                if is_new_obj or ex_ind not in (
+                    agent.lt_mem.exemplars.object_2d_pos[conc_type][conc_ind] if pol == "pos"
+                        else agent.lt_mem.exemplars.object_2d_neg[conc_type][conc_ind]
+                )
+            ]
+            for (conc_type, conc_ind, pol), ptrs in pointers.items()
+        }
+        pointers = {
+            conc_dscr: objs for conc_dscr, objs in pointers.items() if len(objs) > 0
         }
 
         # Exemplar base update in batch

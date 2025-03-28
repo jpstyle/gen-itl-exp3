@@ -298,7 +298,8 @@ class SimulatedTeacher:
                         ))
                 else:
                     # Non-target concept, most likely referring to some unknown part
-                    # subtype concept; teach new concept by exemplification
+                    # subtype or supertype concept; teach new concept by exemplification
+                    # and/or taxonomy info
 
                     # Fetch list of matching instances and select one
                     matching_insts = [
@@ -306,21 +307,33 @@ class SimulatedTeacher:
                         for (supertype, inst_id), info in sampled_parts.items()
                         if reported_neologism == info["type"]
                     ]
-                    inst, serialized_name = random.sample(matching_insts, 1)[0]
-                    ent_path = f"/{serialized_name}"
+                    if len(matching_insts) > 0:
+                        # Neologism is the most specific part subtype
+                        inst, serialized_name = random.sample(matching_insts, 1)[0]
+                        ent_path = f"/{serialized_name}"
 
-                    response += [
-                        ("generate",
-                        {
-                            "utterance": f"This is a {reported_neologism}.",
-                            "pointing": { (0, 4): (ent_path, False) }
-                        }),
-                        ("generate",
-                        {
-                            "utterance": f"{reported_neologism} is a type of {inst[0]}.",
-                            "pointing": {}
-                        }),
-                    ]
+                        response += [
+                            ("generate",
+                            {
+                                "utterance": f"This is a {reported_neologism}.",
+                                "pointing": { (0, 4): (ent_path, False) }
+                            }),
+                            ("generate",
+                            {
+                                "utterance": f"{reported_neologism} is a type of {inst[0]}.",
+                                "pointing": {}
+                            }),
+                        ]
+                    else:
+                        # Neologism is some supertype, provide all direct subtypes
+                        for _, subtype in self.domain_knowledge["taxonomy"].out_edges(reported_neologism):
+                            response.append((
+                                "generate",
+                                {
+                                    "utterance": f"{subtype} is a type of {reported_neologism}.",
+                                    "pointing": {}
+                                }
+                            ))
 
             elif utt == "# Observing":
                 # Agent has signaled it is paying attention to user's action
@@ -943,7 +956,12 @@ class SimulatedTeacher:
                                 }
                             ))
                             if self.player_type == "full":
-                                print(0)
+                                # Directly utter the (one and only) relevant constraint
+                                # violated by use of the distractor instance
+                                constraint = sampled_parts[ref_inst]["violated_constraint"][3]
+                                response.append((
+                                    "generate", { "utterance": constraint, "pointing": {} }
+                                ))
 
                 # Finally tell the agent to resume its task execution (based on
                 # the modified knowledge)

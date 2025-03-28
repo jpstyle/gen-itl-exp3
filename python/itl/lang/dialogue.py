@@ -291,7 +291,9 @@ class DialogueManager:
             denotation = self.word_senses.get(
                 (f"t{ti}",f"c{ci}",f"p{c_or_a}{li}"),
                 # If not found (likely reserved predicate), fall back to cnjt's pred
-                (None, "_".join(cnjt[:2]))
+                # (still need to strip off the negation sign, which is now represented
+                # with Literal.naf below)
+                (None, cnjt[0] + "_" + cnjt[1].strip("~"))
             )[1]
             return Literal(
                 denotation, args=wrap_args(*a_map(cnjt[2])),

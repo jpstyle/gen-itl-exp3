@@ -532,7 +532,6 @@ def main(cfg):
         # Just save the model
         agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/color_pretrained.ckpt")
     else:
-        agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/{cfg.exp.player_type}_{cfg.seed}.ckpt")
         # Save evaluation metric curves to output dir
         out_csv_fname = f"{exp_tag}.csv"
 

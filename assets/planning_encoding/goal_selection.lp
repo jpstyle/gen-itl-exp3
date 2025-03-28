@@ -5,6 +5,9 @@
 possible_root_template(S,I) :- build_target(S), template_option(S,I).
 possible_root_template(S2,I) :- build_target(S1), subtype_of(S1,S2), template_option(S2,I).
 
+% Supertype-subtype relation is transitive
+subtype_of(S1,S3) :- subtype_of(S1,S2), subtype_of(S2,S3).
+
 % Annotating each child of a subassembly node N with its required atomic part
 % concept type
 node_atomic(n(N,NS),P) :- node_sa_template(N,S,I), req_atomic(S,I,NS,P).
@@ -25,7 +28,7 @@ component_node(N1,N3) :- component_node(N1,N2), component_node(N2,N3).  % Transi
 % An object that is likely to be an instance of a type may fill an atomic node
 % with matching type. Each object can fill up to one atomic node, and each
 % atomic node can be filled by up to one object.
-{ fill_node(O,N,PR) } :- node_atomic(N,P), type_likely(O,P,PR).
+{ fill_node(O,N,PR) } :- node_atomic(N,P), type_likely(O,P,PR), not must_unify(_,N).
 :- type_likely(O,_,_), #count { N : fill_node(O,N,_) } > 1.
 :- node_atomic(N,_), #count { O : fill_node(O,N,_) } > 1.
 
@@ -81,10 +84,10 @@ may_unify(O1,N1) :- must_unify(O2,N2), ext_node(O1,P1), ext_edge(O1,O2),
 % of other atomic nodes connected to the unified node
 may_unify(O1,N1) :- must_unify(O2,N2), ext_node(O1), ext_edge(O1,O2),
     to_connect(N1,N2,_,_).
+% Observe must_unify relations
+fill_node(O,N,21) :- must_unify(O,N).
 % Different objects cannot be forced to unify with the same node
 :- must_unify(O1,N1), must_unify(O2,N2), O1 != O2, N1 = N2.
-% Observe must_unify relations
-:- must_unify(O,N), not fill_node(O,N,_).
 % Observe ext_edge relations
 :- ext_edge(O1,O2,_,_), must_unify(O1,N1,_), must_unify(O2,N2,_), not to_connect(N1,N2,_,_).
 :- ext_edge(O1,O2), must_unify(O1,N1,_), must_unify(O2,N2,_), not to_connect(N1,N2,_,_).

@@ -575,8 +575,12 @@ def _plan_assembly(agent, build_target):
         # needed. Check this by seeing if there's only one existing subassembly,
         # and the number of its constituent atomics are equal to the size of
         # the connection graph.
-        if len(exec_state["connection_graphs"]) == 1:
-            sole_sa = list(exec_state["connection_graphs"].values())[0]
+        nonatomic_subassemblies = [
+            sa_graph for sa_graph in exec_state["connection_graphs"].values()
+            if len(sa_graph) > 1
+        ]
+        if len(nonatomic_subassemblies) == 1:
+            sole_sa = nonatomic_subassemblies[0]
             if len(sole_sa) == len(connection_graph):
                 # Can return with empty action sequence, same recognitions and
                 # True `plan_complete` flag
@@ -900,15 +904,15 @@ def _plan_assembly(agent, build_target):
         if oi in node_unifications and oi not in safe_unification_choice:
             # Skip if already unified and unification is not safe
             continue
-        if oi in agent.vision.scene and conc in hyp_rels.values():
-            # For existing scene objects whose subtype should be further
-            # specified
+        if oi in agent.vision.scene and conc in hyp_rels:
+            # For existing scene objects, specify subtypes as scored by vis_scores
             recognitions[oi] = max([
-                subtype_conc for subtype_conc, supertype_conc in hyp_rels.items()
-                if supertype_conc == conc
+                subtype_conc for subtype_conc in nx.descendants(hyp_rels, conc)
+                if len(hyp_rels.out_edges(subtype_conc)) == 0       # Most specific ones only
             ], key=lambda c: vis_scores.get((oi, c), -1))
         else:
-            # Existing scene object with no specifiable subtype, or non-objs
+            # For non-objects, keep the broad supertype so they can be queried
+            # for later
             recognitions[oi] = conc
     # Prioritize existing ones
     recognitions.update(exec_state["recognitions"])
@@ -1050,13 +1054,15 @@ def _goal_selection(agent, build_target):
             constraint_str += "#count { O : component_obj(O,N)"
             for lit in cons:
                 if lit.name == have_pred: continue       # Already incorporated
-                prop_conc = int(lit.name.split("_")[1])
-                lit_pred = "color_likely" if prop_conc in color_concs else "type_likely"
-                constraint_str += f", {lit_pred}(O,{prop_conc},_)"
+                conc_ind = int(lit.name.split("_")[1])
+                lit_pred = "color_likely" if conc_ind in color_concs else "type_likely"
+                constraint_str += f", {lit_pred}(O,{conc_ind},_)"
             constraint_str += " } = 0.\n"
 
         else:
             # Universal constraints signaled by lack of skolem function terms
+            pseudohypernym_color_conc = agent.lt_mem.lexicon.s2d[("n", "color")][0][1]
+                # Needed for handling color equality constraints
 
             # The scope variable is identified as the only first arguments of
             # 'have' literals; scope concept naturally follows
@@ -1075,28 +1081,52 @@ def _goal_selection(agent, build_target):
                     trans_lit = f"component_obj({lit.args[1][0]},{lit.args[0][0]})"
                 else:
                     assert len(lit.args) == 1
-                    prop_conc = int(lit.name.split("_")[1])
+                    conc_ind = int(lit.name.split("_")[1])
                     if lit.args[0][0] == scope_var:
                         trans_lit = f"node_sa({lit.args[0][0]},{scope_conc})"
                     else:
                         pr_var = f"PR{pr_i}"
                         pr_vars.append(pr_var)
                         pr_i += 1
-                        lit_pred = "color_likely" if prop_conc in color_concs else "type_likely"
-                        trans_lit = f"{lit_pred}({lit.args[0][0]},{prop_conc},{pr_var})"
+                        lit_pred = "color_likely" if conc_ind in color_concs else "type_likely"
+                        trans_lit = f"{lit_pred}({lit.args[0][0]},{conc_ind},{pr_var})"
                 if lit.naf:
                     trans_lit = f"not {trans_lit}"
                 constraint_body.append(trans_lit)
             for lit in cons:
-                assert len(lit.args) == 1
-                prop_conc = int(lit.name.split("_")[1])
+                conc_type, conc_ind = lit.name.split("_")
+                if conc_ind.isdigit(): conc_ind = int(conc_ind)
+                if (conc_type, conc_ind) == ("pcls", pseudohypernym_color_conc):
+                    # Abstract pseudohypernym "color", skip
+                    continue
+
+                # Probability score variables
                 pr_var = f"PR{pr_i}"
-                pr_vars.append(pr_var)
                 pr_i += 1
-                lit_pred = "color_likely" if prop_conc in color_concs else "type_likely"
-                trans_lit = f"{lit_pred}({lit.args[0][0]},{prop_conc},{pr_var})"
-                if not lit.naf:
-                    trans_lit = f"not {trans_lit}"
+                if len(lit.args) == 1:
+                    # More general, unary specifications
+                    lit_pred = "color_likely" if conc_ind in color_concs else "type_likely"
+                    if lit.naf:
+                        trans_lit = f"{lit_pred}({lit.args[0][0]},{conc_ind},{pr_var})"
+                        pr_vars.append(pr_var)
+                    else:
+                        trans_lit = f"not {lit_pred}({lit.args[0][0]},{conc_ind},_)"
+                else:
+                    # Handling color-related, binary specifications
+                    assert len(lit.args) == 2
+                    if lit.name == have_pred:
+                        (obj_var, _), (color_var, _) = lit.args
+                        assert Literal(
+                            f"pcls_{pseudohypernym_color_conc}", wrap_args(color_var)
+                        ) in cons
+                        trans_lit = f"color_likely({obj_var},{color_var},{pr_var})"
+                        pr_vars.append(pr_var)
+                    else:
+                        assert lit.name == "sp_equal"
+                        comp_op = "=" if lit.naf else "!="      # Notice flipped polarity
+                        trans_lit = f"{lit.args[0][0]} {comp_op} {lit.args[1][0]}"
+                constraint_body.append(trans_lit)
+
             constraint_body = ", ".join(constraint_body)
             mean_score_term = "(" + "+".join(pr_vars) + f")/{len(pr_vars)}"
             constraint_head = f"violation_severity({ei},{mean_score_term})"
@@ -1226,7 +1256,7 @@ def _tabulate_goal_selection_result(model):
     obj2node_map = {}
     connect_edges = {}; connection_graph = nx.Graph()
     node_unifications = defaultdict(set)
-    vis_scores = {}; hyp_rels = {}
+    vis_scores = {}; hyp_rels = nx.DiGraph()
     for atm in model:
         match atm.name:
             case "node_atomic" | "node_sa_template":
@@ -1259,7 +1289,7 @@ def _tabulate_goal_selection_result(model):
                 # Retrieving supertype/subtype relations
                 subtype_conc = atm.arguments[0].number
                 supertype_conc = atm.arguments[1].number
-                hyp_rels[subtype_conc] = supertype_conc
+                hyp_rels.add_edge(supertype_conc, subtype_conc)
 
             case "fill_node":
                 # Decision as to use which recognized object to fill which
@@ -1316,9 +1346,10 @@ def _match_existing_subassemblies(
     type recognitions.
     """
     recognitions = exec_state["recognitions"]       # Shortcut
-    get_supertype = lambda c: hyp_rels.get(c, c)
-        # Helper for obtaining the supertype of subtype c if it exists,
-        # otherwise returning the type itself
+    get_supertypes = lambda c: (nx.ancestors(hyp_rels, c) | {c}) \
+        if c in hyp_rels else {c}
+        # Helper for obtaining all supertypes of subtype c if any exists,
+        # including self
 
     possible_mappings = defaultdict(list)
     uniquely_unified = {
@@ -1355,7 +1386,7 @@ def _match_existing_subassemblies(
             # doesn't typecheck
             if any(
                 ex_obj in recognitions and \
-                    get_supertype(recognitions[ex_obj]) != atomic_node_concs[n]
+                    atomic_node_concs[n] not in get_supertypes(recognitions[ex_obj])
                 for n, ex_obj in ism.items()
             ): continue
             possible_mappings[sa].append(ism)
@@ -1370,7 +1401,7 @@ def _match_existing_subassemblies(
             # Typechecking again
             if any(
                 ex_obj in recognitions and \
-                    get_supertype(recognitions[ex_obj]) != atomic_node_concs[n]
+                    atomic_node_concs[n] not in get_supertypes(recognitions[ex_obj])
                 for n, ex_obj in ism.items()
             ): continue
             possible_mappings[sa].append(ism)
