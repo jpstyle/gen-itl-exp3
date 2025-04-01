@@ -30,7 +30,7 @@ class ITLAgent:
         self.lang = LanguageModule()
         self.symbolic = SymbolicReasonerModule()
         self.planner = ActionPlannerModule()
-        self.lt_mem = LongTermMemoryModule(cfg)
+        self.lt_mem = LongTermMemoryModule()
 
         # Provide access to methods in comp_actions
         self.comp_actions = CompositeActions(self)

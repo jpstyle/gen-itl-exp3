@@ -10,9 +10,7 @@ from .exemplars import Exemplars
 
 class LongTermMemoryModule:
     
-    def __init__(self, cfg):
-        self.cfg = cfg
-
+    def __init__(self):
         self.lexicon = Lexicon()
         self.kb = KnowledgeBase()
-        self.exemplars = Exemplars(cfg)
+        self.exemplars = Exemplars()

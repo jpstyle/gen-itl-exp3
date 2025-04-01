@@ -25,6 +25,9 @@ __pycache__/
 /unity/[Aa]ssets/ML-Agents/
 /unity/[Aa]ssets/[Rr]esources/
 
+# Sandbox jupyter notebooks
+*.ipynb
+
 # Ignore all .meta files
 *.meta
 # But not source file with postfix, which is everything but a folder

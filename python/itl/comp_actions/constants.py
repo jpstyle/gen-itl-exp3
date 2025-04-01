@@ -4,7 +4,7 @@ Some constants shared across the module
 import networkx as nx
 
 EPS = 1e-10                 # Value used for numerical stabilization
-SR_THRES = 0.8              # Mismatch surprisal threshold
+SR_THRES = 0.7              # Mismatch surprisal threshold
 U_IN_PR = 0.99              # How much the agent values information provided by the user
 
 # Connectivity graph that represents pairs of 3D inspection images to be cross-referenced

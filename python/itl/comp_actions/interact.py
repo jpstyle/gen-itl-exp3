@@ -933,7 +933,7 @@ def _goal_selection(agent, build_target):
     # Convert current visual scene (from ensemble prediction) into ASP fact
     # literals (note difference vs. agent.lt_mem.kb.visual_evidence_from_scene
     # method, which is for probabilistic reasoning by LP^MLN)
-    threshold = 0.35; dsc_bin = 20
+    threshold = 0.15; dsc_bin = 20
     observations = set()
     likelihood_values = np.stack([
         obj["pred_cls"] for obj in agent.vision.scene.values()
@@ -3361,6 +3361,7 @@ def handle_action_effect(agent, effect, actor):
             # Also store some 2D exemplars from select viewpoints (as done
             # in learn.analyze_demonstration method)
             vis_model = agent.vision.model; vis_model.eval()
+            updated_concs = set()
             with torch.no_grad():
                 for view_ind in STORE_VP_INDS[:4]:
                     image = exec_state["3d_inspection_data"]["img"][view_ind]
@@ -3373,11 +3374,13 @@ def handle_action_effect(agent, effect, actor):
                     vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
                     f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
                     
-                    agent.lt_mem.exemplars.add_exs_2d(
+                    _, concs = agent.lt_mem.exemplars.add_exs_2d(
                         scene_img=image,
                         exemplars=[{ "scene_id": None, "mask": mask, "f_vec": f_vec }],
                         pointers={ ("pcls", conc[1], "pos"): {(True, 0)} }
                     )
+                    updated_concs |= concs
+            agent.lt_mem.exemplars.update_bin_clfs_2d(updated_concs)
 
             # Remove the temporary data storage field
             del exec_state["3d_inspection_data"]

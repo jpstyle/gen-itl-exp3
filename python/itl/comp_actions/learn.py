@@ -336,6 +336,10 @@ def handle_neologism(agent, dialogue_state):
             sym, f"{novel_concept[0]}_{novel_concept[1]}"
         )
 
+        # Do not process below if currently observing full demonstration
+        if agent.observed_demo is not None:
+            continue
+
         neologism_in_cons = tok[2].startswith("pc")
         neologisms_in_same_clause_ante = [
             n for n in neologisms
@@ -997,6 +1001,7 @@ def analyze_demonstration(agent, demo_data):
                 examples_with_embs.append((image, mask, f_vec))
             vision_2d_data[part_inst] = examples_with_embs
     # Add 2D vision data in XB, based on the newly assigned pcls concept indices
+    updated_concs = set()
     for part_inst, examples in vision_2d_data.items():
         if part_inst not in inst2conc_map:
             # Concept label info was not available (which happens for language-less
@@ -1013,7 +1018,11 @@ def analyze_demonstration(agent, demo_data):
                 }
                 for inst in vision_2d_data if inst in inst2conc_map
             }
-            exemplars.add_exs_2d(scene_img=image, exemplars=exs_2d, pointers=pointers)
+            _, concs = exemplars.add_exs_2d(
+                scene_img=image, exemplars=exs_2d, pointers=pointers
+            )
+            updated_concs |= concs
+    exemplars.update_bin_clfs_2d(updated_concs)
     # Concept labels must be assigned to unlabeled part instances. An orthodox approach
     # would be to classify them to the closest example by visual features. However,
     # our abstraction approach of using a 'collision table cheat sheet' as oracle
@@ -1552,9 +1561,10 @@ def posthoc_episode_analysis(agent):
         }
 
         # Exemplar base update in batch
-        agent.lt_mem.exemplars.add_exs_2d(
+        _, updated_concs = agent.lt_mem.exemplars.add_exs_2d(
             scene_img=scene_img, exemplars=exemplars, pointers=pointers
         )
+        agent.lt_mem.exemplars.update_bin_clfs_2d(updated_concs)
 
 def _add_scene_and_exemplar_2d(scene_id, scene_img, pointer, mask, f_vec, ex_mem):
     """
@@ -1578,8 +1588,9 @@ def _add_scene_and_exemplar_2d(scene_id, scene_img, pointer, mask, f_vec, ex_mem
         # Already stored in XB, no need to store again
         exemplars = []
     pointers = { exemplar_spec: [(is_new_obj, exemplar_id)] }
-    added_inds = ex_mem.add_exs_2d(
+    added_inds, updated_concs = ex_mem.add_exs_2d(
         scene_img=scene_img, exemplars=exemplars, pointers=pointers
     )
+    ex_mem.update_bin_clfs_2d(updated_concs)
 
     return added_inds[0] if is_new_obj else None

@@ -340,7 +340,7 @@ def main(cfg):
                                             scores[color_inds] = np.nan
                                             ans_conc = np.nanargmax(scores)
                                             ans_prob = scores[ans_conc]
-                                            ans_label = get_label(ans_conc) if ans_prob >= 0.35 else None
+                                            ans_label = get_label(ans_conc) if ans_prob >= 0.15 else None
                                             gt_label = obj["type_code"]
                                             groundings.append((gt_label, ans_label))
                                     stats = defaultdict(lambda: { "tp": 0, "fp": 0, "fn": 0 })
@@ -532,6 +532,7 @@ def main(cfg):
         # Just save the model
         agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/color_pretrained.ckpt")
     else:
+        agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/{cfg.exp.player_type}_{cfg.seed}.ckpt")
         # Save evaluation metric curves to output dir
         out_csv_fname = f"{exp_tag}.csv"
 

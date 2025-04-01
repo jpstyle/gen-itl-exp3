@@ -1,8 +1,8 @@
 from collections import defaultdict
 
 import numpy as np
-from sklearn.neighbors import KNeighborsClassifier
-# from sklearn.svm import SVC
+from sklearn.svm import SVC
+from sklearn.model_selection import GridSearchCV
 from pycocotools import mask
 
 
@@ -13,9 +13,7 @@ class Exemplars:
     encoder component). Primarily used for incremental few-shot registration of novel
     concepts.
     """
-    def __init__(self, cfg):
-        self.cfg = cfg
-
+    def __init__(self):
         # Storage of scenes; each scene consists of a raw image and a list of objects,
         # where each object is specified by a binary segmentation mask and annotated
         # with the feature vector extracted with the vision encoder module
@@ -73,7 +71,7 @@ class Exemplars:
             added_inds.append((scene_id, obj_id))
 
         # Iterate through pointers to update concept exemplar index sets
-        xb_updated = set()      # Collection of concepts with updated exemplar sets
+        updated_concs = set()      # Collection of concepts with updated exemplar sets
         for (conc_type, conc_ind, pol), objs in pointers.items():
             for is_new, xi in objs:
                 if is_new:
@@ -91,9 +89,14 @@ class Exemplars:
                     case _:
                         raise ValueError("Bad concept polarity value")
 
-                xb_updated.add((conc_type, conc_ind))
+                updated_concs.add((conc_type, conc_ind))
 
-        for conc_type, conc_ind in xb_updated:
+        return added_inds, updated_concs
+
+    def update_bin_clfs_2d(self, concs):
+        # Update binary classifiers for the designated concepts, based on
+        # current storage of positive and negative exemplars
+        for conc_type, conc_ind in concs:
             # Update binary classifier if needed
             if len(self.object_2d_pos[conc_type][conc_ind]) > 0 and \
                 len(self.object_2d_neg[conc_type][conc_ind]) > 0:
@@ -112,10 +115,23 @@ class Exemplars:
                 ])
                 y = ([1] * len(pos_inds)) + ([0] * len(neg_inds))
 
-                # Induce binary decision boundary by fitting a classifier and
-                # update
-                # bin_clf = SVC(C=1000, probability=True)
-                bin_clf = KNeighborsClassifier(n_neighbors=min(len(X), 8), weights="distance")
+                # Induce binary decision boundary by fitting a SVM classifier
+                possible_n_splits = min(len(pos_inds), len(neg_inds), 5)
+                if possible_n_splits >= 2:
+                    # Select parameters with full grid search CV if we have feasible
+                    # amount of data
+                    cv_clf = GridSearchCV(
+                        SVC(), { "C": np.logspace(0, 1, 5), "gamma": np.logspace(-4, -3, 5) },
+                        scoring="f1_macro", cv=possible_n_splits
+                    )
+                    cv_clf.fit(X, y)
+                    # This time with best parameters, with Platt scaling for probability
+                    # score estimation
+                    bin_clf = SVC(probability=True, **cv_clf.best_params_)
+                else:
+                    # Default parameter
+                    bin_clf = SVC(probability=True)
+
                 bin_clf.fit(X, y)
                 self.binary_classifiers_2d[conc_type][conc_ind] = bin_clf
 
@@ -123,8 +139,6 @@ class Exemplars:
                 # Cannot induce any decision boundary with either positive or
                 # negative examples only
                 self.binary_classifiers_2d[conc_type][conc_ind] = None
-
-        return added_inds
 
     def add_exs_3d(
             self, conc_ind, point_cloud, views, descriptors, contact_points=None
