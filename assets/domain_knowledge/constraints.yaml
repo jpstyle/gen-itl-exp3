@@ -30,6 +30,8 @@ fw_unit:
     forall:
         - logical_form: [["large_fender", "normal_wheel"], null]
           surface_form: "A fw_unit must not have a large_fender and a normal_wheel."
+        - logical_form: [["normal_fender", "large_wheel"], null]
+          surface_form: "A fw_unit must not have a normal_fender and a large_wheel."
 
 truck:
     forall:

@@ -73,6 +73,22 @@ br_fender:
         - normal_br_fender
         - large_br_fender
 
+normal_fender:
+    relation_type: proper
+    subtypes:
+        - normal_fl_fender
+        - normal_fr_fender
+        - normal_bl_fender
+        - normal_br_fender
+
+large_fender:
+    relation_type: proper
+    subtypes:
+        - large_fl_fender
+        - large_fr_fender
+        - large_bl_fender
+        - large_br_fender
+
 wheel:
     relation_type: proper
     subtypes:

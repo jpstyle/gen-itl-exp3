@@ -557,7 +557,7 @@ def _plan_assembly(agent, build_target):
         assembly_hierarchy, obj2node_map = tabulated_results[:2]
         connect_edges, connection_graph = tabulated_results[2:4]
         node_unifications, atomic_node_concs = tabulated_results[4:6]
-        vis_scores, hyp_rels = tabulated_results[6:]
+        part_recognitions, hyp_rels = tabulated_results[6:]
 
         # Build target may have one or more 'template' options that count as
         # valid structure for the concept, fetch the index of the selected
@@ -878,6 +878,31 @@ def _plan_assembly(agent, build_target):
         plan_complete = len(tree_intersection.nodes) == len(valid_join_trees[0][0].nodes) \
             and len(tree_intersection.edges) == len(valid_join_trees[0][0].edges)
 
+        # Identifying 'user-certified' labelings, defined as pairs of "Is there
+        # a X?" questions and immediately following user-provided labels. This
+        # is to prevent repetitive asking of the exact same question, operating
+        # under the assumption that the user-labeled objects provided as answer
+        # to such questions are ground-truth part instances always included in
+        # the desired goal structure and thus always should fill a node
+        resolved_record = agent.lang.dialogue.export_resolved_record()
+        certified_pool = defaultdict(set); q_asked = False
+        for spk, turn_clauses in resolved_record:
+            for ((_, _, ante, cons), _, clause_info) in turn_clauses:
+                if spk == "Student" and clause_info["mood"] == "?" and len(cons) == 1:
+                    q_asked = True
+                if spk == "Teacher" and clause_info["mood"] == "." and len(cons) == 1 \
+                    and q_asked and cons[0].name.startswith("pcls"):
+                    q_conc = int(cons[0].name.split("_")[1])
+                    if q_conc in hyp_rels:
+                        q_conc_supertypes = nx.ancestors(hyp_rels, q_conc) | {q_conc}
+                    else:
+                        q_conc_supertypes = {q_conc}
+                    pool_conc = q_conc_supertypes & set(atomic_node_concs.values())
+                    assert len(pool_conc) == 1
+                    pool_conc = list(pool_conc)[0]
+                    certified_pool[pool_conc].add(cons[0].args[0][0])
+                    q_asked = False
+
         safe_unification_choice = {
             n: list(objs)[0] for n, objs in collected_unification_choices.items()
             if len(objs) == 1
@@ -885,7 +910,8 @@ def _plan_assembly(agent, build_target):
         action_sequence, node2obj_map = _linearize_join_tree(
             copy.deepcopy(tree_intersection), exec_state, connection_graph,
             connect_edges, atomic_node_concs, safe_unification_choice,
-            obj2node_map, (pick_up_actions, drop_actions, assemble_actions)
+            obj2node_map, certified_pool,
+            (pick_up_actions, drop_actions, assemble_actions)
         )       # The valid `unification_choice` obtained above is passed as well
 
         plan_dscr = "Full" if plan_complete else "Partial"
@@ -904,12 +930,20 @@ def _plan_assembly(agent, build_target):
         if oi in node_unifications and oi not in safe_unification_choice:
             # Skip if already unified and unification is not safe
             continue
-        if oi in agent.vision.scene and conc in hyp_rels:
-            # For existing scene objects, specify subtypes as scored by vis_scores
-            recognitions[oi] = max([
-                subtype_conc for subtype_conc in nx.descendants(hyp_rels, conc)
-                if len(hyp_rels.out_edges(subtype_conc)) == 0       # Most specific ones only
-            ], key=lambda c: vis_scores.get((oi, c), -1))
+        if oi in agent.vision.scene:
+            # For existing scene objects
+            if oi in part_recognitions:
+                # Specify subtypes as committed by _goal_selection if available
+                recognitions[oi] = part_recognitions[oi]
+            elif conc in hyp_rels:
+                # Select the most likely one by prediction score
+                recognitions[oi] = max([
+                    subtype_conc for subtype_conc in nx.descendants(hyp_rels, conc)
+                    if len(hyp_rels.out_edges(subtype_conc)) == 0       # Most specific ones only
+                ], key=lambda c: agent.vision.scene[oi]["pred_cls"][c])
+            else:
+                # No relevant supertype/subtypes, just singleton in the taxonomy
+                recognitions[oi] = conc
         else:
             # For non-objects, keep the broad supertype so they can be queried
             # for later
@@ -933,7 +967,7 @@ def _goal_selection(agent, build_target):
     # Convert current visual scene (from ensemble prediction) into ASP fact
     # literals (note difference vs. agent.lt_mem.kb.visual_evidence_from_scene
     # method, which is for probabilistic reasoning by LP^MLN)
-    threshold = 0.15; dsc_bin = 20
+    threshold = 0.15; dsc_bin = 30
     observations = set()
     likelihood_values = np.stack([
         obj["pred_cls"] for obj in agent.vision.scene.values()
@@ -953,14 +987,16 @@ def _goal_selection(agent, build_target):
             continue
         elif oi in exec_state["recognitions"]:
             # Object recognition already committed with confidence, or labeling
-            # feedback directly provided by user; max confidence
+            # feedback directly provided by user; max confidence; assign sufficiently
+            # high score such that it will always raise final score if included
             ci = exec_state["recognitions"][oi]
-            obs_lit = Literal("type_likely", wrap_args(oi, ci, dsc_bin + 1))
+            obs_lit = Literal("type_likely", wrap_args(oi, ci, dsc_bin))
             observations.add(obs_lit)
         else:
-            # List all predictions with values above threshold
+            # List all non-color predictions with values above threshold
             for ci, val in enumerate(obj["pred_cls"]):
                 if val < threshold: continue
+                if ci in color_concs: continue
 
                 # Normalize & discretize within [0,dsc_bin]; the more bins we
                 # use for discrete approximation, the more time it takes to
@@ -971,11 +1007,42 @@ def _goal_selection(agent, build_target):
                     nrm_val = (val-min_vals[ci]) / val_ranges[ci]
                     dsc_val = int(nrm_val * dsc_bin)
 
-                if dsc_val >= 5:
+                if dsc_val >= dsc_bin / 2:
                     # Setting another threshold by the discrete score
-                    lit_pred = "color_likely" if ci in color_concs else "type_likely"
-                    obs_lit = Literal(lit_pred, wrap_args(oi, ci, dsc_val))
+                    obs_lit = Literal("type_likely", wrap_args(oi, ci, dsc_val))
                     observations.add(obs_lit)
+
+        # List color predictions, assuming mutual exclusivity: i.e. include
+        # only the max-score prediction, only if the score is above threshold
+        likely_colors = [
+            (ci, val) for ci, val in enumerate(obj["pred_cls"])
+            if ci in color_concs and val > threshold
+        ]
+        if len(likely_colors) > 0:
+            max_col, max_val = max(likely_colors, key=lambda x: x[1])
+            if max_val >= threshold:
+                nrm_val = (max_val-min_vals[max_col]) / val_ranges[max_col]
+                dsc_val = int(nrm_val * dsc_bin)
+                obs_lit = Literal("color_likely", wrap_args(oi, max_col, dsc_val))
+                observations.add(obs_lit)
+
+        # for ci, val in enumerate(obj["pred_cls"]):
+        #     if val < threshold: continue
+        #     if ci not in color_concs: continue
+
+        #     # Normalize & discretize within [0,dsc_bin]; the more bins we
+        #     # use for discrete approximation, the more time it takes to
+        #     # solve the program
+        #     if val_ranges[ci] == 0:
+        #         dsc_val = 0         # Pessimistic
+        #     else:
+        #         nrm_val = (val-min_vals[ci]) / val_ranges[ci]
+        #         dsc_val = int(nrm_val * dsc_bin)
+
+        #     if dsc_val >= dsc_bin / 2:
+        #         # Setting another threshold by the discrete score
+        #         obs_lit = Literal("color_likely", wrap_args(oi, ci, dsc_val))
+        #         observations.add(obs_lit)
 
     # Compile assembly structure knowledge into ASP fact literals
     structures = agent.lt_mem.kb.assembly_structures
@@ -1036,7 +1103,16 @@ def _goal_selection(agent, build_target):
     have_conc = agent.lt_mem.lexicon.s2d[("vs", "have")][0]
     have_pred = f"{have_conc[0]}_{have_conc[1]}"
     for ei, ((ante, cons), _, _, knowledge_type) in enumerate(agent.lt_mem.kb.entries):
+        # Only include property rules
         if knowledge_type != "property": continue
+        # Skip if rule involves any unresolved neologisms
+        involved_preds = {
+            agent.lt_mem.lexicon.d2s[("pcls", int(lit.name.split("_")[1]))][0]
+            for lit in ante+cons if lit.name.startswith("pcls")
+        }
+        if any(pred in agent.lang.unresolved_neologisms for pred in involved_preds):
+            continue
+
         skolem_fn_terms = {
             a for lit in cons for a, _ in lit.args if isinstance(a, tuple)
         }
@@ -1050,13 +1126,15 @@ def _goal_selection(agent, build_target):
 
             # Build constraint rule string, using ASP's #count aggregate for checking
             # (non-)existence
-            constraint_str = f"violation_severity({ei},20) :- node_sa(N,{scope_conc}), "
+            constraint_str = f"exists_violation({ei}) :- node_sa(N,{scope_conc}), "
             constraint_str += "#count { O : component_obj(O,N)"
             for lit in cons:
                 if lit.name == have_pred: continue       # Already incorporated
                 conc_ind = int(lit.name.split("_")[1])
-                lit_pred = "color_likely" if conc_ind in color_concs else "type_likely"
-                constraint_str += f", {lit_pred}(O,{conc_ind},_)"
+                if conc_ind in color_concs:
+                    constraint_str += f", color_likely(O,{conc_ind},_)"
+                else:
+                    constraint_str += f", type_committed(O,{conc_ind})"
             constraint_str += " } = 0.\n"
 
         else:
@@ -1075,24 +1153,39 @@ def _goal_selection(agent, build_target):
             )
 
             # Build constraint rule string, appropriately translating predicates
-            constraint_body = []; pr_vars = []; pr_i = 0
+            constraint_body = []
             for lit in ante:
                 if lit.name == have_pred:
-                    trans_lit = f"component_obj({lit.args[1][0]},{lit.args[0][0]})"
+                    arg0 = lit.args[0][0]; arg1 = lit.args[1][0]
+                    trans_lits = f"component_obj({arg1},{arg0})"
+                    if lit.naf:
+                        trans_lits = f"not {trans_lits}"
                 else:
                     assert len(lit.args) == 1
+                    arg0 = lit.args[0][0]
                     conc_ind = int(lit.name.split("_")[1])
-                    if lit.args[0][0] == scope_var:
-                        trans_lit = f"node_sa({lit.args[0][0]},{scope_conc})"
+                    if arg0 == scope_var:
+                        trans_lits = f"node_sa({arg0},{scope_conc})"
                     else:
-                        pr_var = f"PR{pr_i}"
-                        pr_vars.append(pr_var)
-                        pr_i += 1
-                        lit_pred = "color_likely" if conc_ind in color_concs else "type_likely"
-                        trans_lit = f"{lit_pred}({lit.args[0][0]},{conc_ind},{pr_var})"
-                if lit.naf:
-                    trans_lit = f"not {trans_lit}"
-                constraint_body.append(trans_lit)
+                        if conc_ind in color_concs:
+                            trans_lits = f"color_likely({arg0},{conc_ind},_)"
+                        else:
+                            constraint_str += f", type_committed(O,{conc_ind})"
+                            trans_lits = f"type_committed({arg0},{conc_ind})"
+                    if lit.naf:
+                        trans_lits = f"not {trans_lits}"
+                constraint_body.append(trans_lits)
+            have_args = {
+                lit.args[1][0] for lit in ante
+                if lit.name == have_pred and not lit.naf
+            }
+            if len(have_args) > 0:
+                # By adding this, the forall-constraint is disabled for cases
+                # where all have-argument objects are already included in some
+                # subassembly; i.e., applied only when some component object
+                # is yet to be joined
+                lit_set = "; ".join(f"fresh_obj({a})" for a in have_args)
+                constraint_body.append(f"1{{ {lit_set} }}")
             for lit in cons:
                 conc_type, conc_ind = lit.name.split("_")
                 if conc_ind.isdigit(): conc_ind = int(conc_ind)
@@ -1100,37 +1193,35 @@ def _goal_selection(agent, build_target):
                     # Abstract pseudohypernym "color", skip
                     continue
 
-                # Probability score variables
-                pr_var = f"PR{pr_i}"
-                pr_i += 1
                 if len(lit.args) == 1:
                     # More general, unary specifications
-                    lit_pred = "color_likely" if conc_ind in color_concs else "type_likely"
-                    if lit.naf:
-                        trans_lit = f"{lit_pred}({lit.args[0][0]},{conc_ind},{pr_var})"
-                        pr_vars.append(pr_var)
+                    arg0 = lit.args[0][0]
+                    if conc_ind in color_concs:
+                        trans_lits = f"color_likely({arg0},{conc_ind},_)"
                     else:
-                        trans_lit = f"not {lit_pred}({lit.args[0][0]},{conc_ind},_)"
+                        trans_lits = f"type_committed({arg0},{conc_ind})"
+                    if not lit.naf:
+                        # Notice the sign; if positive, violated by not being (proven)
+                        # positive
+                        trans_lits = f"not {trans_lits}"
                 else:
                     # Handling color-related, binary specifications
                     assert len(lit.args) == 2
+                    arg0 = lit.args[0][0]; arg1 = lit.args[1][0]
                     if lit.name == have_pred:
                         (obj_var, _), (color_var, _) = lit.args
                         assert Literal(
                             f"pcls_{pseudohypernym_color_conc}", wrap_args(color_var)
                         ) in cons
-                        trans_lit = f"color_likely({obj_var},{color_var},{pr_var})"
-                        pr_vars.append(pr_var)
+                        trans_lits = f"color_likely({obj_var},{color_var},_)"
                     else:
                         assert lit.name == "sp_equal"
                         comp_op = "=" if lit.naf else "!="      # Notice flipped polarity
-                        trans_lit = f"{lit.args[0][0]} {comp_op} {lit.args[1][0]}"
-                constraint_body.append(trans_lit)
+                        trans_lits = f"{arg0} {comp_op} {arg1}"
+                constraint_body.append(trans_lits)
 
             constraint_body = ", ".join(constraint_body)
-            mean_score_term = "(" + "+".join(pr_vars) + f")/{len(pr_vars)}"
-            constraint_head = f"violation_severity({ei},{mean_score_term})"
-            constraint_str = f"{constraint_head} :- {constraint_body}.\n"
+            constraint_str = f"forall_violation({ei}) :- {constraint_body}.\n"
 
         kb_constraints.add(constraint_str)
 
@@ -1144,37 +1235,37 @@ def _goal_selection(agent, build_target):
         if len(sa_graph) == 1: continue
 
         # Adding each existing part along with committed recognition
-        for ext_node in sa_graph.nodes:
-            if ext_node in exec_state["recognitions"]:
+        for ext_obj in sa_graph.nodes:
+            if ext_obj in exec_state["recognitions"]:
                 # Atomic part type info available, for the part instance
                 # was recognized and picked up by agent
-                ext_conc = exec_state["recognitions"][ext_node]
-                ext_node_lit = Literal(
-                    "ext_node", wrap_args(ext_node, ext_conc)
+                ext_conc = exec_state["recognitions"][ext_obj]
+                ext_obj_lit = Literal(
+                    "ext_obj", wrap_args(ext_obj, ext_conc)
                 )
             else:
                 # Atomic part type info not available, most likely because
                 # the type of the atomic part is not recognized by agent;
                 # instead, the part instance is picked up during demo
                 # fragment by user
-                ext_node_lit = Literal("ext_node", wrap_args(ext_node))
-            ext_info.add(ext_node_lit)
+                ext_obj_lit = Literal("ext_obj", wrap_args(ext_obj))
+            ext_info.add(ext_obj_lit)
         # Adding each connection between existing parts
-        for ext_node1, ext_node2, cps in sa_graph.edges(data="cps"):
+        for ext_obj1, ext_obj2, cps in sa_graph.edges(data="cps"):
             if cps is not None:
                 # Contact point info available, list all info
-                ext_edge_lit = Literal(
-                    "ext_edge", wrap_args(
-                        ext_node1, ext_node2,
-                        f"p_{cps[ext_node1]}", f"p_{cps[ext_node2]}"
+                ext_conn_lit = Literal(
+                    "ext_conn", wrap_args(
+                        ext_obj1, ext_obj2,
+                        f"p_{cps[ext_obj1]}", f"p_{cps[ext_obj2]}"
                     )
                 )
             else:
                 # Contact point info not available, just include objects
-                ext_edge_lit = Literal(
-                    "ext_edge", wrap_args(ext_node1, ext_node2)
+                ext_conn_lit = Literal(
+                    "ext_conn", wrap_args(ext_obj1, ext_obj2)
                 )
-            ext_info.add(ext_edge_lit)
+            ext_info.add(ext_conn_lit)
 
     # Encode assembly target info into ASP fact literal
     target_lit = Literal("build_target", wrap_args(build_target[1]))
@@ -1206,7 +1297,7 @@ def _goal_selection(agent, build_target):
     # procedure supported from clingo 4, as built-in optimization seems to
     # not work for some reason...
     commit_ctl.ground([("base", []), ("facts", [])])
-    best_model = None; best_score = -21
+    best_model = None; best_score = -1000       # Low enough baseline
     while True:
         commit_ctl.ground([("check", [Number(best_score)])])
         commit_ctl.assign_external(
@@ -1216,7 +1307,7 @@ def _goal_selection(agent, build_target):
         model = None
         with commit_ctl.solve(yield_=True, async_=True) as solve_gen:
             solve_gen.resume()
-            model_ready = solve_gen.wait(2)   # Don't spend more than 2 secs
+            model_ready = solve_gen.wait(5)   # Don't spend more than 5 secs
             if model_ready:
                 m = solve_gen.model()
                 if m is not None:
@@ -1236,7 +1327,7 @@ def _goal_selection(agent, build_target):
             best_model = model
             best_score = next(
                 atm.arguments[0].number
-                for atm in best_model if atm.name=="avg_score"
+                for atm in best_model if atm.name=="final_score"
             )
 
     return best_model
@@ -1256,7 +1347,7 @@ def _tabulate_goal_selection_result(model):
     obj2node_map = {}
     connect_edges = {}; connection_graph = nx.Graph()
     node_unifications = defaultdict(set)
-    vis_scores = {}; hyp_rels = nx.DiGraph()
+    part_recognitions = defaultdict(set); hyp_rels = nx.DiGraph()
     for atm in model:
         match atm.name:
             case "node_atomic" | "node_sa_template":
@@ -1278,13 +1369,6 @@ def _tabulate_goal_selection_result(model):
                         node_rn
                     )
 
-            case "type_likely":
-                # Retrieving subtype likelihood stores from visual observations
-                obj_name = atm.arguments[0].name
-                part_conc = atm.arguments[1].number
-                vis_score = atm.arguments[2].number
-                vis_scores[(obj_name, part_conc)] = vis_score
-
             case "subtype_of":
                 # Retrieving supertype/subtype relations
                 subtype_conc = atm.arguments[0].number
@@ -1300,6 +1384,15 @@ def _tabulate_goal_selection_result(model):
                 obj_name = atm.arguments[0].name
                 node_rn = serialize_node(atm.arguments[1])
                 obj2node_map[obj_name] = node_rn
+
+            case "type_committed":
+                # Decision as to recognize each object as which (visually
+                # licensed) part type; all entailed supertypes/subtypes
+                # present, first collect them all and they will be filtered
+                # later
+                obj_name = atm.arguments[0].name
+                part_conc = atm.arguments[1].number
+                part_recognitions[obj_name].add(part_conc)
 
             case "to_connect":
                 # Derived assembly connection to make between nodes
@@ -1322,16 +1415,24 @@ def _tabulate_goal_selection_result(model):
     # explanation which part is required for building which subassembly
     # (that is direct parent in the hierarchy)
 
-    # Part types of each atomic nodes in the selected template
+    # Part type requirements of each atomic node in the selected template
     atomic_node_concs = {
         n: data["conc"]
         for n, data in assembly_hierarchy.nodes(data=True)
         if data["node_type"] == "atomic"
     }
 
+    # Leave only the most specific supertypes
+    part_recognitions = {
+        obj: list(all_concs)[0] if len(all_concs) == 1 else next(
+            c for c in all_concs if hyp_rels.out_degree[c] == 0
+        )
+        for obj, all_concs in part_recognitions.items()
+    }
+
     tabulated_results = (
         assembly_hierarchy, obj2node_map, connect_edges, connection_graph,
-        node_unifications, atomic_node_concs, vis_scores, hyp_rels
+        node_unifications, atomic_node_concs, part_recognitions, hyp_rels
     )
     return tabulated_results
 
@@ -2268,8 +2369,8 @@ class _PhysicalAssemblyPropagator:
         return None
 
 def _linearize_join_tree(
-    join_tree, exec_state, connection_graph, contacts,
-    atomic_node_concs, node_unifications, obj2node_map, action_inds
+    join_tree, exec_state, connection_graph, contacts, atomic_node_concs,
+    node_unifications, obj2node_map, certified_pool, action_inds
 ):
     """
     Helper method factored out for finding the best linearization of the
@@ -2295,11 +2396,11 @@ def _linearize_join_tree(
         return action_sequence, {}
 
     # Collect parts by type to allow flexible switching of object assignments
-    part_type_pool = defaultdict(set)
+    part_type_pool = defaultdict(set, certified_pool)
     for obj, n in obj2node_map.items():
         part_type_pool[atomic_node_concs[n]].add(obj)
 
-    # First stipulate any unified node-to-object mappings
+    # Stipulate any unified node-to-object mappings
     for sa, sa_graph in exec_state["connection_graphs"].items():
         if len(sa_graph) == 1: continue     # Dismiss singletons
         for obj in sa_graph.nodes:
@@ -3333,12 +3434,14 @@ def handle_action_effect(agent, effect, actor):
             # poses defined within. Without the assumption, we'd have to
             # request join demonstrations for every single pair of (part
             # subtype, contact point).
-            supertype_conc = next(
+            supertype_conc = [
                 entry[0][1][0].name
-                for ei in agent.lt_mem.kb.entries_by_pred[conc_str]
+                for ei in sorted(agent.lt_mem.kb.entries_by_pred[conc_str])
                 if (entry := agent.lt_mem.kb.entries[ei])[3] == "taxonomy" and \
                     entry[0][0][0].name == conc_str
-            )
+            ][-1]
+                # Premise: under current design, the last relevant taxonomy
+                # holds the supertype to follow for copying over the contacts
             all_subtype_concs = {
                 entry[0][0][0].name
                 for ei in agent.lt_mem.kb.entries_by_pred[supertype_conc]

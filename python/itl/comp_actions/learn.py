@@ -40,9 +40,15 @@ def identify_mismatch(agent, statement):
     xb_updated = False          # Return value
 
     gq, bvars, ante, cons = statement
+    ex_mem = agent.lt_mem.exemplars         # Shortcut var
+
+    color_concs = {
+        agent.lt_mem.lexicon.s2d[("a", col)][0][1]
+        for col in ["red", "green", "blue", "white", "gold"]
+    }
 
     # The code snippet commented out below is the legacy from the first and
-    # second chapter where inference of whole from parts played important roles.
+    # second chapters where inference of whole from parts played important roles.
     # However, we don't do any part-based visual reference in this chapter,
     # and it is pointless to undergo all those belief propagation, region graph
     # querying kind of deals only to get to the same conclusion obtainable from
@@ -119,7 +125,6 @@ def identify_mismatch(agent, statement):
                     # Check if this exemplar info is already present in XB
                     # for this particular concept-polarity descriptor and
                     # thus redundant
-                    ex_mem = agent.lt_mem.exemplars
                     redundant = False
                     match pol:
                         case "pos":
@@ -133,6 +138,21 @@ def identify_mismatch(agent, statement):
                         continue
                     else:
                         pointer = ((conc_type, conc_ind, pol), (False, ex_ind))
+
+            if pol == "pos" and len(ex_mem.object_2d_pos[conc_type][conc_ind]) == 0:
+                # Whenever a neologism is resolved by means of exemplification,
+                # need to obtain and register its 3D structure. Add a series of
+                # 3D inspection actions to the agenda deque, with the labeled
+                # instance as inspection target.
+                operating = "plan_goal" in agent.planner.execution_state
+                inspection_plan = _inspection_plan(agent, ex_obj, (conc_type, conc_ind))
+                agent.planner.agenda = deque(inspection_plan) + agent.planner.agenda
+                if operating:
+                    # Adding a layer of wait-for-user-reaction buffer; exactly one
+                    # is needed
+                    if ("execute_command", (None, None)) in agent.planner.agenda:
+                        agent.planner.agenda.remove(("execute_command", (None, None)))
+                    agent.planner.agenda.appendleft(("execute_command", (None, None)))
 
             added_xi = _add_scene_and_exemplar_2d(
                 scene_id, scene_img, pointer,
@@ -289,16 +309,9 @@ def handle_neologism(agent, dialogue_state):
     }
     if len(neologisms) == 0: return False       # Nothing to do
 
-    exec_state = agent.planner.execution_state      # Shortcut var
-
     # Return value, boolean flag whether there has been any change to the
     # exemplar base
     xb_updated = False
-
-    get_conc = lambda s: agent.lt_mem.lexicon.s2d[("va", s)][0][1]
-    pick_up_actions = [get_conc("pick_up_left"), get_conc("pick_up_right")]
-    inspect_actions = [get_conc("inspect_left"), get_conc("inspect_right")]
-    drop_actions = [get_conc("drop_left"), get_conc("drop_right")]
 
     resolved = set()
     inspection_plans_concat = []; taxonomy_queries = []
@@ -400,33 +413,8 @@ def handle_neologism(agent, dialogue_state):
             agent.vision.scene[ex_obj]["exemplar_ind"] = added_xi
         xb_updated |= True
 
-        # Also set up inspection plan for extracting 3D structure
-        # of the new subtype instance
-        if ex_obj == exec_state["manipulator_states"][0][0]:
-            inspection_plan = [
-                (inspect_actions[0], (ex_obj, i, novel_concept))
-                for i in range(24+1)
-            ]
-        elif ex_obj == exec_state["manipulator_states"][1][0]:
-            inspection_plan = [
-                (inspect_actions[1], (ex_obj, i, novel_concept))
-                for i in range(24+1)
-            ]
-        else:
-            for side, mnp_state in enumerate(exec_state["manipulator_states"]):
-                if mnp_state[0] is None:
-                    inspection_plan = [(pick_up_actions[side], (ex_obj,))] + [
-                        (inspect_actions[side], (ex_obj, i, novel_concept))
-                        for i in range(24+1)
-                    ] + [(drop_actions[side], ())]
-                    break
-            else:
-                # At least one manipulator should be free by design...
-                raise ValueError
-        inspection_plans_concat += [
-            ("execute_command", (action_type, action_params))
-            for action_type, action_params in inspection_plan
-        ]
+        inspection_plan = _inspection_plan(agent, ex_obj, novel_concept)
+        inspection_plans_concat += inspection_plan
 
         # In our domain... Any novel part concept is a subtype of some
         # part supertype. The neologism currently being resolved by
@@ -440,7 +428,7 @@ def handle_neologism(agent, dialogue_state):
         if len(taxonomy_entries) == 0:
             # NL surface form and corresponding logical form
             surface_form = f"What kind of part is {name}?"
-            gq = ("?",); bvars = ("x1",); ante = []
+            gq = ("Q",); bvars = ("x1",); ante = []
             cons = [
                 ("sp", "subtype", ["x0", "x1"]),
                 ("n", name, ["x0"])
@@ -493,20 +481,6 @@ def resolve_neologisms(agent):
     defined either extensionally (via exemplars) or intensionally (via relational
     definitions).
     """
-    # Needed for potential registration of 3D structure inspection actions
-    resolved_record = agent.lang.dialogue.export_resolved_record()
-    exec_state = agent.planner.execution_state
-
-    get_conc = lambda s: agent.lt_mem.lexicon.s2d[("va", s)][0][1]
-    pick_up_actions = [get_conc("pick_up_left"), get_conc("pick_up_right")]
-    inspect_actions = [get_conc("inspect_left"), get_conc("inspect_right")]
-    drop_actions = [get_conc("drop_left"), get_conc("drop_right")]
-
-    color_concs = {
-        agent.lt_mem.lexicon.s2d[("a", col)][0][1]
-        for col in ["red", "green", "blue", "white", "gold"]
-    }
-
     while True:
         resolved = set()
         for sym, info in agent.lang.unresolved_neologisms.items():
@@ -518,54 +492,20 @@ def resolve_neologisms(agent):
             pos_exs = agent.lt_mem.exemplars.object_2d_pos[den[0]].get(den[1], set())
             if len(pos_exs) > 0:
                 resolved.add(sym)
+                continue
 
-                # Whenever a neologism is resolved by means of exemplification,
-                # need to obtain and register its 3D structure. Add a series of
-                # 3D inspection actions to the agenda deque, with the labeled
-                # instance as inspection target.
-                for spk, turn_clauses in resolved_record:
-                    if spk != "Teacher": continue
-                    for ((_, _, ante, cons), _, clause_info) in turn_clauses:
-                        if clause_info["mood"] != ".": continue
-                        if not (len(ante) == 0 and len(cons) > 0): continue
-                        for lit in cons:
-                            if lit.name != den_str: continue
-                            if lit.args[0][0] not in agent.vision.scene: continue
-                            if lit.naf: continue
-                            conc = int(lit.name.strip("pcls_"))
-                            if conc in color_concs: continue
-                            labeling_lit = lit
-                            break
-                inspection_target = labeling_lit.args[0][0]
-
-                if inspection_target == exec_state["manipulator_states"][0][0]:
-                    inspection_plan = [
-                        (inspect_actions[0], (inspection_target, i, den))
-                        for i in range(24+1)
-                    ]
-                elif inspection_target == exec_state["manipulator_states"][1][0]:
-                    inspection_plan = [
-                        (inspect_actions[1], (inspection_target, i, den))
-                        for i in range(24+1)
-                    ]
-                else:
-                    for side, mnp_state in enumerate(exec_state["manipulator_states"]):
-                        if mnp_state[0] is None:
-                            inspection_plan = [
-                                (pick_up_actions[side], (inspection_target,))
-                            ] + [
-                                (inspect_actions[side], (inspection_target, i, den))
-                                for i in range(24+1)
-                            ] + [(drop_actions[side], ())]
-                            break
-                    else:
-                        # At least one manipulator should be free by design...
-                        raise ValueError
-                inspection_plan = [
-                    ("execute_command", (action_type, action_params))
-                    for action_type, action_params in inspection_plan
-                ]
-                agent.planner.agenda = deque(inspection_plan) + agent.planner.agenda
+            # See if there is any taxonomy rule whose consequent is the denoted
+            # concept. If so, some subtype is provided, consider the neologism
+            # as resolved.
+            subtype_provided = False
+            for ei in agent.lt_mem.kb.entries_by_pred[den_str]:
+                (ante, cons), _, _, knowledge_type = agent.lt_mem.kb.entries[ei]
+                if knowledge_type != "taxonomy": continue
+                if cons[0].name == den_str:
+                    subtype_provided = True
+                    break
+            if subtype_provided:
+                resolved.add(sym)
                 continue
 
             if info["dependency"] is None:
@@ -1353,7 +1293,7 @@ def posthoc_episode_analysis(agent):
     best_model = _goal_selection(agent, build_target)
     tabulated_results = _tabulate_goal_selection_result(best_model)
     connection_graph, node_unifications = tabulated_results[3:5]
-    atomic_node_concs, _, hyp_rels = tabulated_results[5:]
+    atomic_node_concs, part_recognitions, hyp_rels = tabulated_results[5:]
 
     # As done in `.interact._plan_assembly` procedure, we could try to further
     # narrow down possible unification choices for the unbounded nodes
@@ -1446,15 +1386,24 @@ def posthoc_episode_analysis(agent):
         ): continue
 
         # Need exact subtype recognition for getting probability scores,
+        # fetch the recognized subtypes if compatible with scenario, otherwise
         # select best ones according to specified supertypes
-        scn_subtype = {
-            oi: max([
-                subtype_conc for subtype_conc in nx.descendants(hyp_rels, conc)
-                if len(hyp_rels.out_edges(subtype_conc)) == 0       # Most specific ones only
-            ], key=lambda c: agent.vision.scene[oi]["pred_cls"][c])
-                if conc in hyp_rels else conc
-            for oi, conc in scn.items()
-        }
+        scn_subtype = {}
+        for oi, conc in scn.items():
+            if conc in hyp_rels:
+                if oi in part_recognitions and part_recognitions[oi] in hyp_rels and \
+                    nx.has_path(hyp_rels, conc, part_recognitions[oi]):
+                    # If committed type compatible, use that one
+                    scn_subtype[oi] = conc
+                else:
+                    # Select the best one by visual prediction score
+                    scn_subtype[oi] = max([
+                        subtype_conc for subtype_conc in nx.descendants(hyp_rels, conc)
+                        if len(hyp_rels.out_edges(subtype_conc)) == 0       # Most specific ones only
+                    ], key=lambda c: agent.vision.scene[oi]["pred_cls"][c])
+            else:
+                # Singleton, sole choice
+                scn_subtype[oi] = conc
         prob_score = sum(
             agent.vision.scene[oi]["pred_cls"][c] for oi, c in scn_subtype.items()
         )
@@ -1464,6 +1413,7 @@ def posthoc_episode_analysis(agent):
     final_recognitions = sorted(
         scenarios_scored, reverse=True, key=lambda x: x[1]
     )[0][0]
+    final_recognitions.update(labeling_map)     # Prioritize user labeling
 
     pr_thres = 0.7                  # Threshold for adding exemplars
     exemplars = {}; pointers = defaultdict(set)
@@ -1511,6 +1461,33 @@ def posthoc_episode_analysis(agent):
                 }
                 pointers[("pcls", label1, "neg")].add(obj1)
 
+    # Let's kickstart any new concept's binary classifier by adding instances
+    # with different supertypes as negative exemplars here, only if its storage
+    # of negative exemplars is empty (or very small)
+    empty_neg_concs = {
+        c for c, neg_exs in agent.lt_mem.exemplars.object_2d_neg["pcls"].items()
+        if len(neg_exs) < 5
+    }
+    if len(empty_neg_concs) > 0:
+        final_supertypes = {
+            obj: (nx.ancestors(hyp_rels, conc) | {conc}) if conc in hyp_rels else {conc}
+            for obj, conc in final_recognitions.items()
+        }
+        for conc in empty_neg_concs:
+            conc_supertypes = nx.ancestors(hyp_rels, conc) | {conc} \
+                if conc in hyp_rels else {conc}
+
+            for obj, supertypes in final_supertypes.items():
+                # Don't add if there's any supertype overlap; this is a very
+                # conservative measure, but this will do for kickstarting
+                if len(supertypes & conc_supertypes) > 0:
+                    continue
+                exemplars[obj] = {
+                    "mask": agent.vision.scene[obj]["pred_mask"],
+                    "f_vec": agent.vision.scene[obj]["vis_emb"]
+                }
+                pointers[("pcls", conc, "neg")].add(obj)
+
     # Running below only when we have exemplars to add
     if len(pointers) > 0:
         if all(obj["exemplar_ind"] is None for obj in agent.vision.scene.values()):
@@ -1531,7 +1508,7 @@ def posthoc_episode_analysis(agent):
             scene_img = None
         # Reformat `exemplars` and `pointers`
         new_exs_ordering = [
-            ex_obj for ex_obj in exemplars
+            oi for oi in exemplars
             if agent.vision.scene[oi]["exemplar_ind"] is None
         ]
         exemplars = [
@@ -1594,3 +1571,45 @@ def _add_scene_and_exemplar_2d(scene_id, scene_img, pointer, mask, f_vec, ex_mem
     ex_mem.update_bin_clfs_2d(updated_concs)
 
     return added_inds[0] if is_new_obj else None
+
+def _inspection_plan(agent, inspection_target, inspection_conc):
+    """
+    Helper method factored out for preparing a string of actions for inspecting
+    3D structure of the target object
+    """
+    exec_state = agent.planner.execution_state
+
+    get_conc = lambda s: agent.lt_mem.lexicon.s2d[("va", s)][0][1]
+    pick_up_actions = [get_conc("pick_up_left"), get_conc("pick_up_right")]
+    inspect_actions = [get_conc("inspect_left"), get_conc("inspect_right")]
+    drop_actions = [get_conc("drop_left"), get_conc("drop_right")]
+
+    if inspection_target == exec_state["manipulator_states"][0][0]:
+        inspection_plan = [
+            (inspect_actions[0], (inspection_target, i, inspection_conc))
+            for i in range(24+1)
+        ]
+    elif inspection_target == exec_state["manipulator_states"][1][0]:
+        inspection_plan = [
+            (inspect_actions[1], (inspection_target, i, inspection_conc))
+            for i in range(24+1)
+        ]
+    else:
+        for side, mnp_state in enumerate(exec_state["manipulator_states"]):
+            if mnp_state[0] is None:
+                inspection_plan = [
+                    (pick_up_actions[side], (inspection_target,))
+                ] + [
+                    (inspect_actions[side], (inspection_target, i, inspection_conc))
+                    for i in range(24+1)
+                ] + [(drop_actions[side], ())]
+                break
+        else:
+            # At least one manipulator should be free by design...
+            raise ValueError
+
+    inspection_plan = [
+        ("execute_command", (action_type, action_params))
+        for action_type, action_params in inspection_plan
+    ]
+    return inspection_plan

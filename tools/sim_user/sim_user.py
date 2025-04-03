@@ -305,7 +305,7 @@ class SimulatedTeacher:
                     matching_insts = [
                         ((supertype, inst_id), f"{inst_id[0]}_{supertype}_{inst_id[1]}")
                         for (supertype, inst_id), info in sampled_parts.items()
-                        if reported_neologism == info["type"]
+                        if reported_neologism == info["type"] and inst_id[0] == "t"
                     ]
                     if len(matching_insts) > 0:
                         # Neologism is the most specific part subtype
@@ -324,6 +324,7 @@ class SimulatedTeacher:
                                 "pointing": {}
                             }),
                         ]
+                        ep_st["forthcoming_inspections"].add(reported_neologism)
                     else:
                         # Neologism is some supertype, provide all direct subtypes
                         for _, subtype in self.domain_knowledge["taxonomy"].out_edges(reported_neologism):
@@ -576,7 +577,7 @@ class SimulatedTeacher:
                             ep_metrics["num_invalid_pickup"] += 1
                             pair_invalid = True
 
-                    # If pair is physically valid yet distractor part instance
+                    # If pair is not physically invalid yet distractor part instance
                     # was used, needs interruption as well
                     distracted = False
                     if obj_picked_up.startswith("d_") and not pair_invalid:
@@ -874,6 +875,7 @@ class SimulatedTeacher:
                     else:
                         return f"/*/{handle}"
 
+                intended_join = set()
                 for crange, ref_handle in dem_refs.items():
                     ref_inst = re.findall(r"([td])_(.*)_(\d+)$", ref_handle)[0]
                     ref_inst = (ref_inst[1], (ref_inst[0], int(ref_inst[2])))
@@ -882,6 +884,7 @@ class SimulatedTeacher:
                         self.domain_knowledge["taxonomy"].in_edges(reported_subtype)
                     ), (reported_subtype, None))[0]
                     ref_subtype = sampled_parts[ref_inst]["type"]
+                    intended_join.add(reported_subtype)
 
                     if reported_subtype != ref_subtype:
                         # For incorrect groundings results, provide appropriate corrective
@@ -962,6 +965,46 @@ class SimulatedTeacher:
                                 response.append((
                                     "generate", { "utterance": constraint, "pointing": {} }
                                 ))
+
+                # Some constraints are better manually detected and handled here, (possibly
+                # duplicate handling, but not a big problem)
+                if self.player_type == "full":
+                    subtypes_used = [
+                        re.findall(r"([td])_(.*)_(\d+)$", obj)[0]
+                        for sa_graph in subassems.values() for obj in sa_graph
+                        if len(sa_graph) > 1
+                    ]
+                    subtypes_used = {
+                        sampled_parts[(inst_id[1], (inst_id[0], int(inst_id[2])))]["type"]
+                        for inst_id in subtypes_used
+                    }
+                    if {"normal_wheel", "large_wheel"} <= intended_join | subtypes_used:
+                        response.append((
+                            "generate", {
+                                "utterance": "A truck must not have a normal_wheel and a large_wheel.",
+                                "pointing": {}
+                            }
+                        ))
+                    if "large_wheel" in intended_join:
+                        if any(
+                            re.match(r"normal_.*_fender", subtype) for subtype in intended_join
+                        ):
+                            response.append((
+                                "generate", {
+                                    "utterance": "A fw_unit must not have a normal_fender and a large_wheel.",
+                                    "pointing": {}
+                                }
+                            ))
+                    if "normal_wheel" in intended_join:
+                        if any(
+                            re.match(r"large_.*_fender", subtype) for subtype in intended_join
+                        ):
+                            response.append((
+                                "generate", {
+                                    "utterance": "A fw_unit must not have a large_fender and a normal_wheel.",
+                                    "pointing": {}
+                                }
+                            ))
 
                 # Finally tell the agent to resume its task execution (based on
                 # the modified knowledge)

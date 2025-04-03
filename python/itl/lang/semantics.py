@@ -50,14 +50,14 @@ class SemanticParser:
                 comm_target = re.findall(r"Build a (.*)\.$", utt)[0]
 
                 clauses = {
-                    "e0": (
+                    "e0": [
                         (), (), [],
                         [
                             ("va", "build", ["e0", "x0", "x1"]),
                             ("sp", "pronoun2", ["x0"]),
                             ("n", comm_target, ["x1"])
                         ]
-                    )
+                    ]
                 }
                 referents = {
                     "e0": { "mood": "!" },
@@ -72,21 +72,21 @@ class SemanticParser:
                 demo_target = re.findall(r"I will demonstrate how to build a (.*)\.$", utt)[0]
 
                 clauses = {
-                    "e0": (
+                    "e0": [
                         (), (), [],
                         [
                             ("sp", "demonstrate", ["e0", "x0", "x1"]),
                             ("sp", "pronoun1", ["x0"]),
                             ("sp", "manner", ["x1", "e1"])
                         ]
-                    ),
-                    "e1": (
+                    ],
+                    "e1": [
                         (), (), [],
                         [
                             ("va", "build", ["e1", "x2", "x3"]),
                             ("n", demo_target, ["x3"])
                         ]
-                    )
+                    ]
                 }
                 referents = {
                     "e0": { "mood": ".", "tense": "future" },
@@ -102,17 +102,17 @@ class SemanticParser:
                 # Signposting that user will be demonstrating a single join
                 # that is possible from current progress
                 clauses = {
-                    "e0": (
+                    "e0": [
                         (), (), [],
                         [
                             ("sp", "demonstrate", ["e0", "x0", "e1"]),
                             ("sp", "pronoun1", ["x0"])
                         ]
-                    ),
-                    "e1": (
+                    ],
+                    "e1": [
                         (), (), [],
                         [("va", "join", ["e1", "x1", "x2"])]
-                    )
+                    ]
                 }
                 referents = {
                     "e0": { "mood": ".", "tense": "future" },
@@ -137,14 +137,14 @@ class SemanticParser:
                 act_params = act_params.split(",")
 
                 clauses = {
-                    "e0": (
+                    "e0": [
                         (), (), [],
                         [
                             ("va", act_type, ["e0", "x0"] + [
                                 f"x{i+1}" for i in range(len(act_params))
                             ])
                         ]
-                    )
+                    ]
                 }
                 referents = {
                     "e0": { "mood": "." },
@@ -174,7 +174,7 @@ class SemanticParser:
 
                 pol = "~" if pol == "not " else ""
                 cons = [("n", f"{pol}{labeled_target}", ["x0"])]
-                clauses = { "e0": ((), (), [], cons) }
+                clauses = { "e0": [(), (), [], cons] }
                 referents = {
                     "e0": { "mood": "." },
                     "x0": { "source_evt": "e0", "dem_ref": (0, 4) }
@@ -190,9 +190,9 @@ class SemanticParser:
                 color_negatives = {"red", "green", "blue", "gold", "white"} - {color_label}
 
                 clauses = {
-                    "e0": ((), (), [], [("a", color_label, ["x0"])])
+                    "e0": [(), (), [], [("a", color_label, ["x0"])]]
                 } | {
-                    f"e{i+1}": ((), (), [("a", col, [f"x{i+1}"])], [])
+                    f"e{i+1}": [(), (), [], [("a", "~" + col, [f"x{i+1}"])]]
                     for i, col in enumerate(color_negatives)
                 }       # Single positive label & inferred negative labels
                 referents = {}
@@ -220,14 +220,14 @@ class SemanticParser:
                     target = target[0]
 
                     clauses = {
-                        "e0": (
+                        "e0": [
                             (), (), [],
                             [
                                 ("va", "pick_up", ["e0", "x0", "x1"]),
                                 ("sp", "pronoun2", ["x0"]),
                                 ("n", target, ["x1"])
                             ]
-                        )
+                        ]
                     }
                     referents = {
                         "e0": { "mood": "." },
@@ -253,8 +253,8 @@ class SemanticParser:
                 _, target_l, _, target_r = \
                     re.findall(r"Join (a|the) (.*) and (a|the) (.*)\.$", utt)[0]
 
-                clauses = clauses = {
-                    "e0": (
+                clauses = {
+                    "e0": [
                         (), (), [],
                         [
                             ("va", "join", ["e0", "x0", "x1", "x2"]),
@@ -262,7 +262,7 @@ class SemanticParser:
                             ("n", target_l, ["x1"]),
                             ("n", target_r, ["x2"])
                         ]
-                    )
+                    ]
                 }
                 referents = {
                     "e0": { "mood": "." },
@@ -280,14 +280,14 @@ class SemanticParser:
                     re.findall(r"(.*) is a type of (.*)\.$", utt)[0]
 
                 clauses = {
-                    "e0": (
+                    "e0": [
                         (), (), [],
                         [
                             ("sp", "subtype", ["x0", "x1"]),
                             ("n", part_subtype, ["x0"]),
                             ("n", part_supertype, ["x1"])
                         ]
-                    )
+                    ]
                 }
                 referents = {
                     "e0": { "mood": "." },
@@ -300,18 +300,18 @@ class SemanticParser:
                 # Asking the agent's intention (which led to a questionable
                 # action from the user's viewpoint)
                 clauses = {
-                    "e0": (
+                    "e0": [
                         (), (), [],
                         [
                             ("sp", "intend", ["e0", "x0", "e1"]),
                             ("sp", "pronoun2", ["x0"])
                         ]
-                    ),
-                    "e1": (
+                    ],
+                    "e1": [
                         (), (), [], [
                             ("va", "join", ["e1", "x1", "x2"])
                         ]
-                    )
+                    ]
                 }
                 referents = {
                     "e0": { "mood": "?", "tense": "past" },
@@ -341,16 +341,16 @@ class SemanticParser:
                 # provided property must be observed when building an instance
                 # of the subtype (e.g., a firetruck must include a ladder)
                 clauses = {
-                    "e0": (
+                    "e0": [
                         (), (), [],
                         [
                             ("sp", "subtype", ["x0", "x1"]),
                             ("n", truck_subtype, ["x0"]),
                             ("n", "truck", ["x1"])
                         ]
-                    )
+                    ]
                 } | {
-                    f"e{i+1}": (
+                    f"e{i+1}": [
                         ("forall", "exists",),
                         (f"x{2+2*i}", f"x{2+2*i+1}"),
                         [("n", truck_subtype, [f"x{2+2*i}"])],
@@ -358,7 +358,7 @@ class SemanticParser:
                             ("vs", "have", [f"x{2+2*i}", f"x{2+2*i+1}"]),
                             ("n", subtype, [f"x{2+2*i+1}"])
                         ]
-                    )
+                    ]
                     for i, subtype in enumerate(part_subtypes)
                 }
                 referents = {
@@ -394,14 +394,14 @@ class SemanticParser:
                         ([("a", dt_descriptor[0], ["x2"])] if len(dt_descriptor) > 1 else [])
 
                 clauses = {
-                    "e0": (
+                    "e0": [
                         (), (), [],
                         [
                             ("sp", "pronoun2", ["x0"]),
                             ("va", "pick_up", ["e0", "x0", "x1"]),
                             ("va", "~pick_up", ["e0", "x0", "x2"]),
                         ] + gt_descriptor + dt_descriptor
-                    )
+                    ]
                 }
                 referents = {
                     "e0": { "mood": "." },
@@ -449,12 +449,12 @@ class SemanticParser:
                     ante.append(("n", part_tuple[0], ["x1"]))
                     if det == "a ":
                         # Noun, likely part subtype
-                        cons = [("n", pred, ["x1"])]
+                        cons = [("n", f"{pol}{pred}", ["x1"])]
                     else:
                         # Adjective, likely color subtype
-                        cons = [("a", pred, ["x1"])]
+                        cons = [("a", f"{pol}{pred}", ["x1"])]
 
-                clauses = { "e0": (gq, bvars, ante, cons) }
+                clauses = { "e0": [gq, bvars, ante, cons] }
                 referents = {
                     "e0": { "mood": "." },
                     "x0": { "source_evt": "e0" }
@@ -474,50 +474,54 @@ class SemanticParser:
                 # subassembly concept
                 scope_sa, pol, constraint = \
                     re.findall(r"A (.*) must (not )?(.*)\.$", utt)[0]
-                optional_color, subtype = re.findall(r"have a (.* )?(.*)$", constraint)[0]
-                if optional_color != "":
-                    optional_color = optional_color.strip()
-                else:
-                    optional_color = None
+                constraint = re.findall(r"have (.*)$", constraint)[0]
+                constraint = [cnst_str.strip("a ") for cnst_str in constraint.split(" and ")]
+                constraint = [re.findall(r"(.* )?(.*)", cnst_str)[0] for cnst_str in constraint]
+                constraint = [
+                    (optional_color.strip() if optional_color != "" else None, subtype)
+                    for optional_color, subtype in constraint
+                ]
 
                 if pol == "":
                     # Existential quantified constraint, namely that the scope
                     # subassembly must have an instance of something
                     clauses = {
-                        "e0": (
-                            ("forall", "exists"), ("x0", "x1"),
-                            [("n", scope_sa, ["x0"])],
-                            [
-                                ("vs", "have", ["x0", "x1"]),
-                                ("n", subtype, ["x1"])
-                            ]
-                        )
+                        "e0": [
+                            ("forall",), ("x0",), [("n", scope_sa, ["x0"])], []
+                        ]
                     }
-                    if optional_color is not None:
-                        clauses["e0"][3].append(("a", optional_color, ["x1"]))
+                    for i, (optional_color, subtype) in enumerate(constraint):
+                        rf = f"x{i+1}"
+                        clauses["e0"][0] += ("exists",)
+                        clauses["e0"][1] += (rf,)
+                        clauses["e0"][3].append(("vs", "have", ["x0", rf]))
+                        clauses["e0"][3].append(("n", subtype, [rf]))
+                        if optional_color is not None:
+                            clauses["e0"][3].append(("a", optional_color, [rf]))
                 else:
                     # Universally quantified constraint, namely that the scope
                     # subassembly must not have an instance of something
                     assert pol == "not "
                     clauses = {
-                        "e0": (
-                            ("forall", "forall"), ("x0", "x1"),
-                            [
-                                ("n", scope_sa, ["x0"]),
-                                ("vs", "have", ["x0", "x1"]),
-                                ("n", subtype, ["x1"])
-                            ],
-                            []
-                        )
+                        "e0": [
+                            ("forall",), ("x0",), [("n", scope_sa, ["x0"])], []
+                        ]
                     }
-                    if optional_color is not None:
-                        clauses["e0"][2].append(("a", optional_color, ["x1"]))
+                    for i, (optional_color, subtype) in enumerate(constraint):
+                        rf = f"x{i+1}"
+                        clauses["e0"][0] += ("forall",)
+                        clauses["e0"][1] += (rf,)
+                        clauses["e0"][2].append(("vs", "have", ["x0", rf]))
+                        clauses["e0"][2].append(("n", subtype, [rf]))
+                        if optional_color is not None:
+                            clauses["e0"][2].append(("a", optional_color, [rf]))
 
                 referents = {
                     "e0": { "mood": "." },
-                    "x0": { "source_evt": "e0" },
-                    "x1": { "source_evt": "e0" }
+                    "x0": { "source_evt": "e0" }
                 }
+                for i in range(len(constraint)):
+                    referents[f"x{i+1}"] = { "source_evt": "e0" }
                 source = { "e0": utt }
 
             else:
