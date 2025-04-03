@@ -234,7 +234,7 @@ public class DialogueAgent : Agent
                 // Set agent (x,z)-translation
                 transform.position = new Vector3(0f, 0.85f, -0.3f);
                 // Set agent camera (x,y)-rotation
-                _cameraSensor.Camera.transform.eulerAngles = new Vector3(55f, 0f, 0f);
+                _cameraSensor.Camera.transform.eulerAngles = new Vector3(60f, 0f, 0f);
 
                 // Turn off request flag
                 calibrationImageRequest = -1;
@@ -652,15 +652,15 @@ public class DialogueAgent : Agent
         {
             // Assuming the tabletop is pretty much clear now...
             xPos = 0f;
-            zPos = _mainPartitionPosition.z + 0.12f;
+            zPos = _mainPartitionPosition.z + 0.14f;
         }
         else
         {
             xPos = _mainPartitionPosition.x + Random.Range(-0.15f, 0.15f);
-            zPos = _mainPartitionPosition.z + Random.Range(0f, 0.12f);
+            zPos = _mainPartitionPosition.z + Random.Range(0f, 0.14f);
         }
         var volume = GetBoundingVolume(heldObj);
-        var yPos = _mainPartitionPosition.y + volume.extents.y + 0.06f;
+        var yPos = _mainPartitionPosition.y + volume.extents.y + 0.08f;
         heldObj.transform.parent = null;
         heldObj.transform.position = new Vector3(xPos, yPos, zPos);
 
