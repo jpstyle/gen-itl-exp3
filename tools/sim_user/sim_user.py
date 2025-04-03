@@ -104,13 +104,15 @@ class SimulatedTeacher:
             "episode_state": {
                 "left": None, "right": None, "subassemblies": {},
                 "joins_remaining": {frozenset(join) for join in VALID_JOINS},
-                "aliases": {}, "instructed_hyp_rels": set()
+                "aliases": {}, "instructed_hyp_rels": set(),
+                "forthcoming_inspections": set()
             },
             "metrics": {
                 "num_search_failure": 0,
                 "num_invalid_pickup": 0,
                 "num_invalid_join": 0,
                 "num_planning_forfeiture": 0,
+                "num_distractor_pickup": 0,
                 "episode_discarded": False
             } if target_task != "inject_color" else {}
         }
@@ -119,11 +121,12 @@ class SimulatedTeacher:
         # These constraints are always included in order to account for physically
         # infeasible part combinations...
         constraints = [
-            ("forall", "truck", (["spares_chassis_center", "dumper"], None), False),
-            ("forall", "truck", (["spares_chassis_center", "rocket_launcher"], None), False),
-            ("forall", "truck", (["staircase_chassis_center", "dumper"], None), False)
+            ("forall", "truck", (["spares_chassis_center", "dumper"], None), None, False),
+            ("forall", "truck", (["spares_chassis_center", "rocket_launcher"], None), None, False),
+            ("forall", "truck", (["staircase_chassis_center", "dumper"], None), None, False)
         ]
 
+        random.seed(self.next_seed)
         if target_task == "build_truck_supertype":
             # More 'basic' experiment suite invested on learning part types, valid
             # structures of trucks (& subassemblies) and contact pairs & points
@@ -144,10 +147,13 @@ class SimulatedTeacher:
             # structure can be built; no distractors added
             num_distractors = 0
             constraints += [
-                ("exists", definiendum, (list(definiens["parts"].values()), []), True)
+                (
+                    "exists", definiendum, (list(definiens["parts"].values()), []),
+                    None, True
+                )
                 for definiendum, definiens in self.domain_knowledge["definitions"].items()
             ] + [
-                ("forall", "truck", (["normal_wheel", "large_wheel"], None), False),
+                ("forall", "truck", (["normal_wheel", "large_wheel"], None), None, False),
             ]   # Keep the sizes of the wheels identical
 
         else:
@@ -165,18 +171,23 @@ class SimulatedTeacher:
             # add distractors specifically selected to allow mistakes
             num_distractors = 3
             constraints += [
-                ("exists", definiendum, (list(definiens["parts"].values()), []), True)
+                (
+                    "exists", definiendum, (list(definiens["parts"].values()), []),
+                    definiens["nl_description"], True
+                )
                 for definiendum, definiens in self.domain_knowledge["definitions"].items()
             ] + [
-                (rule_type, scope_class, tuple(entry), True)
+                (
+                    rule_type, scope_class, tuple(entry["logical_form"]),
+                    entry["surface_form"], True
+                )
                 for scope_class, rules in self.domain_knowledge["constraints"].items()
                 for rule_type, entries in rules.items()
                 for entry in entries
             ]
 
         # Leverage ASP to obtain all possible samples of valid part set subject to
-        # a set of constraints
-        random.seed(self.next_seed)
+        # a set of constraints\
         sampled_inits = self._sample_ASP(
             sampled_truck_subtype, self.domain_knowledge,
             constraints, all_subtypes, num_distractors
@@ -278,46 +289,52 @@ class SimulatedTeacher:
                         # Truck subtype for languageful agents, can provide definitional
                         # property by required part subtypes
                         definition = self.domain_knowledge["definitions"][self.target_concept]
-                        supertype = definition["supertype"]
-                        required_parts = " and ".join(
-                            f"a {part_supertype}"
-                            for part_supertype in definition["parts"].values()
-                        )
-
-                        # Provide textual definition
                         response.append((
                             "generate",
                             {
-                                "utterance": f"A {self.target_concept} is a {supertype} " \
-                                    f"with {required_parts}.",
+                                "utterance": definition["nl_description"],
                                 "pointing": {}
                             }
                         ))
                 else:
                     # Non-target concept, most likely referring to some unknown part
-                    # subtype concept; teach new concept by exemplification
+                    # subtype or supertype concept; teach new concept by exemplification
+                    # and/or taxonomy info
 
                     # Fetch list of matching instances and select one
                     matching_insts = [
                         ((supertype, inst_id), f"{inst_id[0]}_{supertype}_{inst_id[1]}")
                         for (supertype, inst_id), info in sampled_parts.items()
-                        if reported_neologism == info["type"]
+                        if reported_neologism == info["type"] and inst_id[0] == "t"
                     ]
-                    inst, serialized_name = random.sample(matching_insts, 1)[0]
-                    ent_path = f"/{serialized_name}"
+                    if len(matching_insts) > 0:
+                        # Neologism is the most specific part subtype
+                        inst, serialized_name = random.sample(matching_insts, 1)[0]
+                        ent_path = f"/{serialized_name}"
 
-                    response += [
-                        ("generate",
-                        {
-                            "utterance": f"This is a {reported_neologism}.",
-                            "pointing": { (0, 4): (ent_path, False) }
-                        }),
-                        ("generate",
-                        {
-                            "utterance": f"{reported_neologism} is a type of {inst[0]}.",
-                            "pointing": {}
-                        }),
-                    ]
+                        response += [
+                            ("generate",
+                            {
+                                "utterance": f"This is a {reported_neologism}.",
+                                "pointing": { (0, 4): (ent_path, False) }
+                            }),
+                            ("generate",
+                            {
+                                "utterance": f"{reported_neologism} is a type of {inst[0]}.",
+                                "pointing": {}
+                            }),
+                        ]
+                        ep_st["forthcoming_inspections"].add(reported_neologism)
+                    else:
+                        # Neologism is some supertype, provide all direct subtypes
+                        for _, subtype in self.domain_knowledge["taxonomy"].out_edges(reported_neologism):
+                            response.append((
+                                "generate",
+                                {
+                                    "utterance": f"{subtype} is a type of {reported_neologism}.",
+                                    "pointing": {}
+                                }
+                            ))
 
             elif utt == "# Observing":
                 # Agent has signaled it is paying attention to user's action
@@ -535,10 +552,10 @@ class SimulatedTeacher:
                         singleton_gr.add_node(obj_picked_up)
                         subassems[obj_picked_up] = singleton_gr
 
+                    # Test if a valid join can be achieved with the two subassembly
+                    # objects held in each hand
                     pair_invalid = False
                     if ep_st["left"] is not None and ep_st["right"] is not None:
-                        # Test if a valid join can be achieved with the two subassembly
-                        # objects held in each hand
                         compatible_part_pairs = {
                             frozenset([type1, type2])
                             for (type1, _), (type2, _) in ep_st["joins_remaining"]
@@ -546,8 +563,8 @@ class SimulatedTeacher:
                         sa_left = subassems[ep_st["left"]]
                         sa_right = subassems[ep_st["right"]]
                         for part_left, part_right in product(sa_left, sa_right):
-                            part_left = re.findall(r"t_(.*)_\d+$", part_left)[0]
-                            part_right = re.findall(r"t_(.*)_\d+$", part_right)[0]
+                            part_left = re.findall(r"[td]_(.*)_\d+$", part_left)[0]
+                            part_right = re.findall(r"[td]_(.*)_\d+$", part_right)[0]
                             part_pair = frozenset([part_left, part_right])
                             # Pass if part pair not compatible after all
                             compatible = part_pair in compatible_part_pairs
@@ -557,14 +574,35 @@ class SimulatedTeacher:
                         else:
                             # If reached here, no compatible bipartite pairing of
                             # parts exists with held subassemblies
+                            ep_metrics["num_invalid_pickup"] += 1
                             pair_invalid = True
+
+                    # If pair is not physically invalid yet distractor part instance
+                    # was used, needs interruption as well
+                    distracted = False
+                    if obj_picked_up.startswith("d_") and not pair_invalid:
+                        ep_metrics["num_distractor_pickup"] += 1
+                        distracted = True
+
+                    # Flag whether a distractor pick-up is forgiven for expected
+                    # 3D structure inspection; only applies for atomics (singleton
+                    # subassemblies)
+                    interruption_exempt = False
+                    if len(subassems[obj_picked_up]) == 1:
+                        picked_inst = re.findall(r"([td])_(.*)_(\d+)$", obj_picked_up)[0]
+                        picked_inst = (picked_inst[1], (picked_inst[0], int(picked_inst[2])))
+                        picked_subtype = sampled_parts[picked_inst]["type"]
+                        if picked_subtype in ep_st["forthcoming_inspections"]:
+                            interruption_exempt = True
 
                     # Interrupt if agent has picked up an object not needed in the
                     # desired goal structure, or if agent is holding a pair of objects
                     # that should not be assembled
-                    if pair_invalid:
+                    if (pair_invalid or distracted) and not interruption_exempt:
                         # Interrupt agent and undo the last pick up (by dropping the
                         # object just picked up)
+                        interrupted = True
+
                         ep_st[side] = None       # Pick-up undone
                         response += [
                             ("generate", { "utterance": "Stop.", "pointing": {} }),
@@ -595,9 +633,6 @@ class SimulatedTeacher:
                                     "pointing": {}
                                 })
                             ]
-                        
-                        interrupted = True
-                        ep_metrics["num_invalid_pickup"] += 1
 
                 if utt.startswith("# Effect: drop"):
                     # Effect of drop action; no args, just update hand states
@@ -661,6 +696,9 @@ class SimulatedTeacher:
                     if join_invalid:
                         # Interrupt agent and undo the last join (by disassembling
                         # the product just assembled, at the exact same part pair)
+                        interrupted = True
+                        ep_metrics["num_invalid_join"] += 1
+
                         if tgt_side == "right":
                             takeaway_parts = list(graph_left)
                         else:
@@ -701,8 +739,6 @@ class SimulatedTeacher:
                                     "pointing": {}
                                 })
                             ]
-                        interrupted = True
-                        ep_metrics["num_invalid_join"] += 1
                     else:
                         # If join not invalid, update ongoing execution state
                         assert len(valid_pairs_achieved) == 1
@@ -725,9 +761,23 @@ class SimulatedTeacher:
                         # Check the achieved join off the set
                         ep_st["joins_remaining"] -= valid_pairs_achieved
 
+                elif utt.startswith("# Effect: inspect"):
+                    # Inspection is ongoing, now distractor pick-up of the
+                    # same category is no longer forgiven---check off if
+                    # present
+                    side = re.findall(r"# Effect: inspect_(.*)\(", utt)[0]
+                    tgt_handle = ep_st[side]
+                    tgt_inst = re.findall(r"([td])_(.*)_(\d+)$", tgt_handle)[0]
+                    tgt_inst = (tgt_inst[1], (tgt_inst[0], int(tgt_inst[2])))
+                    tgt_subtype = sampled_parts[tgt_inst]["type"]
+                    if tgt_subtype in ep_st["forthcoming_inspections"]:
+                        ep_st["forthcoming_inspections"].remove(tgt_subtype)
+
                 if not interrupted:
                     # No interruption needs to be made, keep observing...
-                    response.append(("generate", { "utterance": "# Observing", "pointing": {} }))
+                    response.append(
+                        ("generate", { "utterance": "# Observing", "pointing": {} })
+                    )
 
             elif utt == "I cannot find a part I need on the table." or \
                 utt.startswith("I couldn't plan further"):
@@ -779,8 +829,8 @@ class SimulatedTeacher:
                 # been used yet (i.e., still on the tabletop)
                 matching_insts = [
                     ((supertype, inst_id), f"{inst_id[0]}_{supertype}_{inst_id[1]}")
-                    for (supertype, inst_id), info in sampled_parts.items()
-                    if queried_type == supertype or queried_type == info["type"]
+                    for (supertype, inst_id) in sampled_parts
+                    if queried_type == supertype and inst_id[0] == "t"
                 ]
                 consumed_insts = [
                     inst for sa_graph in subassems.values() for inst in sa_graph
@@ -791,8 +841,8 @@ class SimulatedTeacher:
                     if serialized_name not in consumed_insts or        # Not used in some subassembly, or
                         len(subassems.get(serialized_name, {})) == 1   # Picked up once but not consumed yet
                 ]
-                inst, serialized_name = random.sample(available_insts, 1)[0]
-                inst_subtype = sampled_parts[inst]["type"]
+                gt_inst, serialized_name = random.sample(available_insts, 1)[0]
+                gt_inst_subtype = sampled_parts[gt_inst]["type"]
 
                 # Selected instance may already have been picked up and held
                 # in left or right hand
@@ -805,7 +855,7 @@ class SimulatedTeacher:
                 response.append((
                     "generate",
                     {
-                        "utterance": f"This is a {inst_subtype}.",
+                        "utterance": f"This is a {gt_inst_subtype}.",
                         "pointing": { (0, 4): (ent_path, False) }
                             # `False`: Pass by string name instead of seg mask
                     }
@@ -815,31 +865,146 @@ class SimulatedTeacher:
             elif utt.startswith("I was trying to "):
                 # Agent reported its originally intended join of two part instances
                 # which is based on incorrect grounding
-                for crange, inst_name in dem_refs.items():
-                    inst = re.findall(r"([td])_(.*)_(\d+)$", inst_name)[0]
-                    inst = (inst[1], (inst[0], int(inst[2])))
-                    reported_grounding = utt[slice(*crange)]
-                    gt_type = sampled_parts[inst]["type"]
-                    if reported_grounding == gt_type: continue
-
-                    # For incorrect groundings results, provide appropriate corrective
-                    # feedback
-                    if inst_name in subassems.get(ep_st["left"], set()):
-                        ent_path = f"/Student Agent/Left Hand/*/{inst_name}"
-                    elif inst_name in subassems.get(ep_st["right"], set()):
-                        ent_path = f"/Student Agent/Right Hand/*/{inst_name}"
+                def get_path(handle):
+                    # Util method for obtaining entity path based on current
+                    # position of the entity with provided handle
+                    if handle in subassems.get(ep_st["left"], set()):
+                        return f"/Student Agent/Left Hand/*/{handle}"
+                    elif handle in subassems.get(ep_st["right"], set()):
+                        return f"/Student Agent/Right Hand/*/{handle}"
                     else:
-                        ent_path = f"/*/{inst_name}"        # On tabletop
-                    response += [
-                        ("generate", {
-                            "utterance": f"This is not a {reported_grounding}.",
-                            "pointing": { (0, 4): (ent_path, False) }
-                        }),
-                        ("generate", {
-                            "utterance": f"This is a {gt_type}.",
-                            "pointing": { (0, 4): (ent_path, False) }
-                        })
+                        return f"/*/{handle}"
+
+                intended_join = set()
+                for crange, ref_handle in dem_refs.items():
+                    ref_inst = re.findall(r"([td])_(.*)_(\d+)$", ref_handle)[0]
+                    ref_inst = (ref_inst[1], (ref_inst[0], int(ref_inst[2])))
+                    reported_subtype = re.findall(r"this (.*)$", utt[slice(*crange)])[0]
+                    reported_supertype = next(iter(
+                        self.domain_knowledge["taxonomy"].in_edges(reported_subtype)
+                    ), (reported_subtype, None))[0]
+                    ref_subtype = sampled_parts[ref_inst]["type"]
+                    intended_join.add(reported_subtype)
+
+                    if reported_subtype != ref_subtype:
+                        # For incorrect groundings results, provide appropriate corrective
+                        # feedback
+                        ent_path = get_path(ref_handle)
+                        response += [
+                            ("generate", {
+                                "utterance": f"This is not a {reported_subtype}.",
+                                "pointing": { (0, 4): (ent_path, False) }
+                            }),
+                            ("generate", {
+                                "utterance": f"This is a {ref_subtype}.",
+                                "pointing": { (0, 4): (ent_path, False) }
+                            })
+                        ]
+                    if ref_inst[1][0] == "d" and ref_inst[0] == reported_supertype:
+                        # Grounding is (somewhat) correct but picked up a distractor;
+                        # correct by means of demonstration (languageless), contrastive
+                        # labeling (languageful - label only) and/or directly providing
+                        # the violated constraint (languageful - full semantics)
+
+                        # First retrieve the legitimate ground truth part instance
+                        # of the same category that ought to be used instead; must
+                        # still be on the tabletop
+                        matching_insts = [
+                            ((supertype, inst_id), f"{inst_id[0]}_{supertype}_{inst_id[1]}")
+                            for supertype, inst_id in sampled_parts
+                            if supertype == ref_inst[0] and inst_id[0] == "t"
+                        ]
+                        consumed_insts = [
+                            inst for sa_graph in subassems.values() for inst in sa_graph
+                            if len(sa_graph) > 1
+                        ]
+                        available_insts = [
+                            (inst, serialized_name) for inst, serialized_name in matching_insts
+                            if serialized_name not in consumed_insts or        # Not used in some subassembly, or
+                                len(subassems.get(serialized_name, {})) == 1   # Picked up once but not consumed yet
+                        ]
+                        gt_inst, gt_handle = random.sample(available_insts, 1)[0]
+                        gt_inst_subtype = sampled_parts[gt_inst]["type"]
+
+                        if self.player_type in ["bool", "demo"]:
+                            print(0)
+                        else:
+                            # Inform agent to use the ground-truth part instead
+                            # of the distractor part, providing full descriptions
+                            # of their properties.
+                            gt_descriptor = sampled_parts[gt_inst]["type"]
+                            if "color" in sampled_parts[gt_inst]:
+                                gt_descriptor = " ".join([
+                                    sampled_parts[gt_inst]["color"], gt_descriptor
+                                ])
+                            gt_ent_path = get_path(gt_handle)
+                            dt_descriptor = sampled_parts[ref_inst]["type"]
+                            if "color" in sampled_parts[ref_inst]:
+                                dt_descriptor = " ".join([
+                                    sampled_parts[ref_inst]["color"], dt_descriptor
+                                ])
+                            dt_ent_path = get_path(ref_handle)
+                            utterance = f"Use this {gt_descriptor} instead of this {dt_descriptor}."
+                            dem_ref_cranges = [
+                                (m.start(), m.end()) for m in re.finditer(r"this", utterance)
+                            ]
+                            response.append((
+                                "generate",
+                                {
+                                    "utterance": utterance,
+                                    "pointing": {
+                                        dem_ref_cranges[0]: (gt_ent_path, False),
+                                        dem_ref_cranges[1]: (dt_ent_path, False)
+                                    }
+                                }
+                            ))
+                            if self.player_type == "full":
+                                # Directly utter the (one and only) relevant constraint
+                                # violated by use of the distractor instance
+                                constraint = sampled_parts[ref_inst]["violated_constraint"][3]
+                                response.append((
+                                    "generate", { "utterance": constraint, "pointing": {} }
+                                ))
+
+                # Some constraints are better manually detected and handled here, (possibly
+                # duplicate handling, but not a big problem)
+                if self.player_type == "full":
+                    subtypes_used = [
+                        re.findall(r"([td])_(.*)_(\d+)$", obj)[0]
+                        for sa_graph in subassems.values() for obj in sa_graph
+                        if len(sa_graph) > 1
                     ]
+                    subtypes_used = {
+                        sampled_parts[(inst_id[1], (inst_id[0], int(inst_id[2])))]["type"]
+                        for inst_id in subtypes_used
+                    }
+                    if {"normal_wheel", "large_wheel"} <= intended_join | subtypes_used:
+                        response.append((
+                            "generate", {
+                                "utterance": "A truck must not have a normal_wheel and a large_wheel.",
+                                "pointing": {}
+                            }
+                        ))
+                    if "large_wheel" in intended_join:
+                        if any(
+                            re.match(r"normal_.*_fender", subtype) for subtype in intended_join
+                        ):
+                            response.append((
+                                "generate", {
+                                    "utterance": "A fw_unit must not have a normal_fender and a large_wheel.",
+                                    "pointing": {}
+                                }
+                            ))
+                    if "normal_wheel" in intended_join:
+                        if any(
+                            re.match(r"large_.*_fender", subtype) for subtype in intended_join
+                        ):
+                            response.append((
+                                "generate", {
+                                    "utterance": "A fw_unit must not have a large_fender and a normal_wheel.",
+                                    "pointing": {}
+                                }
+                            ))
 
                 # Finally tell the agent to resume its task execution (based on
                 # the modified knowledge)
@@ -847,7 +1012,33 @@ class SimulatedTeacher:
                     ("generate", { "utterance": "Continue.", "pointing": {} })
                 )
 
-            elif utt == "OK." or utt == "Done.":
+            elif utt.startswith("What kind of part is "):
+                # Agent requested supertype info of some subtype, provide appropriate
+                # taxonomy statement
+                part_subtype = re.findall(r"What kind of part is (.*)\?$", utt)[0]
+                part_supertype = next(iter(
+                    self.domain_knowledge["taxonomy"].in_edges(part_subtype)
+                ))[0]
+
+                response.append(
+                    ("generate",
+                    {
+                        "utterance": f"{part_subtype} is a type of {part_supertype}.",
+                        "pointing": {}
+                    }),
+                )
+                ep_st["forthcoming_inspections"].add(part_subtype)
+
+            elif utt == "OK.":
+                # Iff a truck has to be built and has been built, no further interaction
+                # needed; terminate episode. Otherwise, send observation signal to keep
+                # the episode alive.
+                if self.target_task == "inject_color" or len(ep_st["joins_remaining"]) == 0:
+                    pass
+                else:
+                    response.append(("generate", { "utterance": "# Observing", "pointing": {} }))
+
+            elif utt == "Done.":
                 # No further interaction needed; effectively terminates current episode
                 pass
 
@@ -922,9 +1113,9 @@ class SimulatedTeacher:
             
 
         # Add integrity constraints for filtering invalid combinations
-        for ci, (rule_type, scope_class, entry, _) in enumerate(constraints):
+        for ci, (rule_type, scope_class, rule_content, _, _) in enumerate(constraints):
             base_prg_str += f"rule({ci}).\n"
-            parts, attributes = entry
+            parts, attributes = rule_content
 
             full_scope_str = f"{scope_class}(O), "
             full_scope_str += ", ".join(f"{p}(O{i})" for i, p in enumerate(parts)) + ", "
@@ -1128,7 +1319,7 @@ class SimulatedTeacher:
             # that we can sample from them one by one
             model_predicates = {atm.name for atm in sampled_model}
             relevant_constraint_pool = [
-                ci for ci, (_, scope_class, _, can_violate) in enumerate(constraints)
+                ci for ci, (_, scope_class, _, _, can_violate) in enumerate(constraints)
                 if can_violate and scope_class in model_predicates
             ]
             part_group_pool = list(range(len(part_groups_by_type)))
@@ -1152,6 +1343,7 @@ class SimulatedTeacher:
                     # Obtain up to 1k samples; there may be none, in which case
                     # no resampling from the part group can violate the constraint
                     samples = set()
+                    ctl.configuration.solver.seed = self.cfg.seed
                     with ctl.solve(yield_=True) as solve_gen:
                         models_inspected = 0
                         for m in solve_gen:

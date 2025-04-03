@@ -74,19 +74,20 @@ def main(cfg):
                 # 3) num_invalid_pickup
                 # 4) num_invalid_join
                 # 5) num_planning_forfeiture
-                # 6) episode_discarded
-                # 7) num_planning_attempts
-                # 8) num_collision_queries
-                # 9) episode_length
-                # 10) mean_f1
+                # 6) num_distractor_pickup
+                # 7) episode_discarded
+                # 8) num_planning_attempts
+                # 9) num_collision_queries
+                # 10) episode_length
+                # 11) mean_f1
                 fields = next(reader)
                 data_of_interests = [
-                    ([1, 2, 3, 4], True),
-                    ([1], False), ([2], False), ([3], False), ([4], False),
-                    ([6], False), ([7], True), ([8], False), ([9], False)
+                    ([1, 2, 3, 4, 5], True),
+                    ([1], False), ([2], False), ([3], False), ([4], False), ([5], False),
+                    ([7], False), ([8], True), ([9], False), ([10], False)
                 ]
                 data_names = ["cumulative_regret"] + [
-                    fields[i] for i in [1, 2, 3, 4, 6, 7, 8, 9]
+                    fields[i] for i in [1, 2, 3, 4, 5, 7, 8, 9, 10]
                 ]
 
                 row = [row_data for row_data in reader]

@@ -18,44 +18,61 @@
 
 truck_front:
     forall:
-        - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+        - logical_form: [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+          surface_form: "Pairs of a fender and a fender of a truck_front must have same color."
 
 truck_back:
     forall:
-        - [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+        - logical_form: [["fender", "fender"], [["_same_color", true, [0, 1]]]]
+          surface_form: "Pairs of a fender and a fender of a truck_back must have same color."
 
 fw_unit:
     forall:
-        - [["large_fender", "normal_wheel"], null]
+        - logical_form: [["large_fender", "normal_wheel"], null]
+          surface_form: "A fw_unit must not have a large_fender and a normal_wheel."
+        - logical_form: [["normal_fender", "large_wheel"], null]
+          surface_form: "A fw_unit must not have a normal_fender and a large_wheel."
 
 truck:
     forall:
-        - [["fender", "chassis_center"], [["_same_color", false, [0, 1]]]]
-        - [["normal_wheel", "large_wheel"], null]
+        - logical_form: [["fender", "chassis_center"], [["_same_color", false, [0, 1]]]]
+          surface_form: "Pairs of a fender and a chassis_center of a truck must not have same color."
+        - logical_form: [["normal_wheel", "large_wheel"], null]
+          surface_form: "A truck must not have a normal_wheel and a large_wheel."
 
 base_truck:
     forall:
-        - [["cabin", "chassis_center"], [["_same_color", false, [0, 1]]]]
-        - [["staircase_chassis_center"], null]
+        - logical_form: [["cabin", "chassis_center"], [["_same_color", false, [0, 1]]]]
+          surface_form: "Pairs of a cabin and a chassis_center of a base_truck must not have same color."
+        - logical_form: [["staircase_chassis_center"], null]
+          surface_form: "A base_truck must not have a staircase_chassis_center."
 
 missile_truck:
     exists:
-        - [["fender"], [["green", true, [0]]]]
+        - logical_form: [["fender"], [["green", true, [0]]]]
+          surface_form: "A missile_truck must have a green fender."
     forall:
-        - [["cabin", "chassis_center"], [["_same_color", true, [0, 1]]]]
+        - logical_form: [["cabin", "chassis_center"], [["_same_color", true, [0, 1]]]]
+          surface_form: "Pairs of a cabin and a chassis_center of a missile_truck must have same color."
 
 dump_truck:
     forall:
-        - [["colored_part"], [["gold", false, [0]]]]
-        - [["wheel"], [["normal_wheel", true, [0]]]]
+        - logical_form: [["colored_part"], [["gold", false, [0]]]]
+          surface_form: "colored_part of a dump_truck must not be gold."
+        - logical_form: [["wheel"], [["normal_wheel", true, [0]]]]
+          surface_form: "wheel of a dump_truck must be a normal_wheel."
 
 container_truck:
     forall:
-        - [["colored_part"], [["blue", false, [0]]]]
-        - [["wheel"], [["large_wheel", true, [0]]]]
+        - logical_form: [["colored_part"], [["blue", false, [0]]]]
+          surface_form: "colored_part of a container_truck must not be blue."
+        - logical_form: [["wheel"], [["large_wheel", true, [0]]]]
+          surface_form: "wheel of a container_truck must be a large_wheel."
 
 fire_truck:
     exists:
-        - [["colored_part"], [["white", true, [0]]]]
+        - logical_form: [["colored_part"], [["white", true, [0]]]]
+          surface_form: "A fire_truck must have a white colored_part."
     forall:
-        - [["fender"], [["red", true, [0]]]]
+        - logical_form: [["fender"], [["red", true, [0]]]]
+          surface_form: "fender of a fire_truck must be red."

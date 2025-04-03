@@ -180,7 +180,7 @@ def main(cfg):
         # Sample for the easier supertype task problem initialization
         # if target task is "build_truck_supertype" (of course) or
         # "build_truck_subtype" for the first 10 episodes
-        if target_task == "build_truck_subtype" and ep_i < 0:
+        if target_task == "build_truck_subtype" and ep_i < 5:
             episode_task = "build_truck_supertype"
         else:
             episode_task = target_task
@@ -288,10 +288,10 @@ def main(cfg):
                                         if v.sum() > 100        # Remove small/null masks
                                     }
                                 )
-                                visual_evidence = agent.lt_mem.kb.visual_evidence_from_scene(
-                                    agent.vision.scene
-                                )
-                                agent.symbolic.sensemake_vis(None, visual_evidence)
+                                # visual_evidence = agent.lt_mem.kb.visual_evidence_from_scene(
+                                #     agent.vision.scene
+                                # )
+                                # agent.symbolic.sensemake_vis(None, visual_evidence)
                                 # Record instance names used in the environment side associated
                                 # with each object
                                 aliases = user.current_episode_record["episode_state"]["aliases"]
@@ -340,7 +340,7 @@ def main(cfg):
                                             scores[color_inds] = np.nan
                                             ans_conc = np.nanargmax(scores)
                                             ans_prob = scores[ans_conc]
-                                            ans_label = get_label(ans_conc) if ans_prob >= 0.35 else None
+                                            ans_label = get_label(ans_conc) if ans_prob >= 0.15 else None
                                             gt_label = obj["type_code"]
                                             groundings.append((gt_label, ans_label))
                                     stats = defaultdict(lambda: { "tp": 0, "fp": 0, "fn": 0 })
@@ -510,14 +510,20 @@ def main(cfg):
         # Collect metrics for the episode (except for the very first one with
         # full demo)
         if ep_i > 0:
+            get_conc = lambda s: agent.lt_mem.lexicon.s2d[("va", s)][0][1]
+            inspect_actions = [get_conc("inspect_left"), get_conc("inspect_right")]
+
             ep_metric = {}
             for metric, val in user.current_episode_record["metrics"].items():
                 ep_metric[metric] = val
             for metric, val in agent.planner.execution_state.get("metrics", {}).items():
                 ep_metric[metric] = val
-            ep_metric["episode_length"] = len(
-                agent.planner.execution_state.get("action_history", [])
-            )
+            ep_metric["episode_length"] = len([
+                ... for action_type, _, _ in agent.planner.execution_state.get(
+                    "action_history", []
+                )
+                if action_type not in inspect_actions
+            ])
             ep_metric["mean_f1"] = sum(f1_scores.values()) / len(f1_scores)
             metrics.append(ep_metric)
             # Log progress to tensorboard
@@ -532,7 +538,7 @@ def main(cfg):
         # Just save the model
         agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/color_pretrained.ckpt")
     else:
-        agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/{cfg.exp.player_type}_{cfg.seed}.ckpt")
+        # agent.save_model(f"{cfg.paths.outputs_dir}/agent_model/{cfg.exp.player_type}_{cfg.seed}.ckpt")
         # Save evaluation metric curves to output dir
         out_csv_fname = f"{exp_tag}.csv"
 
@@ -540,8 +546,9 @@ def main(cfg):
             metric_types = [
                 "num_search_failure", "num_invalid_pickup",
                 "num_invalid_join", "num_planning_forfeiture",
-                "episode_discarded", "num_planning_attempts",
-                "num_collision_queries", "episode_length", "mean_f1"
+                "num_distractor_pickup", "episode_discarded",
+                "num_planning_attempts", "num_collision_queries",
+                "episode_length", "mean_f1"
             ]
             out_csv.write("episode," + ",".join(metric_types) + "\n")
             for ep_i, ep_metric in enumerate(metrics):

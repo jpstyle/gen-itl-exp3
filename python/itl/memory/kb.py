@@ -95,9 +95,9 @@ class KnowledgeBase:
         # both cons and ante
         entries_with_overlap = set.union(*[
             self.entries_by_pred.get(pred, set()) for pred in preds_cons
-        ]) & set.union(*[
+        ] + [set()]) | set.union(*[
             self.entries_by_pred.get(pred, set()) for pred in preds_ante
-        ])
+        ] + [set()])
 
         entries_entailed = set()       # KB entries entailed by input
         entries_entailing = set()      # KB entries that entail input

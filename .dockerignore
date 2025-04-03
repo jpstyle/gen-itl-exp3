@@ -9,13 +9,11 @@
 **/__pycache__/
 **/.vscode/
 
-/.env
-
 ## Unity
 /unity/[Ll]ibrary/
 /unity/[Tt]emp/
 /unity/[Oo]bj/
-# /unity/[Bb]uild/
+# /unity/[Bb]uild/          # Include builds
 # /unity/[Bb]uilds/
 /unity/[Ll]ogs/
 /unity/[Mm]emoryCaptures/
@@ -26,6 +24,9 @@
 # /unity/[Aa]ssets/[Mm]odels/
 /unity/[Aa]ssets/ML-Agents/
 /unity/[Aa]ssets/[Rr]esources/
+
+# Sandbox jupyter notebooks
+*.ipynb
 
 # Ignore all .meta files
 **/*.meta

@@ -24,6 +24,7 @@ base_truck:
     parts:
         load: platform
     part_attributes: null
+    nl_description: "A base_truck is a truck with a platform."
 
 dump_truck:
     supertype: truck
@@ -31,6 +32,7 @@ dump_truck:
         cabin: quad_cabin
         load: dumper
     part_attributes: null
+    nl_description: "A dump_truck is a truck with a quad_cabin and a dumper."
 
 container_truck:
     supertype: truck
@@ -38,12 +40,14 @@ container_truck:
         cabin: hemtt_cabin
         load: dumper
     part_attributes: null
+    nl_description: "A container_truck is a truck with a hemtt_cabin and a dumper."
 
 missile_truck:
     supertype: truck
     parts:
         load: rocket_launcher
     part_attributes: null
+    nl_description: "A missile_truck is a truck with a rocket_launcher."
 
 fire_truck:
     supertype: truck
@@ -51,3 +55,4 @@ fire_truck:
         load: ladder
         chassis_center: staircase_chassis_center
     part_attributes: null
+    nl_description: "A fire_truck is a truck with a ladder and a staircase_chassis_center."

@@ -30,7 +30,7 @@ class ITLAgent:
         self.lang = LanguageModule()
         self.symbolic = SymbolicReasonerModule()
         self.planner = ActionPlannerModule()
-        self.lt_mem = LongTermMemoryModule(cfg)
+        self.lt_mem = LongTermMemoryModule()
 
         # Provide access to methods in comp_actions
         self.comp_actions = CompositeActions(self)
@@ -180,8 +180,15 @@ class ITLAgent:
                     # currently remaining plan is invalid and replanning
                     # would be needed.
                     self.execution_paused = True
-                    self.planner.execution_state["replanning_needed"] = True
                     self.interrupted = True     # Also log interruption
+                    # Replanning to agenda
+                    goal_action, goal_target = self.planner.execution_state["plan_goal"]
+                    goal_action = self.lt_mem.lexicon.s2d[("va", goal_action)][0][1]
+                    self.planner.execution_state["last_scrapped_plan"] = \
+                        self.planner.agenda
+                    self.planner.agenda = deque([
+                        ("execute_command", (goal_action, (goal_target, True)))
+                    ])
                 if utt == "Continue." and self.execution_paused:
                     # Exit pause mode
                     self.execution_paused = False
@@ -285,11 +292,11 @@ class ITLAgent:
             ##       Sensemaking via synthesis of perception+knowledge       ##
             ###################################################################
 
-            if self.observed_demo is None and (ents_updated or xb_updated or kb_updated):
-                # Sensemaking from vision input only
-                exported_kb = self.lt_mem.kb.export_reasoning_program()
-                visual_evidence = self.lt_mem.kb.visual_evidence_from_scene(self.vision.scene)
-                self.symbolic.sensemake_vis(exported_kb, visual_evidence)
+            # if self.observed_demo is None and (ents_updated or xb_updated or kb_updated):
+            #     # Sensemaking from vision input only
+            #     exported_kb = self.lt_mem.kb.export_reasoning_program()
+            #     visual_evidence = self.lt_mem.kb.visual_evidence_from_scene(self.vision.scene)
+            #     self.symbolic.sensemake_vis(exported_kb, visual_evidence)
 
             if self.lang.latest_input is not None:
                 # Reference & word sense resolution to connect vision & discourse
@@ -442,12 +449,7 @@ class ITLAgent:
                         xb_updated |= self.comp_actions.identify_mismatch(statement)
                         kb_updated |= self.comp_actions.identify_generics(statement, raw)
 
-                if xb_updated or kb_updated:
-                    # Agent's knowledge state is somehow updated, flag that
-                    # re-planning is in order before execution
-                    if "replanning_needed" in self.planner.execution_state:
-                        self.planner.execution_state["replanning_needed"] = True
-                else:
+                if not (xb_updated or kb_updated):
                     # Terminate the loop when 'equilibrium' is reached
                     break
 
@@ -580,7 +582,9 @@ class ITLAgent:
 
                 if len(user_nl_inputs) > 0 and len(return_val) == 0:
                     # Break loop with cool acknowledgement to whichever NL
-                    # input from user so that user doesn't feel awkward
+                    # input from user so that user doesn't feel awkward. This
+                    # will terminate the episode, so don't say this if there's
+                    # still a pending, unfulfilled command.
                     return_val.append(("generate", ("OK.", {})))
 
                 # Break loop with return vals

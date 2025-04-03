@@ -125,7 +125,7 @@ class LanguageModule:
                         if lit[:2] == ("sp", "pronoun2"):
                             self.dialogue.assignment_hard[r2i[lit[2][0]]] = "_self"
 
-                # ASP-compatible translation
+                # Process any presuppositions and handle by sentence mood
                 for ev_id, (gq, bvars, ante, cons) in clauses.items():
                     if len(bvars) > 0:
                         # See if any presuppositions can be extracted out of the content;
