@@ -416,38 +416,40 @@ def handle_neologism(agent, dialogue_state):
         inspection_plan = _inspection_plan(agent, ex_obj, novel_concept)
         inspection_plans_concat += inspection_plan
 
-        # In our domain... Any novel part concept is a subtype of some
+        # In our domain, any novel part concept is a subtype of some
         # part supertype. The neologism currently being resolved by
-        # exemplification also needs supertype info, so ask teacher for
-        # it if there's no relevant taxonomy info. Kinda dirty, but this
-        # will do for now.
-        taxonomy_entries = [
-            ei for ei in agent.lt_mem.kb.entries_by_pred[f"{conc_type}_{conc_ind}"]
-            if agent.lt_mem.kb[ei][3] == "taxonomy"
+        # exemplification also needs supertype info if it doesn't have
+        # any.
+        # (In previous iterations, the taxonomy query is asked only when
+        # there were no relevant taxonomy entries in KB. However, as some
+        # subtypes can have more than one supertypes, not asking the question
+        # on the basis of whether there exists some relevant taxonomy entry
+        # occasionally resulted in missing out important of pieces in the
+        # domain taxonomy. Therefore, it is safer to always make this query,
+        # no matter whether there's relevant existing info.)
+
+        # NL surface form and corresponding logical form
+        surface_form = f"What kind of part is {name}?"
+        gq = ("Q",); bvars = ("x1",); ante = []
+        cons = [
+            ("sp", "subtype", ["x0", "x1"]),
+            ("n", name, ["x0"])
         ]
-        if len(taxonomy_entries) == 0:
-            # NL surface form and corresponding logical form
-            surface_form = f"What kind of part is {name}?"
-            gq = ("Q",); bvars = ("x1",); ante = []
-            cons = [
-                ("sp", "subtype", ["x0", "x1"]),
-                ("n", name, ["x0"])
-            ]
-            logical_form = (gq, bvars, ante, cons)
+        logical_form = (gq, bvars, ante, cons)
 
-            # Referents & predicates info
-            referents = {
-                "e": { "mood": "?" },
-                "x0": { "entity": None, "rf_info": {} }
-            }
-            predicates = {
-                "pc0": (("sp", "subtype"), "sp_subtype"),
-                "pc1": (("n", name), f"{conc_type}_{conc_ind}")
-            }
+        # Referents & predicates info
+        referents = {
+            "e": { "mood": "?" },
+            "x0": { "entity": None, "rf_info": {} }
+        }
+        predicates = {
+            "pc0": (("sp", "subtype"), "sp_subtype"),
+            "pc1": (("n", name), f"{conc_type}_{conc_ind}")
+        }
 
-            taxonomy_queries.append(
-                (logical_form, surface_form, referents, predicates, {})
-            )
+        taxonomy_queries.append(
+            (logical_form, surface_form, referents, predicates, {})
+        )
 
         resolved.add(sym)
 

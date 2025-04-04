@@ -880,9 +880,16 @@ class SimulatedTeacher:
                     ref_inst = re.findall(r"([td])_(.*)_(\d+)$", ref_handle)[0]
                     ref_inst = (ref_inst[1], (ref_inst[0], int(ref_inst[2])))
                     reported_subtype = re.findall(r"this (.*)$", utt[slice(*crange)])[0]
-                    reported_supertype = next(iter(
-                        self.domain_knowledge["taxonomy"].in_edges(reported_subtype)
-                    ), (reported_subtype, None))[0]
+                    if reported_subtype in self.domain_knowledge["taxonomy"]:
+                        reported_supertype = next(
+                            supertype
+                            for supertype, _ in self.domain_knowledge["taxonomy"].in_edges(reported_subtype)
+                            if supertype in {supertype for cp_pair in VALID_JOINS for supertype, _ in cp_pair}
+                        )
+                            # Ensures the 'right' supertype is answered, in case there are more
+                            # than one valid options (i.e., fenders)
+                    else:
+                        reported_supertype = reported_subtype
                     ref_subtype = sampled_parts[ref_inst]["type"]
                     intended_join.add(reported_subtype)
 
@@ -1016,9 +1023,13 @@ class SimulatedTeacher:
                 # Agent requested supertype info of some subtype, provide appropriate
                 # taxonomy statement
                 part_subtype = re.findall(r"What kind of part is (.*)\?$", utt)[0]
-                part_supertype = next(iter(
-                    self.domain_knowledge["taxonomy"].in_edges(part_subtype)
-                ))[0]
+                part_supertype = next(
+                    supertype
+                    for supertype, _ in self.domain_knowledge["taxonomy"].in_edges(part_subtype)
+                    if supertype in {supertype for cp_pair in VALID_JOINS for supertype, _ in cp_pair}
+                )
+                    # Ensures the 'right' supertype is answered, in case there are more
+                    # than one valid options (i.e., fenders)
 
                 response.append(
                     ("generate",
@@ -1037,6 +1048,10 @@ class SimulatedTeacher:
                     pass
                 else:
                     response.append(("generate", { "utterance": "# Observing", "pointing": {} }))
+
+            elif utt == "# Idle":
+                # Idle signal from frontend; respond with no-op to keep episode alive
+                response.append((None, None))
 
             elif utt == "Done.":
                 # No further interaction needed; effectively terminates current episode

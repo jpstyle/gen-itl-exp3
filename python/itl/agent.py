@@ -193,7 +193,16 @@ class ITLAgent:
                     # Exit pause mode
                     self.execution_paused = False
 
-            if utt != "# Observing":
+            if spk == "Student" and utt == "# Idle":
+                # Frontend agent has been idle for long enough time, interpret
+                # silence as signal that agent should continue whatever it was
+                # doing
+                if len(self.planner.agenda) == 0:
+                    pass
+                elif self.planner.agenda[0] == ('execute_command', (None, None)):
+                    self.planner.agenda.popleft()
+
+            if not (utt == "# Observing" or utt == "# Idle"):
                 # Process any general case NL input
                 usr_in_flt.append(utt)
                 pointing_flt.append(dem_refs)
