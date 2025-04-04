@@ -80,6 +80,9 @@ public class DialogueAgent : Agent
     private float _nextTimeToAct;
     private const float TimeInterval = 0.1f;
 
+    // Consult backend if has been idle for too long
+    private float _timeIdle = -1f;
+    
     // Store workplace partition info for main work area
     private readonly Vector3 _mainPartitionPosition = new(0f, 0.76f, 0.24f);
 
@@ -147,7 +150,13 @@ public class DialogueAgent : Agent
             hasToDo |= incomingMsgBuffer.Count > 0;
             hasToDo |= calibrationImageRequest != -1;
             hasToDo |= subtypeOrderingRequest;
-            if (!hasToDo & !_decisionRequestPending) return;
+            if (!hasToDo & !_decisionRequestPending)
+            {
+                // Do nothing if doesn't have anything to do and has been idle for less than 5 sec
+                if (_timeIdle < 0) _timeIdle = Time.time;
+                if (Time.time - _timeIdle <= 5f)
+                    return;
+            }
 
             // If unprocessed incoming messages exist, process and consult backend
             while (incomingMsgBuffer.Count > 0)
@@ -260,6 +269,11 @@ public class DialogueAgent : Agent
                 subtypeOrderingRequest = false;    // Reset flag
             }
 
+            // If reached here because it has been idle for too long, break silence and
+            // consult backend
+            if (_timeIdle > 0f && Time.time - _timeIdle > 5f)
+                backendMsgChannel.SendMessageToBackend(dialogueParticipantID, "# Idle");
+
             // Now wait for decision, if not currently undergoing some action execution
             if (_uttering | _acting)
                 _decisionRequestPending = true;
@@ -267,6 +281,7 @@ public class DialogueAgent : Agent
             {
                 RequestDecision();
                 _decisionRequestPending = false;
+                _timeIdle = -1f;        // Disable idle timer
             }
         }
     }
