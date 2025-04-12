@@ -1,8 +1,8 @@
 ## Root
 /outputs
-/assets/*
-!/assets/domain_knowledge/
-!/assets/planning_encoding/
+# /assets/*                 # Include all assets
+# !/assets/domain_knowledge/
+# !/assets/planning_encoding/
 **/xsession.log
 
 ## Python

@@ -552,7 +552,9 @@ def main(cfg):
             ]
             out_csv.write("episode," + ",".join(metric_types) + "\n")
             for ep_i, ep_metric in enumerate(metrics):
-                metric_values = [str(ep_metric[m_type]) for m_type in metric_types]
+                metric_values = [
+                    str(ep_metric.get(m_type, 0)) for m_type in metric_types
+                ]
                 metric_values = ",".join(metric_values)
                 out_csv.write(f"{ep_i+1},{metric_values}\n")
 

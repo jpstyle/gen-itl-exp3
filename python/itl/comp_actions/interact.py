@@ -531,18 +531,12 @@ def _plan_assembly(agent, build_target):
         # committed part recognition for the joined parts are incorrect, or
         # agent doesn't know a valid structure that can comply with the 
         # recognitions. In any case, forfeit planning for the current round.
-        # Also, if teacher's latest demo action is an assemble~ type action,
-        # uncommit the recognitions involved in the the latest join since
-        # agent wouldn't have made such joins without being interrupted by
-        # teacher.
+        # Also, uncommit the recognitions involved in any of teacher's assemble~
+        # actionssince agent wouldn't have made such joins without being interrupted
+        # by teacher.
         planning_forfeited = True
-        latest_teacher_actions = [
-            (action_type, action_params)
-            for action_type, action_params, actor in exec_state["action_history"]
-            if actor == "Teacher"
-        ]
-        if len(latest_teacher_actions) > 0:
-            action_type, action_params = latest_teacher_actions[-1]
+        for action_type, action_params, actor in exec_state["action_history"]:
+            if actor != "Teacher": continue
             action_name = agent.lt_mem.lexicon.d2s[("arel", action_type)][0][1]
             if action_name.startswith("assemble"):
                 _, atomic_left, _, _, atomic_right, _, _ = action_params
@@ -706,8 +700,8 @@ def _plan_assembly(agent, build_target):
                 # Some different objects mapped to the same node, invalid
                 continue
             if any(
-                atomic_node_concs[combined_mapping[objs[0]]] == labels[0] and \
-                    atomic_node_concs[combined_mapping[objs[1]]] == labels[1]
+                atomic_node_concs[combined_mapping[objs[0]]] == -labels[0] and \
+                    atomic_node_concs[combined_mapping[objs[1]]] == -labels[1]
                 for objs, labels in exec_state["recognitions"].items()
                 if isinstance(objs, tuple) and objs[0] in combined_mapping and \
                     objs[1] in combined_mapping
@@ -917,12 +911,6 @@ def _plan_assembly(agent, build_target):
         plan_dscr = "Full" if plan_complete else "Partial"
         log_msg = f"{plan_dscr} plan found after "
 
-    exec_state["metrics"]["num_planning_attempts"] += total_planning_attempts
-    exec_state["metrics"]["num_collision_queries"] += total_query_count
-    log_msg += f"{total_planning_attempts} (re)planning attempts "
-    log_msg += f"({total_query_count} calls total)"
-    logger.info(log_msg)
-
     # 'Commit' to a set of part type recognitions, i.e., decisions as to
     # of which type to consider each object as an instance
     recognitions = {}
@@ -950,6 +938,30 @@ def _plan_assembly(agent, build_target):
             recognitions[oi] = conc
     # Prioritize existing ones
     recognitions.update(exec_state["recognitions"])
+
+    # Update and record metrics
+    exec_state["metrics"]["num_planning_attempts"] += total_planning_attempts
+    exec_state["metrics"]["num_collision_queries"] += total_query_count
+
+    # If there's any violation of the pairwise negative labeling feedback in
+    # the resulting recognition decisions, consider the plan as invalid; ditch
+    # the plan and report 'planning forfeited'
+    pair_neg_viols = [
+        (obj1, conc1, obj2, conc2)
+        for (obj1, conc1), (obj2, conc2) in combinations([(obj, conc) for obj, conc in recognitions.items() if isinstance(obj, str)], 2)
+        if recognitions.get((obj1, obj2)) == (-conc1, -conc2) or recognitions.get((obj2, obj1)) == (-conc2, -conc1)
+    ]
+    if len(pair_neg_viols) > 0:
+        log_msg = "Forfeited planning after "
+        log_msg += f"{total_planning_attempts} (re)planning attempts "
+        log_msg += f"({total_query_count} calls total)"
+        logger.info(log_msg)
+        return [], exec_state["recognitions"], False
+
+    # Log metrics
+    log_msg += f"{total_planning_attempts} (re)planning attempts "
+    log_msg += f"({total_query_count} calls total)"
+    logger.info(log_msg)
 
     return action_sequence, recognitions, plan_complete
 
@@ -1096,6 +1108,14 @@ def _goal_selection(agent, build_target):
             Literal("subtype_of", wrap_args(subtype_conc, supertype_conc))
         )
 
+    # Accommodate any pairwise negative labeling feedback
+    pairwise_neg_constraints = set()
+    for objs, concs in exec_state["recognitions"].items():
+        if not isinstance(objs, tuple): continue
+        constraint_str = \
+            f":- type_committed({objs[0]},{-concs[0]}), type_committed({objs[1]},{-concs[1]}).\n"
+        pairwise_neg_constraints.add(constraint_str)
+
     # Add any constraints from 'property'-type entries in KB. Each constraint
     # will have an associated 'severity score', the maximum of which will be
     # offset from the final compatibility score.
@@ -1106,10 +1126,13 @@ def _goal_selection(agent, build_target):
         # Only include property rules
         if knowledge_type != "property": continue
         # Skip if rule involves any unresolved neologisms
-        involved_preds = {
-            agent.lt_mem.lexicon.d2s[("pcls", int(lit.name.split("_")[1]))][0]
-            for lit in ante+cons if lit.name.startswith("pcls")
-        }
+        involved_preds = set()
+        for lit in ante+cons:
+            if not lit.name.startswith("pcls"): continue
+            conc_ind = int(lit.name.split("_")[1])
+            if ("pcls", conc_ind) in agent.lt_mem.lexicon.d2s:
+                sym = agent.lt_mem.lexicon.d2s[("pcls", conc_ind)][0]
+                involved_preds.add(sym)
         if any(pred in agent.lang.unresolved_neologisms for pred in involved_preds):
             continue
 
@@ -1170,7 +1193,6 @@ def _goal_selection(agent, build_target):
                         if conc_ind in color_concs:
                             trans_lits = f"color_likely({arg0},{conc_ind},_)"
                         else:
-                            constraint_str += f", type_committed(O,{conc_ind})"
                             trans_lits = f"type_committed({arg0},{conc_ind})"
                     if lit.naf:
                         trans_lits = f"not {trans_lits}"
@@ -1290,7 +1312,7 @@ def _goal_selection(agent, build_target):
         key=lambda x: x.name
     )
     facts_prg = "".join(str(lit) + ".\n" for lit in all_lits)
-    constraints_prg = "".join(kb_constraints)
+    constraints_prg = "".join(kb_constraints) + "".join(pairwise_neg_constraints)
     commit_ctl.add("facts", [], facts_prg + constraints_prg)
 
     # Optimize with clingo; using the incremental multi-shot optimization

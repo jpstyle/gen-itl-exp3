@@ -312,18 +312,13 @@ class SimulatedTeacher:
                         inst, serialized_name = random.sample(matching_insts, 1)[0]
                         ent_path = f"/{serialized_name}"
 
-                        response += [
-                            ("generate",
+                        response.append((
+                            "generate",
                             {
                                 "utterance": f"This is a {reported_neologism}.",
                                 "pointing": { (0, 4): (ent_path, False) }
-                            }),
-                            ("generate",
-                            {
-                                "utterance": f"{reported_neologism} is a type of {inst[0]}.",
-                                "pointing": {}
-                            }),
-                        ]
+                            }
+                        ))
                         ep_st["forthcoming_inspections"].add(reported_neologism)
                     else:
                         # Neologism is some supertype, provide all direct subtypes
@@ -446,7 +441,7 @@ class SimulatedTeacher:
                     dropped_sa = ep_st[side]
                     if self.player_type == "full" or dropped_sa == "truck":
                         act_dscr.append({
-                            "utterance": f"This is a {dropped_sa}.",
+                            "utterance": f"This is a {self.target_concept}.",
                             "pointing": {
                                 (0, 4): (f"/Student Agent/*/{dropped_sa}", True)
                             }
@@ -603,26 +598,80 @@ class SimulatedTeacher:
                         # object just picked up)
                         interrupted = True
 
-                        ep_st[side] = None       # Pick-up undone
-                        response += [
-                            ("generate", { "utterance": "Stop.", "pointing": {} }),
-                            (f"drop_{side}", { "parameters": () })
-                        ]
-                        if self.player_type == "bool":
-                            # Minimal help; no additional learning signal than the fact
-                            # that the undone pick-up action is invalid
-                            self.ongoing_demonstration = ("frag", [])
-                        elif self.player_type == "demo":
-                            # Language-less player type with assistance by demonstration;
-                            # sample a next valid join and proceed to demonstrate
-                            demo_segment = self._sample_demo_step()
-                            if demo_segment is None:
-                                # Terminate episode; see what return value of None means
-                                # in _sample_demo_step().
-                                ep_metrics["episode_discarded"] = True
-                                return []
+                        response.append((
+                            "generate", { "utterance": "Stop.", "pointing": {} }
+                        ))
+                        if self.player_type in ["bool", "demo"]:
+                            # Languageless player types; do not (cannot, as a matter of fact)
+                            # inquire the intent of the undone pick up action
+                            if self.player_type == "bool":
+                                # Minimal help; no additional learning signal than the fact
+                                # that the undone pick-up action is invalid
+                                self.ongoing_demonstration = ("frag", [])
                             else:
-                                self.ongoing_demonstration = ("frag", demo_segment)
+                                assert self.player_type == "demo"
+                                # Language-less player type with assistance by demonstration;
+                                # sample a next valid join and proceed to demonstrate
+                                demo_segment = self._sample_demo_step()
+                                if demo_segment is None:
+                                    # Terminate episode; see what return value of None means
+                                    # in _sample_demo_step().
+                                    ep_metrics["episode_discarded"] = True
+                                    return []
+                                else:
+                                    self.ongoing_demonstration = ("frag", demo_segment)
+
+                            # If a distractor object has been picked up, suggest a ground-truth
+                            # object to use as alternative here (in contrast to the cases with
+                            # languageful players, where such suggestions of alternatives are
+                            # given after inquiring the intended join and getting response)
+                            if distracted:
+                                def get_path(handle):
+                                    # Util method for obtaining entity path based on current
+                                    # position of the entity with provided handle
+                                    if handle in subassems.get(ep_st["left"], set()):
+                                        return f"/Student Agent/Left Hand/*/{handle}"
+                                    elif handle in subassems.get(ep_st["right"], set()):
+                                        return f"/Student Agent/Right Hand/*/{handle}"
+                                    else:
+                                        return f"/*/{handle}"
+
+                                dtr_inst = re.findall(r"([td])_(.*)_(\d+)$", obj_picked_up)[0]
+                                dtr_inst = (dtr_inst[1], (dtr_inst[0], int(dtr_inst[2])))
+
+                                # First retrieve the legitimate ground truth part instance of
+                                # the same category that ought to be used instead; must still
+                                # be on the tabletop
+                                matching_insts = [
+                                    f"{inst_id[0]}_{supertype}_{inst_id[1]}"
+                                    for supertype, inst_id in sampled_parts
+                                    if supertype == dtr_inst[0] and inst_id[0] == "t"
+                                ]
+                                consumed_insts = [
+                                    inst for sa_graph in subassems.values() for inst in sa_graph
+                                    if len(sa_graph) > 1
+                                ]
+                                available_insts = [
+                                    serialized_name for serialized_name in matching_insts
+                                    if serialized_name not in consumed_insts or        # Not used in some subassembly, or
+                                        len(subassems.get(serialized_name, {})) == 1   # Picked up once but not consumed yet
+                                ]
+                                if len(available_insts) > 0:
+                                    # Suggest an alternative, only if there's an unconsumed
+                                    # counterpart ground-truth object available (if there's none,
+                                    # that means all ground-truth objects are already used, and
+                                    # this distractor pick up is rather due to grounding error)
+                                    gt_handle = random.sample(available_insts, 1)[0]
+                                    response.append((
+                                        "generate",
+                                        {
+                                            "utterance": "Use this one instead of this one.",
+                                            "pointing": {
+                                                (4, 8): (get_path(gt_handle), False),
+                                                (24, 28): (get_path(obj_picked_up), False)
+                                            }
+                                        }
+                                    ))
                         else:
                             # Languageful player types; directly inquire the intent
                             # of the undone pick-up action
@@ -633,6 +682,10 @@ class SimulatedTeacher:
                                     "pointing": {}
                                 })
                             ]
+
+                        # Pick-up undone
+                        ep_st[side] = None
+                        response.append((f"drop_{side}", { "parameters": () }))
 
                 if utt.startswith("# Effect: drop"):
                     # Effect of drop action; no args, just update hand states
@@ -909,13 +962,12 @@ class SimulatedTeacher:
                         ]
                     if ref_inst[1][0] == "d" and ref_inst[0] == reported_supertype:
                         # Grounding is (somewhat) correct but picked up a distractor;
-                        # correct by means of demonstration (languageless), contrastive
-                        # labeling (languageful - label only) and/or directly providing
-                        # the violated constraint (languageful - full semantics)
+                        # correct by means of contrastive labeling (languageful - label
+                        # only) and directly providing the violated constraint (languageful
+                        # - full semantics)
 
                         # First retrieve the legitimate ground truth part instance
-                        # of the same category that ought to be used instead; must
-                        # still be on the tabletop
+                        # of the same category that ought to be used instead
                         matching_insts = [
                             ((supertype, inst_id), f"{inst_id[0]}_{supertype}_{inst_id[1]}")
                             for supertype, inst_id in sampled_parts
@@ -933,45 +985,40 @@ class SimulatedTeacher:
                         gt_inst, gt_handle = random.sample(available_insts, 1)[0]
                         gt_inst_subtype = sampled_parts[gt_inst]["type"]
 
-                        if self.player_type in ["bool", "demo"]:
-                            print(0)
-                        else:
-                            # Inform agent to use the ground-truth part instead
-                            # of the distractor part, providing full descriptions
-                            # of their properties.
-                            gt_descriptor = sampled_parts[gt_inst]["type"]
-                            if "color" in sampled_parts[gt_inst]:
-                                gt_descriptor = " ".join([
-                                    sampled_parts[gt_inst]["color"], gt_descriptor
-                                ])
-                            gt_ent_path = get_path(gt_handle)
-                            dt_descriptor = sampled_parts[ref_inst]["type"]
-                            if "color" in sampled_parts[ref_inst]:
-                                dt_descriptor = " ".join([
-                                    sampled_parts[ref_inst]["color"], dt_descriptor
-                                ])
-                            dt_ent_path = get_path(ref_handle)
-                            utterance = f"Use this {gt_descriptor} instead of this {dt_descriptor}."
-                            dem_ref_cranges = [
-                                (m.start(), m.end()) for m in re.finditer(r"this", utterance)
-                            ]
-                            response.append((
-                                "generate",
-                                {
-                                    "utterance": utterance,
-                                    "pointing": {
-                                        dem_ref_cranges[0]: (gt_ent_path, False),
-                                        dem_ref_cranges[1]: (dt_ent_path, False)
-                                    }
+                        # Inform agent to use the ground-truth part instead
+                        # of the distractor part, providing full descriptions
+                        # of their properties.
+                        gt_descriptor = sampled_parts[gt_inst]["type"]
+                        if "color" in sampled_parts[gt_inst]:
+                            gt_descriptor = " ".join([
+                                sampled_parts[gt_inst]["color"], gt_descriptor
+                            ])
+                        dt_descriptor = sampled_parts[ref_inst]["type"]
+                        if "color" in sampled_parts[ref_inst]:
+                            dt_descriptor = " ".join([
+                                sampled_parts[ref_inst]["color"], dt_descriptor
+                            ])
+                        utterance = f"Use this {gt_descriptor} instead of this {dt_descriptor}."
+                        dem_ref_cranges = [
+                            (m.start(), m.end()) for m in re.finditer(r"this", utterance)
+                        ]
+                        response.append((
+                            "generate",
+                            {
+                                "utterance": utterance,
+                                "pointing": {
+                                    dem_ref_cranges[0]: (get_path(gt_handle), False),
+                                    dem_ref_cranges[1]: (get_path(ref_handle), False)
                                 }
+                            }
+                        ))
+                        if self.player_type == "full":
+                            # Directly utter the (one and only) relevant constraint
+                            # violated by use of the distractor instance
+                            constraint = sampled_parts[ref_inst]["violated_constraint"][3]
+                            response.append((
+                                "generate", { "utterance": constraint, "pointing": {} }
                             ))
-                            if self.player_type == "full":
-                                # Directly utter the (one and only) relevant constraint
-                                # violated by use of the distractor instance
-                                constraint = sampled_parts[ref_inst]["violated_constraint"][3]
-                                response.append((
-                                    "generate", { "utterance": constraint, "pointing": {} }
-                                ))
 
                 # Some constraints are better manually detected and handled here, (possibly
                 # duplicate handling, but not a big problem)

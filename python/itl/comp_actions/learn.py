@@ -39,13 +39,8 @@ def identify_mismatch(agent, statement):
     """
     xb_updated = False          # Return value
 
-    gq, bvars, ante, cons = statement
+    _, _, ante, cons = statement
     ex_mem = agent.lt_mem.exemplars         # Shortcut var
-
-    color_concs = {
-        agent.lt_mem.lexicon.s2d[("a", col)][0][1]
-        for col in ["red", "green", "blue", "white", "gold"]
-    }
 
     # The code snippet commented out below is the legacy from the first and
     # second chapters where inference of whole from parts played important roles.
@@ -144,15 +139,39 @@ def identify_mismatch(agent, statement):
                 # need to obtain and register its 3D structure. Add a series of
                 # 3D inspection actions to the agenda deque, with the labeled
                 # instance as inspection target.
-                operating = "plan_goal" in agent.planner.execution_state
                 inspection_plan = _inspection_plan(agent, ex_obj, (conc_type, conc_ind))
                 agent.planner.agenda = deque(inspection_plan) + agent.planner.agenda
-                if operating:
-                    # Adding a layer of wait-for-user-reaction buffer; exactly one
-                    # is needed
-                    if ("execute_command", (None, None)) in agent.planner.agenda:
-                        agent.planner.agenda.remove(("execute_command", (None, None)))
-                    agent.planner.agenda.appendleft(("execute_command", (None, None)))
+
+                # Always safe to ask this, in case proper supertype info has
+                # not been introduced... May be redundant, but KB entry addition
+                # is idempotent; better safe than sorry.
+
+                # NL surface form and corresponding logical form
+                part_name = agent.lt_mem.lexicon.d2s[(conc_type, conc_ind)][0][1]
+                surface_form = f"What kind of part is {part_name}?"
+                gq = ("Q",); bvars = ("x1",); ante = []
+                cons = [
+                    ("sp", "subtype", ["x0", "x1"]),
+                    ("n", part_name, ["x0"])
+                ]
+                logical_form = (gq, bvars, ante, cons)
+
+                # Referents & predicates info
+                referents = {
+                    "e": { "mood": "?" },
+                    "x0": { "entity": None, "rf_info": {} }
+                }
+                predicates = {
+                    "pc0": (("sp", "subtype"), "sp_subtype"),
+                    "pc1": (("n", part_name), f"{conc_type}_{conc_ind}")
+                }
+
+                agent.lang.dialogue.to_generate.append(
+                    (logical_form, surface_form, referents, predicates, {})
+                )
+                agent.planner.agenda.appendleft(("execute_command", (None, None)))
+                    # Adding a layer of wait-for-user-reaction buffer
+                agent.planner.agenda.appendleft(("generate", ()))
 
             added_xi = _add_scene_and_exemplar_2d(
                 scene_id, scene_img, pointer,
@@ -185,8 +204,7 @@ def identify_generics(agent, statement, provenance):
     kb_updated = False          # Return value
 
     # Taxonomy relations (identified by "sp_subtype" literal)
-    taxonomy_rel = any(lit.name=="sp_subtype" for lit in cons)
-    if taxonomy_rel:
+    if any(lit.name=="sp_subtype" for lit in cons):
         (subtype, _), (supertype, _) = next(
             lit for lit in cons if lit.name=="sp_subtype"
         ).args
@@ -206,9 +224,36 @@ def identify_generics(agent, statement, provenance):
             U_IN_PR, provenance, "taxonomy"
         )
 
-    # General properties (identified by "forall" quantifiers)    
-    general_prop = "forall" in gq
-    if general_prop:
+    # Detect indirect taxonomy relation implication from "Is there a ~?"
+    # "This is a ~" QA pair. This needs to be implemented in order to 
+    # ensure all part subtypes receive appropriate supertypes referenced
+    # in valid truck (sub)structures.
+    if len(cons) == 1 and len(ante) == 0:
+        resolved_record = agent.lang.dialogue.export_resolved_record()
+        entailed_supertypes = set(); q_asked = None
+        for spk, turn_clauses in resolved_record:
+            for ((_, _, _, p_cons), _, clause_info) in turn_clauses:
+                if spk == "Student" and clause_info["mood"] == "?" and len(p_cons) == 1:
+                    q_asked = p_cons[0]
+                if spk == "Teacher" and clause_info["mood"] == "." and len(p_cons) == 1 \
+                    and q_asked is not None and p_cons[0].name.startswith("pcls"):
+                    if p_cons == cons and q_asked.name != cons[0].name:
+                        entailed_supertypes.add(q_asked.name)
+                    q_asked = None
+        subtype = cons[0].name
+        for supertype in entailed_supertypes:
+            res = agent.lt_mem.kb.add(
+                (
+                    [Literal(subtype, wrap_args("X"))],
+                    [Literal(supertype, wrap_args("X"))]
+                ),
+                U_IN_PR, f"{provenance} (as answer to supertype existence query)",
+                "taxonomy"
+            )
+            kb_updated |= res
+
+    # General properties (identified by "forall" quantifiers)
+    if "forall" in gq:
         univ_q_vars = [v for q, v in zip(gq, bvars) if q == "forall"]
         exst_q_vars = [v for q, v in zip(gq, bvars) if q == "exists"]
         # Re-assign variable names to universally quantified vars first
@@ -268,6 +313,50 @@ def identify_generics(agent, statement, provenance):
         # Obtain the distractor & ground-truth objects' predicate sets
         dt_preds = {lit.name for lit in cons if lit.args[0] == (dt_obj, False)}
         gt_preds = {lit.name for lit in cons if lit.args[0] == (gt_obj, False)}
+
+        if len(dt_preds) == len(gt_preds) == 0:
+            # Most likely cases for languageless players, where no labels were
+            # explicitly provided; retrieve part type and color from recognition
+            
+            # Identify color concepts
+            color_concs = {
+                agent.lt_mem.lexicon.s2d[("a", col)][0][1]
+                for col in ["red", "green", "blue", "white", "gold"]
+            }
+
+            # Retrieve part type & color info
+            dt_scores = agent.vision.scene[dt_obj]["pred_cls"]
+            gt_scores = agent.vision.scene[gt_obj]["pred_cls"]
+            dt_color_inds = np.isin(np.arange(len(dt_scores)), list(color_concs))
+            gt_color_inds = np.isin(np.arange(len(gt_scores)), list(color_concs))
+            dt_noncolor_inds = ~dt_color_inds
+            gt_noncolor_inds = ~gt_color_inds
+
+            # Type info from exec_state["recognition"] if available, otherwise
+            # from prediction scores in agent.vision.scene
+            if dt_obj in exec_state["recognitions"]:
+                dt_type = exec_state["recognitions"][dt_obj]
+            else:
+                dt_scores_noncolor = dt_scores.copy()
+                dt_scores_noncolor[dt_color_inds] = np.nan
+                dt_type = np.nanargmax(dt_scores_noncolor)
+            if gt_obj in exec_state["recognitions"]:
+                gt_type = exec_state["recognitions"][gt_obj]
+            else:
+                gt_scores_noncolor = gt_scores.copy()
+                gt_scores_noncolor[gt_color_inds] = np.nan
+                gt_type = np.nanargmax(gt_scores_noncolor)
+
+            # Retrieve color info from prediction scores in agent.vision.scene
+            dt_scores_color = dt_scores.copy()
+            dt_scores_color[dt_noncolor_inds] = np.nan
+            dt_color = np.nanargmax(dt_scores_color)
+            gt_scores_color = gt_scores.copy()
+            gt_scores_color[gt_noncolor_inds] = np.nan
+            gt_color = np.nanargmax(gt_scores_color)
+
+            dt_preds |= {f"pcls_{dt_type}", f"pcls_{dt_color}"}
+            gt_preds |= {f"pcls_{gt_type}", f"pcls_{gt_color}"}
 
         # Let's consider the current build target as the 'scope' of constraint
         # applicability
@@ -416,10 +505,8 @@ def handle_neologism(agent, dialogue_state):
         inspection_plan = _inspection_plan(agent, ex_obj, novel_concept)
         inspection_plans_concat += inspection_plan
 
-        # In our domain, any novel part concept is a subtype of some
-        # part supertype. The neologism currently being resolved by
-        # exemplification also needs supertype info if it doesn't have
-        # any.
+        # The neologism currently being resolved by exemplification also
+        # needs supertype info
         # (In previous iterations, the taxonomy query is asked only when
         # there were no relevant taxonomy entries in KB. However, as some
         # subtypes can have more than one supertypes, not asking the question
@@ -617,6 +704,8 @@ def analyze_demonstration(agent, demo_data):
     # Collecting scene image and masks at the initial setting, fecthed and organized
     # by env_handle fields in agent.vision.scene
     for oi, obj in agent.vision.scene.items():
+        # Skip distractors, which are never used in full demos
+        if not obj["env_handle"].startswith("t"): continue
         vision_2d_data[obj["env_handle"]].append((
             obj["scene_img"], obj["pred_mask"]
         ))
@@ -827,39 +916,106 @@ def analyze_demonstration(agent, demo_data):
             # Make way for new data
             inspect_data = { "inst": None, "img": {}, "msk": {}, "pose": {} }
 
-    # Reconstruct 3D structure of the inspected object instances
-    v3d_it = tqdm(
-        vision_3d_data.items(), desc="Extracting 3D structure", leave=False
+    # Process vision 2D data to obtain instance-level embeddings
+    vis_model = agent.vision.model; vis_model.eval()
+    vision_2d_data = {
+        part_inst: [
+            (
+                image, mask, bg_image := blur_and_grayscale(image),
+                visual_prompt_by_mask(image, bg_image, [mask])
+            )
+            for image, mask in examples
+        ]
+        for part_inst, examples in vision_2d_data.items()
+    }
+    v2d_it = tqdm(
+        vision_2d_data.items(), desc="Extracting 2D features", leave=False
     )
-    for inst, (data_img, data_msk, data_pose) in v3d_it:
-        vision_3d_data[inst] = agent.vision.reconstruct_3d_structure(
-            data_img, data_msk, data_pose, CON_GRAPH, STORE_VP_INDS
-        )
+    with torch.no_grad():
+        for part_inst, examples in v2d_it:
+            examples_with_embs = []
+            for data in examples:
+                image, mask, _, vis_prompt = data
+                vp_processed = vis_model.dino_processor(images=vis_prompt, return_tensors="pt")
+                vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
+                vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
+                f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
+                examples_with_embs.append((image, mask, f_vec))
+            vision_2d_data[part_inst] = examples_with_embs
+
+    # Grouping part instances by their 'type code', i.e., licensed NL label code
+    # data received from Unity
+    group_by_type_codes = defaultdict(set)
+    for obj in agent.vision.scene.values():
+        group_by_type_codes[obj["type_code"]].add(obj["env_handle"])
+    group_by_type_codes = dict(group_by_type_codes)
 
     # Tag each part instance with their visual concept index, registering any
     # new visual concepts & neologisms; we assume here all neologisms are nouns
     # (corresponding to 'pcls')
     inst2conc_map = {}; conc_supertypes = {}
     if agent.cfg.exp.player_type in ["bool", "demo"]:
-        # No access to any NL labeling; first assign new concept indices for
-        # part instances with vision_3d_data available (obtained from multi-
-        # view inspection), as they are understood to have all distinct types.
-        # Instances without vision_3d_data will later be classified into one
-        # of the newly assigned concepts.
+        # No access to any NL labeling; first assign concept indices for part
+        # instances with vision_3d_data available (obtained from multi-view
+        # inspection), as they are assumed to have all distinct types; instances
+        # without vision_3d_data will later be classified into one of the assigned
+        # concepts.
+
+        # Giving language-less players some unfair advantage, allowing them
+        # to 'cheat' by constraining the pool of previously known concepts
+        # against which each part type introduced in the full demo is compared,
+        # namely those sharing part supertypes
+        known_conc_supertypes = {
+            conc_ind: next(iter(
+                agent.lt_mem.exemplars.object_3d[conc_ind][3].values()
+            ))[1].split("/")[0]
+            for conc_ind in agent.lt_mem.exemplars.binary_classifiers_2d["pcls"]
+            if conc_ind in agent.lt_mem.exemplars.object_3d
+        }
+        novel_concs = set()
         for part_inst in vision_3d_data:
-            new_conc_ind = agent.vision.add_concept("pcls")
-            inst2conc_map[part_inst] = new_conc_ind
-            # Store 'identification code strings' so that they can be passed
-            # to Unity environment when executing pick-up actions, which will
-            # be compared against the list of licensed labels to simulate
-            # pick-up actions with correct/perturbed poses. This is needed
-            # for language-less player types only for their lack of access
-            # to NL labels.
-            type_code = next(
-                obj["type_code"] for obj in agent.vision.scene.values()
-                if obj["env_handle"] == part_inst
-            )
-            agent.lt_mem.lexicon.codesheet[new_conc_ind] = type_code
+            # See if this exemplar's feature vector is classified as positive
+            # by any of the (restricted) potential known concept's binary classifier
+            part_supertype = re.findall(r"t_(.*)_\d+$", part_inst)[0]
+            potential_matches = {
+                conc_ind: agent.lt_mem.exemplars.binary_classifiers_2d["pcls"][conc_ind]
+                for conc_ind in known_conc_supertypes
+                if part_supertype == known_conc_supertypes[conc_ind]
+            }
+            potential_matches = {
+                conc_ind: bin_clf.predict_proba(
+                    vision_2d_data[part_inst][0][2][None]
+                )[0][1]
+                for conc_ind, bin_clf in potential_matches.items()
+            }
+
+            if any(score >= 0.5 for score in potential_matches.values()):
+                # The exemplar looks like some known concept(s), classify
+                # as instance of one with the maximum score, without registering
+                # a novel concept.
+                inst2conc_map[part_inst] = max(
+                    potential_matches, key=lambda c: potential_matches[c]
+                )
+            else:
+                # The exemplar does not look like any of the known concepts,
+                # assign novel concept indices. Register a new concept and classify
+                # the exemplar as its instance.
+                new_conc_ind = agent.vision.add_concept("pcls")
+                inst2conc_map[part_inst] = new_conc_ind
+                novel_concs.add(new_conc_ind)
+
+                # Store 'identification code strings' so that they can be passed
+                # to Unity environment when executing pick-up actions, which will
+                # be compared against the list of licensed labels to simulate
+                # pick-up actions with correct/perturbed poses. This is needed
+                # for language-less player types only for their lack of access
+                # to NL labels.
+                type_code = next(
+                    code for code, insts in group_by_type_codes.items()
+                    if part_inst in insts
+                )
+                agent.lt_mem.lexicon.codesheet[new_conc_ind] = type_code
+
     else:
         # Has access to NL labeling of part & subassembly instances, use them
         assert agent.cfg.exp.player_type in ["label", "full"]
@@ -878,6 +1034,7 @@ def analyze_demonstration(agent, demo_data):
             # In whichever case, the symbol shouldn't be a 'unresolved neologism'
             if sym in agent.lang.unresolved_neologisms:
                 del agent.lang.unresolved_neologisms[sym]
+
         # Also process any remaining neologisms denoting hypernyms and holonyms
         for part_supertype_name in part_supertype_labeling.values():
             sym = ("n", part_supertype_name)
@@ -893,6 +1050,7 @@ def analyze_demonstration(agent, demo_data):
                 agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
             if sym in agent.lang.unresolved_neologisms:
                 del agent.lang.unresolved_neologisms[sym]
+
         # Also process any hyper/hyponymy relations provided
         for part_subtype, (part_supertype, raw) in hyp_rels.items():
             subtype_conc = agent.lt_mem.lexicon.s2d[("n", part_subtype)][0][1]
@@ -906,42 +1064,6 @@ def analyze_demonstration(agent, demo_data):
             )
             conc_supertypes[subtype_conc] = supertype_conc
 
-    # Process 3D vision data, storing reconstructed structure data in XB    
-    for part_inst, reconstruction in vision_3d_data.items():
-        point_cloud, views, descriptors = reconstruction
-
-        # Store the reconstructed structure info in XB
-        exemplars.add_exs_3d(
-            inst2conc_map[part_inst],
-            np.asarray(point_cloud.points), views, descriptors
-        )
-
-    # Process vision 2D data to obtain instance-level embeddings
-    vision_2d_data = {
-        part_inst: [
-            (
-                image, mask, bg_image := blur_and_grayscale(image),
-                visual_prompt_by_mask(image, bg_image, [mask])
-            )
-            for image, mask in examples
-        ]
-        for part_inst, examples in vision_2d_data.items()
-    }
-    vis_model = agent.vision.model; vis_model.eval()
-    with torch.no_grad():
-        v2d_it = tqdm(
-            vision_2d_data.items(), desc="Extracting 2D features", leave=False
-        )
-        for part_inst, examples in v2d_it:
-            examples_with_embs = []
-            for data in examples:
-                image, mask, _, vis_prompt = data
-                vp_processed = vis_model.dino_processor(images=vis_prompt, return_tensors="pt")
-                vp_pixel_values = vp_processed.pixel_values.to(vis_model.dino.device)
-                vp_dino_out = vis_model.dino(pixel_values=vp_pixel_values, return_dict=True)
-                f_vec = vp_dino_out.pooler_output.cpu().numpy()[0]
-                examples_with_embs.append((image, mask, f_vec))
-            vision_2d_data[part_inst] = examples_with_embs
     # Add 2D vision data in XB, based on the newly assigned pcls concept indices
     updated_concs = set()
     for part_inst, examples in vision_2d_data.items():
@@ -977,13 +1099,31 @@ def analyze_demonstration(agent, demo_data):
         if part_inst in inst2conc_map: continue
 
         type_code = next(
-            obj["type_code"] for obj in agent.vision.scene.values()
-            if obj["env_handle"] == part_inst
+            code for code, insts in group_by_type_codes.items()
+            if part_inst in insts
         )
         inst2conc_map[part_inst] = next(
-            conc_ind
-            for conc_ind, label in agent.lt_mem.lexicon.codesheet.items()
-            if label == type_code
+            inst2conc_map[inst] for inst in group_by_type_codes[type_code]
+            if inst in inst2conc_map
+        )
+
+    # Reconstruct 3D structure of the inspected object instances
+    v3d_it = tqdm(
+        vision_3d_data.items(), desc="Extracting 3D structure", leave=False
+    )
+    for part_inst, (data_img, data_msk, data_pose) in v3d_it:
+        # Only need to reconstruct for novel concepts
+        if inst2conc_map[part_inst] not in novel_concs: continue
+
+        reconstruction = agent.vision.reconstruct_3d_structure(
+            data_img, data_msk, data_pose, CON_GRAPH, STORE_VP_INDS
+        )
+        point_cloud, views, descriptors = reconstruction
+
+        # Store the reconstructed structure info in XB
+        exemplars.add_exs_3d(
+            inst2conc_map[part_inst],
+            np.asarray(point_cloud.points), views, descriptors
         )
 
     # Finally process assembly data; estimate pose of assembled parts in hand,
@@ -1384,7 +1524,7 @@ def posthoc_episode_analysis(agent):
         if any(
             scn[objs[0]] == -labels[0] and scn[objs[1]] == -labels[1]
             for objs, labels in exec_state["recognitions"].items()
-            if isinstance(objs, tuple)
+            if isinstance(objs, tuple) and set(objs) <= set(scn)
         ): continue
 
         # Need exact subtype recognition for getting probability scores,
@@ -1440,6 +1580,7 @@ def posthoc_episode_analysis(agent):
         assert isinstance(objs, tuple)
         obj1, obj2 = objs
         label1, label2 = -labels[0], -labels[1]
+        if not (set(objs) <= set(final_recognitions)): continue
 
         obj1_is_label1 = final_recognitions[obj1] == label1
         obj2_is_label2 = final_recognitions[obj2] == label2
