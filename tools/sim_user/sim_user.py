@@ -276,6 +276,7 @@ class SimulatedTeacher:
                         # Sample a valid workplan for demonstration and load for execution
                         sampled_plan = self._sample_demo_plan()
                         self.ongoing_demonstration = ("full", sampled_plan)
+                        ep_st["joins_remaining"] = set()    # No joins for agent to accomplish
 
                         # Notify agent that user will demonstrate how to build one
                         response.append((
@@ -598,6 +599,12 @@ class SimulatedTeacher:
                         # object just picked up)
                         interrupted = True
 
+                        # Effect of undoing the pick-up; should be placed here so that
+                        # self._sample_demo_step() won't take any additional drop action
+                        held_left = ep_st["left"]
+                        held_right = ep_st["right"]
+                        ep_st[side] = None
+
                         response.append((
                             "generate", { "utterance": "Stop.", "pointing": {} }
                         ))
@@ -626,12 +633,12 @@ class SimulatedTeacher:
                             # languageful players, where such suggestions of alternatives are
                             # given after inquiring the intended join and getting response)
                             if distracted:
-                                def get_path(handle):
+                                def get_path(handle, held_left, held_right):
                                     # Util method for obtaining entity path based on current
                                     # position of the entity with provided handle
-                                    if handle in subassems.get(ep_st["left"], set()):
+                                    if handle in subassems.get(held_left, set()):
                                         return f"/Student Agent/Left Hand/*/{handle}"
-                                    elif handle in subassems.get(ep_st["right"], set()):
+                                    elif handle in subassems.get(held_right, set()):
                                         return f"/Student Agent/Right Hand/*/{handle}"
                                     else:
                                         return f"/*/{handle}"
@@ -667,8 +674,8 @@ class SimulatedTeacher:
                                         {
                                             "utterance": "Use this one instead of this one.",
                                             "pointing": {
-                                                (4, 8): (get_path(gt_handle), False),
-                                                (24, 28): (get_path(obj_picked_up), False)
+                                                (4, 8): (get_path(gt_handle, held_left, held_right), False),
+                                                (24, 28): (get_path(obj_picked_up, held_left, held_right), False)
                                             }
                                         }
                                     ))
@@ -684,7 +691,6 @@ class SimulatedTeacher:
                             ]
 
                         # Pick-up undone
-                        ep_st[side] = None
                         response.append((f"drop_{side}", { "parameters": () }))
 
                 if utt.startswith("# Effect: drop"):
@@ -918,12 +924,12 @@ class SimulatedTeacher:
             elif utt.startswith("I was trying to "):
                 # Agent reported its originally intended join of two part instances
                 # which is based on incorrect grounding
-                def get_path(handle):
+                def get_path(handle, held_left, held_right):
                     # Util method for obtaining entity path based on current
                     # position of the entity with provided handle
-                    if handle in subassems.get(ep_st["left"], set()):
+                    if handle in subassems.get(held_left, set()):
                         return f"/Student Agent/Left Hand/*/{handle}"
-                    elif handle in subassems.get(ep_st["right"], set()):
+                    elif handle in subassems.get(held_right, set()):
                         return f"/Student Agent/Right Hand/*/{handle}"
                     else:
                         return f"/*/{handle}"
@@ -949,7 +955,7 @@ class SimulatedTeacher:
                     if reported_subtype != ref_subtype:
                         # For incorrect groundings results, provide appropriate corrective
                         # feedback
-                        ent_path = get_path(ref_handle)
+                        ent_path = get_path(ref_handle, ep_st["left"], ep_st["right"])
                         response += [
                             ("generate", {
                                 "utterance": f"This is not a {reported_subtype}.",
@@ -1007,8 +1013,12 @@ class SimulatedTeacher:
                             {
                                 "utterance": utterance,
                                 "pointing": {
-                                    dem_ref_cranges[0]: (get_path(gt_handle), False),
-                                    dem_ref_cranges[1]: (get_path(ref_handle), False)
+                                    dem_ref_cranges[0]: (
+                                        get_path(gt_handle, ep_st["left"], ep_st["right"]), False
+                                    ),
+                                    dem_ref_cranges[1]: (
+                                        get_path(ref_handle, ep_st["left"], ep_st["right"]), False
+                                    )
                                 }
                             }
                         ))
