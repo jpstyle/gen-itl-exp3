@@ -1520,13 +1520,6 @@ def posthoc_episode_analysis(agent):
     # while accounting for any pairwise negative label info
     scenarios_scored = []
     for scn in recursive_assign(0):
-        # All pairwise negative label info should be observed
-        if any(
-            scn[objs[0]] == -labels[0] and scn[objs[1]] == -labels[1]
-            for objs, labels in exec_state["recognitions"].items()
-            if isinstance(objs, tuple) and set(objs) <= set(scn)
-        ): continue
-
         # Need exact subtype recognition for getting probability scores,
         # fetch the recognized subtypes if compatible with scenario, otherwise
         # select best ones according to specified supertypes
@@ -1584,7 +1577,13 @@ def posthoc_episode_analysis(agent):
 
         obj1_is_label1 = final_recognitions[obj1] == label1
         obj2_is_label2 = final_recognitions[obj2] == label2
-        assert not (obj1_is_label1 and obj2_is_label2)
+
+        if obj1_is_label1 and obj2_is_label2:
+            # Cases like this are usually due to the agent's inability to
+            # capture part supertypes in admitted structures... Ignore such
+            # cases
+            continue
+
         if obj1_is_label1:
             # obj1 is label1, so obj2 shouldn't be label2
             pred_prob = agent.vision.scene[obj2]["pred_cls"][label2].item()

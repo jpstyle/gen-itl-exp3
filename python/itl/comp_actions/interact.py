@@ -811,10 +811,14 @@ def _plan_assembly(agent, build_target):
             for obj, n in unification_choice.items():
                 collected_unification_choices[obj].add(n)
 
+        safe_unification_choice = {
+            n: list(objs)[0] for n, objs in collected_unification_choices.items()
+            if len(objs) == 1
+        }
+
         # Obtain intersection of sets of joins in all the join trees, invariant
         # to naming of intermediate subassemblies. The intersection represents
-        # collection of edges common to all of the sanitized join trees, thus
-        # safe to make.
+        # collection of edges common to all of the valid join trees.
         def remaining_join_signatures(join_tree):
             join_tree = join_tree.copy()
             available_joins = [
@@ -836,8 +840,8 @@ def _plan_assembly(agent, build_target):
         common_joins = set.intersection(*[
             remaining_join_signatures(join_tree) for join_tree, _ in valid_join_trees
         ])
-        # Build the final intersection tree, combining the commonly occurring joins
-        # into a single tree/forest, naming intermediate products on the fly
+        # Build the intersection tree, combining the commonly occurring joins into a single
+        # tree/forest, naming intermediate products on the fly
         tree_intersection = nx.DiGraph(); i = 0
         sa_sgns = {}; sa_sgns_inv = {}
         while len(common_joins) > 0:
@@ -866,6 +870,17 @@ def _plan_assembly(agent, build_target):
                 ])
                 for n1, n2 in unprocessed_joins
             }
+
+        # Sanitize the intersection tree by removing any joins that involve unsafe
+        # nodes in non-atomic subassemblies, and any following joins that use the
+        # products of such joins (i.e., descendant nodes)
+        unsafe_joins = set()
+        for n, res, join_by in tree_intersection.edges(data="join_by"):
+            if n != join_by and join_by not in safe_unification_choice.values():
+                unsafe_joins.add(res)
+                unsafe_joins |= nx.descendants(tree_intersection, res)
+        tree_intersection.remove_nodes_from(unsafe_joins)
+        tree_intersection.remove_nodes_from(set(nx.isolates(tree_intersection)))
 
         # Join tree is complete if all the nodes and edges are retained after
         # the series of intersection
@@ -897,10 +912,6 @@ def _plan_assembly(agent, build_target):
                     certified_pool[pool_conc].add(cons[0].args[0][0])
                     q_asked = False
 
-        safe_unification_choice = {
-            n: list(objs)[0] for n, objs in collected_unification_choices.items()
-            if len(objs) == 1
-        }
         action_sequence, node2obj_map = _linearize_join_tree(
             copy.deepcopy(tree_intersection), exec_state, connection_graph,
             connect_edges, atomic_node_concs, safe_unification_choice,
