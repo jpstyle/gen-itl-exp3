@@ -1,7 +1,7 @@
 opencv-python
-torch
+torch==2.4.0
 torchvision
-transformers
+transformers==4.44.2
 scipy
 scikit-image
 matplotlib
