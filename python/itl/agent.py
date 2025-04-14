@@ -117,7 +117,7 @@ class ITLAgent:
 
         # Load agent model checkpoint file
         try:
-            ckpt = torch.load(local_ckpt_path)
+            ckpt = torch.load(local_ckpt_path, weights_only=False)
         except RuntimeError:
             with open(local_ckpt_path, "rb") as f:
                 ckpt = pickle.load(f)
