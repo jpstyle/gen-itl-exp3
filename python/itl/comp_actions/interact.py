@@ -947,8 +947,12 @@ def _plan_assembly(agent, build_target):
             # For non-objects, keep the broad supertype so they can be queried
             # for later
             recognitions[oi] = conc
-    # Prioritize existing ones
-    recognitions.update(exec_state["recognitions"])
+    # Incorporate pairwise negative feedback provided so far, if any
+    recognitions |= {
+        objs: labels
+        for objs, labels in exec_state["recognitions"].items()
+        if isinstance(objs, tuple)
+    }
 
     # Update and record metrics
     exec_state["metrics"]["num_planning_attempts"] += total_planning_attempts
