@@ -953,7 +953,7 @@ def analyze_demonstration(agent, demo_data):
     # Tag each part instance with their visual concept index, registering any
     # new visual concepts & neologisms; we assume here all neologisms are nouns
     # (corresponding to 'pcls')
-    inst2conc_map = {}; conc_supertypes = {}
+    inst2conc_map = {}; conc_supertypes = {}; novel_concs = set()
     if agent.cfg.exp.player_type in ["bool", "demo"]:
         # No access to any NL labeling; first assign concept indices for part
         # instances with vision_3d_data available (obtained from multi-view
@@ -972,7 +972,6 @@ def analyze_demonstration(agent, demo_data):
             for conc_ind in agent.lt_mem.exemplars.binary_classifiers_2d["pcls"]
             if conc_ind in agent.lt_mem.exemplars.object_3d
         }
-        novel_concs = set()
         for part_inst in vision_3d_data:
             # See if this exemplar's feature vector is classified as positive
             # by any of the (restricted) potential known concept's binary classifier
