@@ -21,6 +21,7 @@ import tqdm
 import hydra
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
 from omegaconf import OmegaConf
 
 logger = logging.getLogger(__name__)
@@ -133,10 +134,23 @@ def main(cfg):
         "label": "tab:green",
         "full": "tab:blue"
     }
+    data_titles = {
+        "cumulative_regret": "Cumulative regrets",
+        "num_search_failure": "# Search Failure",
+        "num_invalid_pickup": "# Pickups of Physically Infeasible Pairs",
+        "num_invalid_join": "# Joins at Incorrect Pose",
+        "num_planning_forfeiture": "# Planning Forfeitures",
+        "num_distractor_pickup": "# Pickups of Distractor Instances",
+        "episode_discarded": "# Aborted Episodes",
+        "num_planning_attempts": "# Planning Attempts",
+        "num_collision_queries": "# Queries to Collision Checker",
+        "episode_length": "Episode Lengths",
+        "mean_f1": "Mean F1 Scores"
+    }
 
     # Aggregate and visualize: cumulative regret curve
     for d_name, collected_data in results.items():
-        _, ax = plt.subplots(figsize=(8, 6), dpi=80)
+        _, ax = plt.subplots(figsize=(8, 5), dpi=100)
         ymax = 0
 
         for player_type, data in collected_data.items():
@@ -163,13 +177,17 @@ def main(cfg):
 
         # Plot curve
         ax.set_xlabel("# training episodes")
-        ax.set_xticks([10, 20, 30, 40])
+        ax.set_xticks([5, 10, 20, 30, 40])
         ax.set_ylabel(d_name)
-        if d_name == "mean_f1":
-            ax.set_ylim(0, 1)
-        else:
-            ax.set_ylim(0, ymax * 1.1)
+        yrange = (0, 1) if d_name == "mean_f1" else (0, ymax * 1.1)
+        ax.set_xlim(0, 40)
+        ax.set_ylim(yrange[0], yrange[1])
         ax.grid()
+        if task == "subtype":
+            ax.vlines(
+                5, yrange[0], yrange[1],
+                color="k", linestyle="--", linewidth=1.2
+            )
 
         # Ordering legends according to the prespecified ordering above
         handles, labels = ax.get_legend_handles_labels()
@@ -177,11 +195,15 @@ def main(cfg):
             [(h, l) for h, l in zip(handles, labels)],
             key=lambda x: config_ord.index(x[1])
         )
-        handles = [hl[0] for hl in hls_sorted]
-        labels = [config_aliases.get(hl[1], hl[1]) for hl in hls_sorted]
+        handles = [
+            hl[0] for hl in hls_sorted
+        ] + [mlines.Line2D([], [], color='k', linestyle="--", linewidth=1.2)]
+        labels = [
+            config_aliases.get(hl[1], hl[1]) for hl in hls_sorted
+        ] + ["Novel subtype introduction"]
         ax.legend(handles, labels)
 
-        ax.set_title(f"{d_name} ({len(collected_configs)} seeds)")
+        ax.set_title(f"{data_titles[d_name]} ({len(collected_configs)} datasets)")
         plt.savefig(os.path.join(cfg.paths.outputs_dir, f"{d_name}.png"), bbox_inches="tight")
 
     # print("")
