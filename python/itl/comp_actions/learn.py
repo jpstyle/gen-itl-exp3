@@ -967,17 +967,17 @@ def analyze_demonstration(agent, demo_data):
         # namely those sharing part supertypes
         known_conc_supertypes = {
             conc_ind: next(iter(
-                agent.lt_mem.exemplars.object_3d[conc_ind][3].values()
+                exemplars.object_3d[conc_ind][3].values()
             ))[1].split("/")[0]
-            for conc_ind in agent.lt_mem.exemplars.binary_classifiers_2d["pcls"]
-            if conc_ind in agent.lt_mem.exemplars.object_3d
+            for conc_ind in exemplars.binary_classifiers_2d["pcls"]
+            if conc_ind in exemplars.object_3d
         }
         for part_inst in vision_3d_data:
             # See if this exemplar's feature vector is classified as positive
             # by any of the (restricted) potential known concept's binary classifier
             part_supertype = re.findall(r"t_(.*)_\d+$", part_inst)[0]
             potential_matches = {
-                conc_ind: agent.lt_mem.exemplars.binary_classifiers_2d["pcls"][conc_ind]
+                conc_ind: exemplars.binary_classifiers_2d["pcls"][conc_ind]
                 for conc_ind in known_conc_supertypes
                 if part_supertype == known_conc_supertypes[conc_ind]
             }
@@ -1030,6 +1030,10 @@ def analyze_demonstration(agent, demo_data):
                 agent.lt_mem.lexicon.add(sym, ("pcls", new_conc_ind))
                 inst2conc_map[part_inst] = new_conc_ind
 
+            # Novel if there isn't any positive exemplars
+            if len(exemplars.object_2d_pos["pcls"][inst2conc_map[part_inst]]) == 0:
+                novel_concs.add(inst2conc_map[part_inst])
+
             # In whichever case, the symbol shouldn't be a 'unresolved neologism'
             if sym in agent.lang.unresolved_neologisms:
                 del agent.lang.unresolved_neologisms[sym]
@@ -1063,29 +1067,6 @@ def analyze_demonstration(agent, demo_data):
             )
             conc_supertypes[subtype_conc] = supertype_conc
 
-    # Add 2D vision data in XB, based on the newly assigned pcls concept indices
-    updated_concs = set()
-    for part_inst, examples in vision_2d_data.items():
-        if part_inst not in inst2conc_map:
-            # Concept label info was not available (which happens for language-less
-            # player types)
-            continue
-
-        for image, mask, f_vec in examples:
-            exs_2d = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
-            pointers = {
-                ("pcls", inst2conc_map[inst], "pos" if inst==part_inst else "neg"): {
-                    # (Whether object is newly added to XB, index 0 as only one is newly
-                    # added each time)
-                    (True, 0)
-                }
-                for inst in vision_2d_data if inst in inst2conc_map
-            }
-            _, concs = exemplars.add_exs_2d(
-                scene_img=image, exemplars=exs_2d, pointers=pointers
-            )
-            updated_concs |= concs
-    exemplars.update_bin_clfs_2d(updated_concs)
     # Concept labels must be assigned to unlabeled part instances. An orthodox approach
     # would be to classify them to the closest example by visual features. However,
     # our abstraction approach of using a 'collision table cheat sheet' as oracle
@@ -1105,6 +1086,33 @@ def analyze_demonstration(agent, demo_data):
             inst2conc_map[inst] for inst in group_by_type_codes[type_code]
             if inst in inst2conc_map
         )
+
+    # Add 2D vision data in XB, based on the newly assigned pcls concept indices
+    updated_concs = set()
+    for part_inst, examples in vision_2d_data.items():
+        if part_inst not in inst2conc_map:
+            # Concept label info was not available (which happens for language-less
+            # player types)
+            continue
+
+        for image, mask, f_vec in examples:
+            exs_2d = [{ "scene_id": None, "mask": mask, "f_vec": f_vec }]
+            pointers = {
+                (
+                    "pcls", inst2conc_map[inst],
+                    "pos" if inst2conc_map[inst]==inst2conc_map[part_inst] else "neg"
+                ): {
+                    # Tuple of (whether object is newly added to XB, object index 0
+                    # as only one is newly added each time)
+                    (True, 0)
+                }
+                for inst in vision_2d_data if inst in inst2conc_map
+            }
+            _, concs = exemplars.add_exs_2d(
+                scene_img=image, exemplars=exs_2d, pointers=pointers
+            )
+            updated_concs |= concs
+    exemplars.update_bin_clfs_2d(updated_concs)
 
     # Reconstruct 3D structure of the inspected object instances
     v3d_it = tqdm(
@@ -1515,8 +1523,7 @@ def posthoc_episode_analysis(agent):
                 type_counts[c] -= 1
 
     # Examine each possibility for each object and commit to the best one
-    # based on existing few-shot classifier for each candidate concept,
-    # while accounting for any pairwise negative label info
+    # based on existing few-shot classifier for each candidate concept
     scenarios_scored = []
     for scn in recursive_assign(0):
         # Need exact subtype recognition for getting probability scores,

@@ -874,8 +874,13 @@ def _plan_assembly(agent, build_target):
         # Sanitize the intersection tree by removing any joins that involve unsafe
         # nodes in non-atomic subassemblies, and any following joins that use the
         # products of such joins (i.e., descendant nodes)
+        safe_atomics = {
+            n for n, _, join_by in tree_intersection.edges(data="join_by")
+            if n == join_by
+        }
         unsafe_joins = set()
         for n, res, join_by in tree_intersection.edges(data="join_by"):
+            if join_by in safe_atomics: continue
             if n != join_by and join_by not in safe_unification_choice.values():
                 unsafe_joins.add(res)
                 unsafe_joins |= nx.descendants(tree_intersection, res)

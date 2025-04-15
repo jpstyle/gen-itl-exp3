@@ -177,15 +177,16 @@ def main(cfg):
 
         # Plot curve
         ax.set_xlabel("# training episodes")
-        ax.set_xticks([5, 10, 20, 30, 40])
+        ax.set_xticks([10, 20, 30, 40])
         yrange = (0, 1) if d_name == "mean_f1" else (0, ymax * 1.1)
         ax.set_xlim(0, 40)
         ax.set_ylim(yrange[0], yrange[1])
         ax.grid()
         if task == "subtype":
+            ax.set_xticks([5, 10, 20, 30, 40])
             ax.vlines(
                 5, yrange[0], yrange[1],
-                color="k", linestyle="--", linewidth=1.2
+                color="grey", linestyle="--", linewidth=1.2
             )
 
         # Ordering legends according to the prespecified ordering above
@@ -196,10 +197,10 @@ def main(cfg):
         )
         handles = [
             hl[0] for hl in hls_sorted
-        ] + [mlines.Line2D([], [], color='k', linestyle="--", linewidth=1.2)]
+        ] + [mlines.Line2D([], [], color="grey", linestyle="--", linewidth=1.2)]
         labels = [
             config_aliases.get(hl[1], hl[1]) for hl in hls_sorted
-        ] + ["Novel subtype introduction"]
+        ] + ["Novel subtypes introduced"]
         ax.legend(handles, labels)
 
         ax.set_title(f"{data_titles[d_name]} ({len(collected_configs)} datasets)")
