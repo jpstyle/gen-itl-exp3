@@ -178,7 +178,6 @@ def main(cfg):
         # Plot curve
         ax.set_xlabel("# training episodes")
         ax.set_xticks([5, 10, 20, 30, 40])
-        ax.set_ylabel(d_name)
         yrange = (0, 1) if d_name == "mean_f1" else (0, ymax * 1.1)
         ax.set_xlim(0, 40)
         ax.set_ylim(yrange[0], yrange[1])
