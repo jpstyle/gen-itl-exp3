@@ -440,9 +440,16 @@ class SimulatedTeacher:
                     # of substructures --- except the final product "truck", which
                     # must be provided for all player types
                     dropped_sa = ep_st[side]
-                    if self.player_type == "full" or dropped_sa == "truck":
+                    if dropped_sa == "truck":
                         act_dscr.append({
                             "utterance": f"This is a {self.target_concept}.",
+                            "pointing": {
+                                (0, 4): (f"/Student Agent/*/{dropped_sa}", True)
+                            }
+                        })
+                    elif self.player_type == "full":
+                        act_dscr.append({
+                            "utterance": f"This is a {dropped_sa}.",
                             "pointing": {
                                 (0, 4): (f"/Student Agent/*/{dropped_sa}", True)
                             }
