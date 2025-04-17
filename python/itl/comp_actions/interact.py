@@ -959,14 +959,6 @@ def _plan_assembly(agent, build_target):
         if isinstance(objs, tuple)
     }
 
-    if any(
-        len([v2 for v2 in recognitions.values() if v2==v]) > 1
-        for k, v in recognitions.items()
-        if isinstance(k, str) and ("wheel" not in agent.lt_mem.lexicon.codesheet[v]) \
-            and ("bolt" not in agent.lt_mem.lexicon.codesheet[v])
-    ):
-        raise ValueError
-
     # Update and record metrics
     exec_state["metrics"]["num_planning_attempts"] += total_planning_attempts
     exec_state["metrics"]["num_collision_queries"] += total_query_count
