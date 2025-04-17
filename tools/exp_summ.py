@@ -137,7 +137,7 @@ def main(cfg):
     data_titles = {
         "cumulative_regret": "Cumulative regrets",
         "num_search_failure": "# Search Failure",
-        "num_invalid_pickup": "# Pickups of Physically Infeasible Pairs",
+        "num_invalid_pickup": "# Pickups of Incompatible Instance Pairs",
         "num_invalid_join": "# Joins at Incorrect Pose",
         "num_planning_forfeiture": "# Planning Forfeitures",
         "num_distractor_pickup": "# Pickups of Distractor Instances",
@@ -186,7 +186,7 @@ def main(cfg):
             ax.set_xticks([5, 10, 20, 30, 40])
             ax.vlines(
                 5, yrange[0], yrange[1],
-                color="grey", linestyle="--", linewidth=1.2
+                color="grey", linestyle="--", linewidth=1.1
             )
 
         # Ordering legends according to the prespecified ordering above
@@ -197,7 +197,7 @@ def main(cfg):
         )
         handles = [
             hl[0] for hl in hls_sorted
-        ] + [mlines.Line2D([], [], color="grey", linestyle="--", linewidth=1.2)]
+        ] + [mlines.Line2D([], [], color="grey", linestyle="--", linewidth=1.1)]
         labels = [
             config_aliases.get(hl[1], hl[1]) for hl in hls_sorted
         ] + ["Novel subtypes introduced"]

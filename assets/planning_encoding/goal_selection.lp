@@ -96,8 +96,8 @@ fill_node(O,N) :- must_unify(O,N).
 % Different objects cannot be forced to unify with the same node
 :- must_unify(O1,N1), must_unify(O2,N2), O1 != O2, N1 = N2.
 % Observe ext_conn relations
-:- ext_conn(O1,O2,_,_), fill_node(O1,N1,_), fill_node(O2,N2,_), not to_connect(N1,N2,_,_).
-:- ext_conn(O1,O2), fill_node(O1,N1,_), fill_node(O2,N2,_), not to_connect(N1,N2,_,_).
+:- ext_conn(O1,O2,_,_), fill_node(O1,N1), fill_node(O2,N2), not to_connect(N1,N2,_,_).
+:- ext_conn(O1,O2), fill_node(O1,N1), fill_node(O2,N2), not to_connect(N1,N2,_,_).
 
 % Supertype-subtype relations for ext_objs
 ext_obj(O,P2) :- ext_obj(O,P1), subtype_of(P1,P2).

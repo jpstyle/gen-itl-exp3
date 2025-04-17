@@ -1439,7 +1439,7 @@ def posthoc_episode_analysis(agent):
     # among possible options with predicted confidence values obtained from
     # few-shot classifiers. Update the exemplar base accordingly.
     build_target = agent.planner.execution_state["plan_goal"][1]
-    best_model = _goal_selection(agent, build_target)
+    best_model, goal_prg = _goal_selection(agent, build_target)
     tabulated_results = _tabulate_goal_selection_result(best_model)
     connection_graph, node_unifications = tabulated_results[3:5]
     atomic_node_concs, part_recognitions, hyp_rels = tabulated_results[5:]

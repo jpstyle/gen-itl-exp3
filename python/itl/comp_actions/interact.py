@@ -524,7 +524,7 @@ def _plan_assembly(agent, build_target):
     # First run ASP inference for selecting a viable target structure based
     # on agent's perception of scene objects and ongoing assembly progress
     # in environment so far
-    best_model = _goal_selection(agent, build_target)
+    best_model, goal_prg = _goal_selection(agent, build_target)
     if best_model is None:
         # If agent wasn't able to find a fitting target structure that comply
         # with the demonstrated join, it might mean two things, either currently
@@ -959,6 +959,14 @@ def _plan_assembly(agent, build_target):
         if isinstance(objs, tuple)
     }
 
+    if any(
+        len([v2 for v2 in recognitions.values() if v2==v]) > 1
+        for k, v in recognitions.items()
+        if isinstance(k, str) and ("wheel" not in agent.lt_mem.lexicon.codesheet[v]) \
+            and ("bolt" not in agent.lt_mem.lexicon.codesheet[v])
+    ):
+        raise ValueError
+
     # Update and record metrics
     exec_state["metrics"]["num_planning_attempts"] += total_planning_attempts
     exec_state["metrics"]["num_collision_queries"] += total_query_count
@@ -1372,7 +1380,7 @@ def _goal_selection(agent, build_target):
                 for atm in best_model if atm.name=="final_score"
             )
 
-    return best_model
+    return best_model, facts_prg + constraints_prg
 
 def _tabulate_goal_selection_result(model):
     """
