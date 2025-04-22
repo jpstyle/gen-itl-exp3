@@ -197,14 +197,17 @@ def main(cfg):
         )
         handles = [
             hl[0] for hl in hls_sorted
-        ] + [mlines.Line2D([], [], color="grey", linestyle="--", linewidth=1.1)]
+        ]
         labels = [
             config_aliases.get(hl[1], hl[1]) for hl in hls_sorted
-        ] + ["Novel subtypes introduced"]
+        ]
+        if task == "subtype":
+            handles += [mlines.Line2D([], [], color="grey", linestyle="--", linewidth=1.1)]
+            labels += ["Novel subtypes introduced"]
         ax.legend(handles, labels)
 
         ax.set_title(f"{data_titles[d_name]} ({len(collected_configs)} datasets)")
-        plt.savefig(os.path.join(cfg.paths.outputs_dir, f"{d_name}.png"), bbox_inches="tight")
+        plt.savefig(os.path.join(cfg.paths.outputs_dir, f"{task}_{d_name}.png"), bbox_inches="tight")
 
     # print("")
     # print(f"Endpoint cumulative regret CIs:")
