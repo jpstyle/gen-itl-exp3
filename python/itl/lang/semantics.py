@@ -41,9 +41,10 @@ class SemanticParser:
             #   11) "What were you trying to do?"
             #   12) "Stop." & "Continue."
             #   13) "A {truck_subtype} is a truck with {part_subtypes}."
-            #   14) "Use this {gt_descriptor} instead of this {dt_descriptor}."
-            #   15) "{part (tuple)} of a {subassembly_type} must (not) {constraint}."
-            #   16) "A {subassembly_type} must (not) {constraint}."
+            #   14) "Use this {description} instead of this {description}."
+            #   15) "Use this {gt_descriptor} instead of this {dt_descriptor}."
+            #   16) "{part (tuple)} of a {subassembly_type} must (not) {constraint}."
+            #   17) "A {subassembly_type} must (not) {constraint}."
             if re.match(r"Build a (.*)\.$", utt):
                 # Imperative command to build an instance of the specified concept
                 # from parts available in the scene
