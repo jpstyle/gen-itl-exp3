@@ -3,6 +3,12 @@ Some constants shared across the module
 """
 import networkx as nx
 
+# Experiment player_type values (exp.player_type)
+PLAYER_TYPES_LANGUAGELESS = ("minimal", "demo")
+PLAYER_TYPES_LANGUAGEFUL = ("label", "infer", "full")
+# Skip contrastive "use this instead" KB rule synthesis; nogood_objects still apply
+PLAYER_TYPES_NO_CONSTRAINT_INFERENCE = ("label", "full")
+
 EPS = 1e-10                 # Value used for numerical stabilization
 SR_THRES = 0.7              # Mismatch surprisal threshold
 U_IN_PR = 0.99              # How much the agent values information provided by the user

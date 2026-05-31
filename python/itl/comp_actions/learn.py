@@ -305,10 +305,9 @@ def identify_generics(agent, statement, provenance):
         # be used in planning for the remainder of this episode
         exec_state["nogood_objects"].add(dt_obj)
 
-        # No need to rely on contrastive labeling for constraint inference,
-        # as it is directly provided from user; full semantics player can
-        # return here
-        if agent.cfg.exp.player_type == "full": return False
+        # No contrastive constraint inference when the teacher gives explicit
+        # rules (full) or only instance labels without rule induction (label).
+        if agent.cfg.exp.player_type in ["full", "label"]: return False
 
         # Obtain the distractor & ground-truth objects' predicate sets
         dt_preds = {lit.name for lit in cons if lit.args[0] == (dt_obj, False)}
@@ -954,7 +953,7 @@ def analyze_demonstration(agent, demo_data):
     # new visual concepts & neologisms; we assume here all neologisms are nouns
     # (corresponding to 'pcls')
     inst2conc_map = {}; conc_supertypes = {}; novel_concs = set()
-    if agent.cfg.exp.player_type in ["bool", "demo"]:
+    if agent.cfg.exp.player_type in ["minimal", "demo"]:
         # No access to any NL labeling; first assign concept indices for part
         # instances with vision_3d_data available (obtained from multi-view
         # inspection), as they are assumed to have all distinct types; instances
@@ -1017,7 +1016,7 @@ def analyze_demonstration(agent, demo_data):
 
     else:
         # Has access to NL labeling of part & subassembly instances, use them
-        assert agent.cfg.exp.player_type in ["label", "full"]
+        assert agent.cfg.exp.player_type in ["label", "infer", "full"]
         for part_inst, part_subtype_name in part_subtype_labeling.items():
             sym = ("n", part_subtype_name)
             if sym in agent.lt_mem.lexicon:

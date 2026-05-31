@@ -268,7 +268,7 @@ class SimulatedTeacher:
 
                 if reported_neologism == self.target_concept:
                     # Truck supertype or a subtype
-                    if self.player_type in ["bool", "demo"] \
+                    if self.player_type in ["minimal", "demo"] \
                         or self.target_concept not in self.domain_knowledge["definitions"]:
                         # Need to demonstrate either if truck supertype is target concept
                         # or language-less player type (even for truck subtypes as well)
@@ -387,7 +387,7 @@ class SimulatedTeacher:
                         singleton_gr.add_node(target)
                         subassems[target] = singleton_gr
 
-                    if self.player_type in ["label", "full"]:
+                    if self.player_type in ["label", "infer", "full"]:
                         inst = re.findall(r"^t_(.*)_(\d+)$", target)
                         if len(inst) == 1:
                             inst = (inst[0][0], ("t", int(inst[0][1])))
@@ -419,10 +419,10 @@ class SimulatedTeacher:
                             # the subassembly by either the umbrella term
                             # 'subassembly' or the substructure name, depending
                             # on the player type.
-                            if self.player_type == "label":
-                                target_label = "the subassembly"
-                            else:
+                            if self.player_type == "full":
                                 target_label = f"the {target}"
+                            else:
+                                target_label = "the subassembly"
                             act_dscr.append({
                                 "utterance": f"Pick up {target_label}.",
                                 "pointing": {}
@@ -480,7 +480,7 @@ class SimulatedTeacher:
                     act_str += f"({subassembly},{target_l},{target_r},{num_components})"
                     act_anno = { "utterance": act_str, "pointing": {} }
 
-                    if self.player_type in ["label", "full"]:
+                    if self.player_type in ["label", "infer", "full"]:
                         # Linguistic annotation; part (super)type with indefinite
                         # article designates the atomic part category required in
                         # the target structure
@@ -615,10 +615,10 @@ class SimulatedTeacher:
                         response.append((
                             "generate", { "utterance": "Stop.", "pointing": {} }
                         ))
-                        if self.player_type in ["bool", "demo"]:
+                        if self.player_type in ["minimal", "demo"]:
                             # Languageless player types; do not (cannot, as a matter of fact)
                             # inquire the intent of the undone pick up action
-                            if self.player_type == "bool":
+                            if self.player_type == "minimal":
                                 # Minimal help; no additional learning signal than the fact
                                 # that the undone pick-up action is invalid
                                 self.ongoing_demonstration = ("frag", [])
@@ -689,7 +689,7 @@ class SimulatedTeacher:
                         else:
                             # Languageful player types; directly inquire the intent
                             # of the undone pick-up action
-                            assert self.player_type in ["label", "full"]
+                            assert self.player_type in ["label", "infer", "full"]
                             response += [
                                 ("generate", {
                                     "utterance": "What were you trying to join?",
@@ -780,7 +780,7 @@ class SimulatedTeacher:
                                 )
                             })
                         ]
-                        if self.player_type == "bool":
+                        if self.player_type == "minimal":
                             # Minimal help; no additional learning signal than the fact
                             # that the undone pick-up action is invalid
                             self.ongoing_demonstration = ("frag", [])
@@ -798,7 +798,7 @@ class SimulatedTeacher:
                         else:
                             # Languageful player types; directly inquire the intent
                             # of the undone pick-up action
-                            assert self.player_type in ["label", "full"]
+                            assert self.player_type in ["label", "infer", "full"]
                             response += [
                                 ("generate", {
                                     "utterance": "What were you trying to join?",
@@ -975,9 +975,8 @@ class SimulatedTeacher:
                         ]
                     if ref_inst[1][0] == "d" and ref_inst[0] == reported_supertype:
                         # Grounding is (somewhat) correct but picked up a distractor;
-                        # correct by means of contrastive labeling (languageful - label
-                        # only) and directly providing the violated constraint (languageful
-                        # - full semantics)
+                        # contrastive correction (label / infer) or explicit constraint
+                        # utterance (full)
 
                         # First retrieve the legitimate ground truth part instance
                         # of the same category that ought to be used instead

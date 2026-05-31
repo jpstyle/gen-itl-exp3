@@ -115,23 +115,25 @@ def main(cfg):
 
     all_player_types = set.union(*collected_configs.values())
     for seed, player_types in collected_configs.items():
-        if len(player_types) < 4:
+        if len(player_types) < 5:
             missing = all_player_types - player_types
             missing = ",".join(missing)
             logger.info(f"Missing data from: seed={seed}, player_type=[{missing}]")
 
     # Pre-defined ordering for listing legends
-    config_ord = ["bool", "demo", "label", "full"]
+    config_ord = ["minimal", "demo", "label", "infer", "full"]
     config_aliases = {
-        "bool": "Languageless-Minimal",
+        "minimal": "Languageless-Minimal",
         "demo": "Languageless-Helpful",
         "label": "Languageful-Labeling",
+        "infer": "Languageful-Infer",
         "full": "Languageful-Semantic"
     }   # To be actually displayed in legend
     config_colors = {
-        "bool": "tab:red",
+        "minimal": "tab:red",
         "demo": "tab:orange",
-        "label": "tab:green",
+        "label": "tab:olive",
+        "infer": "tab:green",
         "full": "tab:blue"
     }
     data_titles = {

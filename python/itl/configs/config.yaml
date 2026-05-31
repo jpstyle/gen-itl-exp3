@@ -19,8 +19,8 @@ vision:
 exp:
     task: "build_truck_supertype"
         # Options: "build_truck_supertype", "build_truck_subtype", "inject_color"
-    player_type: "label"
-        # Options: "bool", "demo", "label", "full"
+    player_type: "infer"
+        # Options: "minimal", "demo", "label", "infer", "full"
     num_episodes: 40
 
 seed: 42

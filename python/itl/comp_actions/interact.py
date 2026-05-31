@@ -719,13 +719,13 @@ def _plan_assembly(agent, build_target):
     else:
         # Extracted mapping from string part names to agent's internal concept
         # denotations
-        if agent.cfg.exp.player_type in ["bool", "demo"]:
+        if agent.cfg.exp.player_type in ["minimal", "demo"]:
             # While agent and user doesn't have shared vocab, agent has been 
             # injected with a codesheet of correspondence between part concept
             # and string identifier used in Unity
             part_names = agent.lt_mem.lexicon.codesheet
         else:
-            assert agent.cfg.exp.player_type in ["label", "full"]
+            assert agent.cfg.exp.player_type in ["label", "infer", "full"]
             part_names = {
                 d[1]: s[0][1] for d, s in agent.lt_mem.lexicon.d2s.items()
                 if d[0]=="pcls"
@@ -2739,10 +2739,10 @@ def _execute_pick_up(agent, action_name, action_params):
             # Whether the agent has estimated the type of the target object
             # is important
             estim_type = exec_state["recognitions"][target]
-            if agent.cfg.exp.player_type in ["bool", "demo"]:
+            if agent.cfg.exp.player_type in ["minimal", "demo"]:
                 estim_type = agent.lt_mem.lexicon.codesheet[estim_type]
             else:
-                assert agent.cfg.exp.player_type in ["label", "full"]
+                assert agent.cfg.exp.player_type in ["label", "infer", "full"]
                 estim_type = agent.lt_mem.lexicon.d2s[("pcls", estim_type)][0][1]
         agent_action = [
             (action_name, {
@@ -2781,7 +2781,7 @@ def _execute_pick_up(agent, action_name, action_params):
         # Target concept, as recognized (estimation might be incorrect)
         target_conc = exec_state["recognitions"][target]
 
-        if agent.cfg.exp.player_type in ["bool", "demo"]:
+        if agent.cfg.exp.player_type in ["minimal", "demo"]:
             # Language-less agents do not share vocabulary referring to parts
             # and thus need to report inability to proceed. Agent reports
             # it was not able to find a part needed for finishing the task,
@@ -2819,7 +2819,7 @@ def _execute_pick_up(agent, action_name, action_params):
         else:
             # Language-conversant agents can inquire the agent whether there
             # exists an instance of a part they need
-            assert agent.cfg.exp.player_type in ["label", "full"]
+            assert agent.cfg.exp.player_type in ["label", "infer", "full"]
 
             # NL symbol for the needed part
             target_sym = agent.lt_mem.lexicon.d2s[("pcls", target_conc)][0][1]
@@ -3197,7 +3197,7 @@ def handle_action_effect(agent, effect, actor):
         exec_state["manipulator_states"][manip_ind] = (None, None, None)
 
         if actor == "Teacher":
-            if agent.cfg.exp.player_type in ["bool", "demo"]:
+            if agent.cfg.exp.player_type in ["minimal", "demo"]:
                 # First drop after teacher's interruption (by "Stop.") signals
                 # agent's previous action is undone. In case of drop actions,
                 # need to explicitly check if it is an undoing action of the
@@ -3407,7 +3407,7 @@ def handle_action_effect(agent, effect, actor):
             (action_type, disassemble_params, actor)
         )
 
-        if agent.cfg.exp.player_type in ["bool", "demo"]:
+        if agent.cfg.exp.player_type in ["minimal", "demo"]:
             (atomic_left, atomic_right), _ = _last_intended_join(agent)
             rcgn_left = exec_state["recognitions"][atomic_left]
             rcgn_right = exec_state["recognitions"][atomic_right]

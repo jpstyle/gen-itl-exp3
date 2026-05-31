@@ -332,7 +332,7 @@ def main(cfg):
                                     else:
                                         # Tracking part type classification accuracy scores
                                         get_label = lambda c: agent.lt_mem.lexicon.codesheet.get(c) \
-                                            if cfg.exp.player_type in ["bool", "demo"] \
+                                            if cfg.exp.player_type in ["minimal", "demo"] \
                                             else agent.lt_mem.lexicon.d2s[("pcls", c)][0][1]
                                         for obj in agent.vision.scene.values():
                                             scores = obj["pred_cls"].copy()

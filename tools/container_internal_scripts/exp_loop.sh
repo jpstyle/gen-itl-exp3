@@ -1,6 +1,6 @@
 #!/bin/bash
 export PYTHONHASHSEED=42
-player_types=( bool demo label full )
+player_types=( minimal demo label infer full )
 
 for ((seed=$1;seed<=$2;seed++))
 do
