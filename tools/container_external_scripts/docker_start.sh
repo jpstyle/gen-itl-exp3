@@ -19,10 +19,27 @@ for filename in $(find "${ICD_SEARCH_LOCATIONS[@]}" -name "*nvidia*.json" 2> /de
     ICD_MOUNTS+=( --volume "${filename}":"${filename}":ro )
 done
 
+# Bind-mount NVIDIA user-space libraries from the host so they match the driver
+# (e.g. 595.71). ICD JSON alone is not enough — libGLX_nvidia needs matching
+# libnvidia-gpucomp.so.*. Do not mount /usr/lib/wsl/lib (often older builds).
+NVIDIA_LIB_DIRS=(
+    /lib/x86_64-linux-gnu
+    /usr/lib/x86_64-linux-gnu
+)
+LIB_MOUNTS=( )
+for dir in "${NVIDIA_LIB_DIRS[@]}"; do
+    [[ -d "$dir" ]] || continue
+    for f in "$dir"/libnvidia*.so* "$dir"/libGLX_nvidia*.so*; do
+        [[ -e "$f" ]] || continue
+        LIB_MOUNTS+=( --volume "${f}":"${f}":ro )
+    done
+done
+
 # Uncomment to debug only with virtual display
 docker run -d --name $1 --gpus "device=$2" \
     --volume $3:/mnt/data_volume \
     ${ICD_MOUNTS[@]} \
+    ${LIB_MOUNTS[@]} \
     jpstyle92/semantic-assembler "${@:4}"
 
 # Uncomment to debug with local (linux) machine display
