@@ -62,7 +62,10 @@ def reconstruct_with_known_poses(
     reconstruction_template = pycolmap.Reconstruction(colmap_in_path)
 
     # Initialize a SQL database, populate with cameras, images and keypoints info
-    colmap_db = COLMAPDatabase(os.path.join(colmap_in_path, "database.db"))
+    db_path = os.path.join(colmap_in_path, "database.db")
+    image_path = os.path.join(colmap_in_path, "images")
+
+    colmap_db = COLMAPDatabase.connect(db_path)
     colmap_db.create_tables()
     for cam in reconstruction_template.cameras.values():
         colmap_db.add_camera(
@@ -108,13 +111,14 @@ def reconstruct_with_known_poses(
         )
 
     colmap_db.commit()
+    colmap_db.close()
 
     # Final step: point triangulation
     reconstruction = pycolmap.triangulate_points(
         reconstruction_template,
-        os.path.join(colmap_in_path, "database.db"),
-        os.path.join(colmap_in_path, "images"),
-        colmap_out_path
+        str(pathlib.Path(db_path).resolve()),
+        str(pathlib.Path(image_path).resolve()),
+        str(pathlib.Path(colmap_out_path).resolve())
     )
 
     return reconstruction, db2n_map

@@ -6,7 +6,7 @@ scipy
 scikit-image
 matplotlib
 pycocotools
-pycolmap
+pycolmap==3.10.0
 open3d
 hydra-core
 omegaconf
