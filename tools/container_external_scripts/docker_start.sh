@@ -79,28 +79,41 @@ regenerate_cdi_spec() {
 }
 
 cdi_incompatible_hint() {
-    log "${RUNTIME} cannot parse NVIDIA CDI spec (additionalGids field)."
-    log "One-time host fix:"
+    log "${RUNTIME} cannot parse the host NVIDIA CDI spec (additionalGids; Podman < 5.1)."
+    log 'Fix (re-run after driver/toolkit updates if CDI breaks again):'
     log "  sudo nvidia-ctk cdi generate --feature-flag=${CDI_COMPAT_FLAG} --output=/var/run/cdi/nvidia.yaml"
-}
-
-ensure_cdi_spec_compatible() {
-    cdi_spec_has_additional_gids || return 0
-    if [[ "${EUID_VAL}" -eq 0 ]]; then
-        log "regenerating Podman-compatible CDI spec at /var/run/cdi/nvidia.yaml"
-        regenerate_cdi_spec
-        return 0
-    fi
-    cdi_incompatible_hint
-    exit 1
+    local f
+    for f in "${CDI_SPEC_PATHS[@]}"; do
+        [[ -r "$f" ]] && grep -q 'additionalGids' "$f" \
+            && log "  (still incompatible: ${f})"
+    done
 }
 
 cdi_probe() {
-  "${RUNTIME}" run --rm \
-    --device "${CDI_DEVICE}" \
-    --security-opt=label=disable \
-    "${CDI_PROBE_IMAGE}" \
-    true &>/dev/null
+    "${RUNTIME}" run --rm \
+        --device "${CDI_DEVICE}" \
+        --security-opt=label=disable \
+        "${CDI_PROBE_IMAGE}" \
+        true &>/dev/null
+}
+
+# Prefer a live probe over grepping specs (toolkit may rewrite /var/run/cdi on boot).
+try_cdi_backend() {
+    if cdi_probe; then
+        GPU_BACKEND=cdi
+        return 0
+    fi
+    if cdi_spec_has_additional_gids \
+        && [[ "${EUID_VAL}" -eq 0 ]] \
+        && command -v nvidia-ctk >/dev/null 2>&1; then
+        log 'CDI probe failed; regenerating compatible spec at /var/run/cdi/nvidia.yaml'
+        regenerate_cdi_spec
+        if cdi_probe; then
+            GPU_BACKEND=cdi
+            return 0
+        fi
+    fi
+    return 1
 }
 
 collect_driver_mounts() {
@@ -141,12 +154,13 @@ select_gpu_backend() {
 
     case "${GPU_MODE}" in
         cdi|auto)
-            ensure_cdi_spec_compatible
-            if cdi_probe; then
-                GPU_BACKEND=cdi
+            if try_cdi_backend; then
                 return
             fi
-            [[ "${GPU_MODE}" == cdi ]] && die "CDI device ${CDI_DEVICE} not available"
+            if [[ "${GPU_MODE}" == cdi ]]; then
+                cdi_spec_has_additional_gids && cdi_incompatible_hint
+                die "CDI device ${CDI_DEVICE} not available"
+            fi
             ;;
         privileged)
             collect_driver_mounts
@@ -178,7 +192,9 @@ select_gpu_backend() {
     fi
 
     log 'CDI probe failed.'
-    cdi_incompatible_hint
+    if cdi_spec_has_additional_gids; then
+        cdi_incompatible_hint
+    fi
     log "Or: GPU_MODE=privileged sudo bash ${SCRIPT_NAME} ${CONTAINER_NAME} ${GPU_INDEX} ${DATA_VOLUME} ..."
     exit 1
 }
